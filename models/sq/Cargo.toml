@@ -1,0 +1,14 @@
+[package]
+name = "sq"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+engine = { path = "../../engine" }
+search = { path = "../../search" }
+match = { path = "../../match" }
+anyhow.workspace = true
+ort.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true

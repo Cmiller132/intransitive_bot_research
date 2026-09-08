@@ -1,0 +1,17 @@
+[package]
+name = "cli"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "bot"
+path = "src/main.rs"
+
+[dependencies]
+engine = { path = "../engine" }
+match = { path = "../match" }
+sq = { path = "../models/sq" }
+anyhow.workspace = true
+clap.workspace = true
+rand.workspace = true
+serde_json.workspace = true

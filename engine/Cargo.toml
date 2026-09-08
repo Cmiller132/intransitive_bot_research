@@ -1,0 +1,14 @@
+[package]
+name = "engine"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "engine"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py312"], optional = true }
+
+[features]
+python = ["dep:pyo3"]

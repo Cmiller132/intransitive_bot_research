@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# `bot` on Linux loads libonnxruntime from its own directory (cargo xtask linux).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]

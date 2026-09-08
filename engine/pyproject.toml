@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "engine"
+version = "0.1.0"
+description = "Python binding of the Intransitive rules engine, for kernel tests"
+requires-python = ">=3.11"
+
+[tool.maturin]
+features = ["python"]
+module-name = "engine"

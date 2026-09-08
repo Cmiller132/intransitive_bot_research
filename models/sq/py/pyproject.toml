@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sq"
+version = "0.1.0"
+description = "Training package for the sq model: network, GPU self-play search, replay, export"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.8",
+    "triton>=3.4; sys_platform != 'win32'",
+    "triton-windows>=3.4; sys_platform == 'win32'",
+    "numpy",
+    "onnx",
+    "onnxruntime",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "maturin>=1.5"]
+
+[tool.setuptools.packages.find]
+include = ["sq*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
