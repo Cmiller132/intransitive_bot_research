@@ -81,9 +81,9 @@ deliberate.
 ## Documentation
 
 Exactly these documents exist: this file, Agents.md, a workspace README, one
-game-rules document, one README per crate, package and top-level directory
-stating its purpose and interface, and one DESIGN.md per model holding its
-numbered design items.
+game-rules document, the bot architecture specification (docs/), one README
+per crate, package and top-level directory stating its purpose and interface,
+and one DESIGN.md per model holding its numbered design items.
 There is no results log, no proposals folder and no history.
 Measured results live with their run artifacts and in commit messages.
 

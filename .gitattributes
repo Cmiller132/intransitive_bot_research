@@ -2,3 +2,4 @@
 *.pt binary
 *.onnx binary
 *.png binary
+*.pdf binary
