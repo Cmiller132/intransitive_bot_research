@@ -41,10 +41,7 @@ class Search:
 
 @dataclass
 class Rules:
-    clock_start: int = 100
-    clock_end: int = 50
-    clock_iters: int = 50
-    clock_from_iter: int = 0
+    capture_clock: int = 75
     clock_penalty: float = 0.05
     max_plies: int = 1000
 

@@ -9,7 +9,7 @@ import torch
 from sq.config import Config, Learn, Net, Search
 from sq.model import SqNet, build, load_checkpoint, save_checkpoint
 from sq.replay import Replay, build_window, lambda_returns, plies_to_end
-from sq.train import Actor, Learner, acting, capture_clock_at, conversion_metrics
+from sq.train import Actor, Learner, acting, conversion_metrics
 
 # TRITON_INTERPRET=1 in the environment runs everything on the CPU.
 DEVICE = "cpu" if os.environ.get("TRITON_INTERPRET") == "1" else "cuda"
@@ -65,7 +65,6 @@ def test_collection_labels_learner_step_and_checkpoint(tmp_path):
     ema.load_state_dict(net.state_dict())
     ema.eval()
     actor = Actor(cfg, DEVICE)
-    actor.set_capture_clock(capture_clock_at(cfg, 0))
     forward = acting(ema)
     with torch.no_grad():
         rollout = actor.collect(forward)
@@ -113,3 +112,17 @@ def test_export_matches_torch(tmp_path):
     assert meta["atoms"] == cfg.net.atoms and os.path.exists(out + ".json")
     deltas = check(path, out, "ema", positions=8)
     assert max(deltas.values()) < 2e-3
+
+
+def test_append_row_widens_header(tmp_path):
+    import csv
+
+    from sq.train import append_row
+
+    path = str(tmp_path / "log.csv")
+    append_row(path, {"iter": 0, "a": 1.0})
+    append_row(path, {"iter": 1, "a": 2.0, "b": 3})
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [list(r.values()) for r in rows] == [["0", "1.0", ""], ["1", "2.0", "3"]]
+    assert list(rows[0]) == ["iter", "a", "b"]

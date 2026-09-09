@@ -289,5 +289,6 @@ class Replay:
                 for start in range(0, size, self.batch):
                     idx = perm[start : start + self.batch]
                     if len(idx) < self.batch:
-                        idx = torch.cat([idx, perm[: self.batch - len(idx)]])
+                        short = self.batch - len(idx)
+                        idx = torch.cat([idx, perm.repeat(short // size + 1)[:short]])
                     yield window, idx

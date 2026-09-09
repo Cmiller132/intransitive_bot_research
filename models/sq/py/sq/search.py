@@ -140,101 +140,8 @@ def backup_kernel(COUNT, TOTAL, PN, PA, LENGTH, VALUE, B: tl.constexpr, A: tl.co
         action = tl.load(PA + depth * B + row)
         address = (node * B + row) * A + action
         value = -value
-        tl.store(COUNT + address, tl.load(COUNT + address) + 1)
+        tl.store(COUNT + address, (tl.load(COUNT + address) + 1).to(COUNT.dtype.element_ty))
         tl.store(TOTAL + address, tl.load(TOTAL + address) + value)
-
-
-@triton.jit
-def compact_kernel(
-    BOARDS,
-    SINCE,
-    PLY,
-    PRIOR,
-    Q,
-    LEGAL,
-    EXACT,
-    COUNT,
-    TOTAL,
-    CHILD,
-    TERM,
-    VALUE,
-    HASH,
-    ACTION,
-    DONE,
-    CURRENT,
-    CURRENT_SINCE,
-    CURRENT_PLY,
-    LIVE,
-    MAP,
-    NODES,
-    KEPT,
-    B: tl.constexpr,
-    C: tl.constexpr,
-    A: tl.constexpr,
-    R: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """Re-root one tree on the played child: the reachable nodes, at most R of
-    them in id order, are renumbered in place; everything else is cleared.
-    Parents always have smaller ids than their children, so copying in id
-    order never overwrites an unread source."""
-    row = tl.program_id(0)
-    x = tl.arange(0, BLOCK)
-    for node in range(C):
-        tl.store(MAP + node * B + row, -1)
-    action = tl.load(ACTION + row)
-    root = tl.load(CHILD + row * A + action).to(tl.int32)
-    safe_root = tl.maximum(root, 0)
-    old_board = tl.load(BOARDS + (safe_root * B + row) * 81 + x, x < 81, 0)
-    new_board = tl.load(CURRENT + row * 81 + x, x < 81, 0)
-    valid = (root >= 0) & ~tl.load(DONE + row) & tl.load(LIVE + row)
-    valid = valid & ~tl.load(TERM + safe_root * B + row)
-    valid = valid & (tl.sum((old_board != new_board).to(tl.int32), 0) == 0)
-    valid = valid & (tl.load(SINCE + safe_root * B + row) == tl.load(CURRENT_SINCE + row))
-    valid = valid & (tl.load(PLY + safe_root * B + row) == tl.load(CURRENT_PLY + row))
-    if valid:
-        tl.store(MAP + root * B + row, -2)
-    tl.debug_barrier()
-    size = tl.full((), 0, tl.int32)
-    for node in range(C):
-        state = tl.load(MAP + node * B + row)
-        if state == -2:
-            if size < R:
-                tl.store(MAP + node * B + row, size)
-                size += 1
-                child = tl.load(CHILD + (node * B + row) * A + x, x < A, -1).to(tl.int32)
-                tl.store(MAP + child * B + row, -2, (x < A) & (child >= 0))
-        tl.debug_barrier()
-    for node in range(C):
-        dest = tl.load(MAP + node * B + row)
-        if dest >= 0:
-            src = (node * B + row) * A + x
-            dst = (dest * B + row) * A + x
-            tl.store(PRIOR + dst, tl.load(PRIOR + src, x < A, 0.0), x < A)
-            tl.store(Q + dst, tl.load(Q + src, x < A, 0.0), x < A)
-            tl.store(LEGAL + dst, tl.load(LEGAL + src, x < A, 0), x < A)
-            tl.store(EXACT + dst, tl.load(EXACT + src, x < A, 0), x < A)
-            tl.store(COUNT + dst, tl.load(COUNT + src, x < A, 0), x < A)
-            tl.store(TOTAL + dst, tl.load(TOTAL + src, x < A, 0.0), x < A)
-            child = tl.load(CHILD + src, x < A, -1).to(tl.int32)
-            mapped = tl.load(MAP + child * B + row, (x < A) & (child >= 0), -1)
-            tl.store(CHILD + dst, tl.maximum(mapped, -1), x < A)
-            tl.store(BOARDS + (dest * B + row) * 81 + x, tl.load(BOARDS + (node * B + row) * 81 + x, x < 81, 0), x < 81)
-            tl.store(SINCE + dest * B + row, tl.load(SINCE + node * B + row))
-            tl.store(PLY + dest * B + row, tl.load(PLY + node * B + row))
-            tl.store(TERM + dest * B + row, tl.load(TERM + node * B + row))
-            tl.store(VALUE + dest * B + row, tl.load(VALUE + node * B + row))
-            tl.store(HASH + dest * B + row, tl.load(HASH + node * B + row))
-        tl.debug_barrier()
-    for node in range(C):
-        if node >= size:
-            edge = (node * B + row) * A + x
-            tl.store(COUNT + edge, 0, x < A)
-            tl.store(TOTAL + edge, 0.0, x < A)
-            tl.store(CHILD + edge, -1, x < A)
-            tl.store(TERM + node * B + row, False)
-    tl.store(NODES + row, tl.maximum(size, 1))
-    tl.store(KEPT + row, valid)
 
 
 class PositionHasher:
@@ -337,12 +244,15 @@ class GumbelSearch:
         self.net_q = torch.zeros(C, n, N_ACTIONS, dtype=torch.bfloat16, device=d)
         self.legal = torch.zeros(C, n, N_ACTIONS, dtype=torch.bool, device=d)
         self.exact = torch.zeros(C, n, N_ACTIONS, dtype=torch.bool, device=d)
-        self.count = torch.zeros(C, n, N_ACTIONS, dtype=torch.int32, device=d)
+        # A node outlives at most `reuse_nodes` moves of `sims` visits each, so an edge's
+        # count stays far below the int16 limit.
+        self.count = torch.zeros(C, n, N_ACTIONS, dtype=torch.int16, device=d)
         self.total = torch.zeros(C, n, N_ACTIONS, dtype=torch.float32, device=d)
         self.child = torch.full((C, n, N_ACTIONS), -1, dtype=torch.int16, device=d)
         self.terminal = torch.zeros(C, n, dtype=torch.bool, device=d)
         self.value = torch.zeros(C, n, dtype=torch.float32, device=d)
         self.hash = torch.zeros(C, n, dtype=torch.int64, device=d)
+        self.parent = torch.full((C, n), -1, dtype=torch.int16, device=d)
         self.root_q = torch.zeros(n, N_ACTIONS, dtype=torch.float32, device=d)
         # Per-simulation scratch.
         self.path_node = torch.zeros(C, n, dtype=torch.int32, device=d)
@@ -365,7 +275,6 @@ class GumbelSearch:
         self.schedule = torch.zeros(n, sims, 2, dtype=torch.long, device=d)
         self.sim_index = torch.zeros((), dtype=torch.long, device=d)
         # Reuse.
-        self.mapping = torch.zeros(C, n, dtype=torch.int32, device=d)
         self.kept = torch.zeros(n, dtype=torch.bool, device=d)
         self.played_action = torch.zeros(n, dtype=torch.long, device=d)
         self.played_done = torch.ones(n, dtype=torch.bool, device=d)
@@ -414,39 +323,77 @@ class GumbelSearch:
             m = mask.view(-1, *([1] * (value.ndim - 1)))
             arena[ids, rows] = torch.where(m, value.to(arena.dtype), old)
 
+    def _compact(self, board, since, ply) -> None:
+        """Re-root every tree on its played child. The child's subtree is kept when
+        the child exists, is not terminal and holds the board now in play: its
+        nodes, at most `reuse_nodes` of them in id order, move to the lowest ids
+        with their visits, values and links; every other node is cleared.
+        Membership follows the parent links by pointer jumping, a few passes
+        over the (node, board) grid; parents have smaller ids than their
+        children, so the id-order cap never keeps a child without its parent."""
+        n, C, R, rows = self.n, self.capacity, self.cfg.reuse_nodes, self.rows
+        d = self.device
+        root = self.child[0, rows, self.played_action].long()
+        safe = root.clamp_min(0)
+        valid = (root >= 0) & ~self.played_done & self.live & ~self.terminal[safe, rows]
+        valid &= (self.boards[safe, rows] == board).all(-1)
+        valid &= (self.since[safe, rows] == since) & (self.plies[safe, rows] == ply)
+        ids = torch.arange(C, device=d)[:, None]
+        parent = self.parent.long()
+        anc = torch.where(parent >= 0, parent, ids.expand(C, n))
+        kept = (ids == root[None]) & valid[None]
+        for _ in range(max(1, math.ceil(math.log2(C)))):
+            kept = kept | kept.gather(0, anc)
+            anc = anc.gather(0, anc)
+        kept &= ids < self.node_count[None].long()
+        rank = kept.long().cumsum(0) - 1
+        take = kept & (rank < R)
+        dest = torch.where(take, rank, -1)
+        size = take.sum(0)
+        # Source node of every destination slot, -1 when the slot stays empty.
+        source = torch.full((R * n + 1,), -1, dtype=torch.long, device=d)
+        slot = torch.where(take, dest * n + rows[None], R * n)
+        source.scatter_(0, slot.view(-1), ids.expand(C, n).reshape(-1))
+        source = source[: R * n].view(R, n)
+        src = source.clamp_min(0)
+        rows_r = rows[None].expand(R, n)
+        fields = (
+            "boards",
+            "since",
+            "plies",
+            "prior",
+            "net_q",
+            "legal",
+            "exact",
+            "count",
+            "total",
+            "terminal",
+            "value",
+            "hash",
+        )
+        for name in fields:
+            arena = getattr(self, name)
+            arena[:R] = arena[src, rows_r]
+        # Links go through a flat (node, board) -> new id table with a spare slot for -1.
+        table = torch.cat([dest.to(torch.int16).view(-1), torch.full((1,), -1, dtype=torch.int16, device=d)])
+        rows_i = rows.int()
+        moved = self.parent[src, rows_r].int()
+        self.parent[:R] = table[torch.where(moved >= 0, moved * n + rows_i[None], C * n)]
+        kids = self.child[src, rows_r].int()
+        self.child[:R] = table[torch.where(kids >= 0, kids * n + rows_i[None, :, None], C * n)]
+        dead = ids >= size[None]
+        self.count.masked_fill_(dead[..., None], 0)
+        self.total.masked_fill_(dead[..., None], 0.0)
+        self.child.masked_fill_(dead[..., None], -1)
+        self.terminal.masked_fill_(dead, False)
+        self.node_count.copy_(size.clamp_min(1).to(self.node_count.dtype))
+        self.kept.copy_(valid)
+
     def _start(self, board, since, ply, legal, logits, q, gumbels, mode: str) -> None:
         root = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.live.copy_(legal.any(-1))
         if self.pending:
-            compact_kernel[(self.n,)](
-                self.boards,
-                self.since,
-                self.plies,
-                self.prior,
-                self.net_q,
-                self.legal,
-                self.exact,
-                self.count,
-                self.total,
-                self.child,
-                self.terminal,
-                self.value,
-                self.hash,
-                self.played_action,
-                self.played_done,
-                board,
-                since,
-                ply,
-                self.live,
-                self.mapping,
-                self.node_count,
-                self.kept,
-                self.n,
-                self.capacity,
-                N_ACTIONS,
-                self.cfg.reuse_nodes,
-                BLOCK_A,
-            )
+            self._compact(board, since, ply)
         else:
             self.count.zero_()
             self.total.zero_()
@@ -471,6 +418,7 @@ class GumbelSearch:
         self.terminal[0].zero_()
         self.value[0].copy_(torch.where(exact.any(-1), 1.0, (pi * q.float()).sum(-1)))
         self.hash[0].copy_(self.hasher(board, ply))
+        self.parent[0].fill_(-1)
         temperature = torch.where(ply < self.cfg.temperature_plies, self.cfg.temperature, 1.0)
         self.score0.copy_((logp + temperature[:, None] * gumbels).masked_fill(~legal, -torch.inf))
         admission = self.score0.masked_fill(exact, torch.inf)
@@ -565,6 +513,7 @@ class GumbelSearch:
             terminal=terminal,
             value=value,
             hash=leaf_hash,
+            parent=fn,
         )
         self.node_count.add_(cached.int())
         link = self.child[fn, rows, self.frontier_action.long()]

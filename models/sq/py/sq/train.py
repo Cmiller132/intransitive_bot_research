@@ -29,16 +29,6 @@ from .replay import Replay, Rollout, Window, build_window
 from .search import GumbelSearch, RepetitionHistory, raw_policy
 
 
-def capture_clock_at(cfg: Config, iteration: int) -> int:
-    """Linear ramp from the start clock to the end clock over `clock_iters`
-    iterations from `clock_from_iter`, then held."""
-    r = cfg.rules
-    if r.clock_iters <= 0:
-        return r.clock_end
-    fraction = min(1.0, max(0.0, (iteration - r.clock_from_iter) / r.clock_iters))
-    return round(r.clock_start + (r.clock_end - r.clock_start) * fraction)
-
-
 def conversion_metrics(rollout: Rollout) -> dict:
     """How collected games end: outright wins against artificial endings, and lengths."""
     reason, ply = rollout.end_reason, rollout.ply.float() + 1.0
@@ -73,7 +63,17 @@ def compile_net(net: SqNet, cfg: Config):
 
     inductor_config.layout_optimization = False
     functorch_config.backward_pass_autocast = "off"
-    return torch.compile(net)
+    # Each block is compiled on its own. In one whole-network graph Inductor hoists every
+    # block's recomputation to the start of the backward pass and the memory saving of
+    # `Block.recompute` is lost; per block, autograd recomputes one block at a time.
+    # The actor (envs boards) and the learner (batch rows) compile the same code; left
+    # to itself, dynamo answers the second batch size with one symbolic-batch graph that
+    # both sides then run, so shapes are pinned static.
+    for block in [*net.blocks, net.q_block]:
+        block.forward = torch.compile(block.forward, dynamic=False)
+    net.embed = torch.compile(net.embed, dynamic=False)
+    net.heads = torch.compile(net.heads, dynamic=False)
+    return net
 
 
 class Actor:
@@ -84,9 +84,9 @@ class Actor:
         self.cfg = cfg
         self.device = torch.device(device)
         n = cfg.learn.envs
-        self.capture_clock = torch.tensor(cfg.rules.clock_start, dtype=torch.int32, device=device)
+        self.capture_clock = torch.tensor(cfg.rules.capture_clock, dtype=torch.int32, device=device)
         self.env = Env(n, device, cfg.rules.max_plies, self.capture_clock)
-        self.history = RepetitionHistory(n, max(cfg.rules.clock_start, cfg.rules.clock_end), device)
+        self.history = RepetitionHistory(n, cfg.rules.capture_clock, device)
         self.history.reset(self.env.board, self.env.ply)
         self.search = GumbelSearch(
             cfg.search,
@@ -100,9 +100,6 @@ class Actor:
         )
         self.rollout = Rollout.allocate(cfg.learn.steps, n, cfg.search.candidates, device)
         self.mode_rng = torch.Generator().manual_seed(cfg.seed + 2)
-
-    def set_capture_clock(self, plies: int) -> None:
-        self.capture_clock.fill_(plies)
 
     @torch.no_grad()
     def collect(self, forward) -> Rollout:
@@ -174,7 +171,9 @@ def optimizer_state(opt, net: SqNet) -> dict:
 def load_optimizer_state(opt, net: SqNet, state: dict, device) -> None:
     params = list(net.parameters())
     for i, entry in state["state"].items():
-        opt.state[params[int(i)]] = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in entry.items()}
+        opt.state[params[int(i)]] = {
+            k: v.to(device).contiguous() if isinstance(v, torch.Tensor) else v for k, v in entry.items()
+        }
 
 
 class Learner:
@@ -211,6 +210,8 @@ class Learner:
             capturable=cuda and cfg.learn.graphs,
         )
         self.forward = compile_net(net, cfg)
+        # Eager steps before a graph capture run on a side stream, as the capture will.
+        self.side = torch.cuda.Stream() if cuda and cfg.learn.graphs else None
         self.augment = Augment(device)
         self.tte_edges = torch.tensor(TTE_EDGES, dtype=torch.int32, device=device)
         self.ema_params = list(ema.parameters())
@@ -250,12 +251,17 @@ class Learner:
             if k not in ("flip", "cycle")
         }
         self.sums = torch.zeros(len(self.METRICS), device=device)
+        # Marks the end of a batch's host-to-device copies; the pinned buffers are rewritten
+        # only after it, or a batch still queued behind the GPU would read the next one.
+        self.copied = torch.cuda.Event() if cuda else None
         self.graph = None
         self.eager_steps = 0
         self.aug_rng = torch.Generator(device=device).manual_seed(cfg.seed + 3)
 
     def stage(self, window: Window, idx: torch.Tensor) -> None:
         """Gather one batch of window rows into the static device inputs."""
+        if self.copied is not None:
+            self.copied.synchronize()
         for name in self.host:
             source = (
                 window.occupancy(idx, self.cfg.learn.occupancy_horizon)
@@ -264,6 +270,8 @@ class Learner:
             )
             self.host[name].copy_(source)
             self.st[name].copy_(self.host[name], non_blocking=True)
+        if self.copied is not None:
+            self.copied.record()
         self.st["flip"].copy_(torch.rand(self.cfg.learn.batch, generator=self.aug_rng, device=self.device) < 0.5)
         self.st["cycle"].copy_(torch.randint(3, (self.cfg.learn.batch,), generator=self.aug_rng, device=self.device))
 
@@ -365,7 +373,16 @@ class Learner:
             self.graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(self.graph, capture_error_mode="thread_local"):
                 self.step()
+            # The warm-up steps' cached blocks cannot serve the graph's private pool.
+            torch.cuda.empty_cache()
             self.graph.replay()
+        elif self.side is not None:
+            self.opt.zero_grad(set_to_none=True)
+            self.side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.side):
+                self.step()
+            torch.cuda.current_stream().wait_stream(self.side)
+            self.eager_steps += 1
         else:
             self.opt.zero_grad(set_to_none=True)
             self.step()
@@ -386,9 +403,22 @@ class Learner:
 
 
 def append_row(path: str, row: dict) -> None:
+    """Append one row; when the row has columns the file lacks, the file is rewritten
+    with the widened header and blanks in the old rows."""
+    fields = list(row)
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            old_fields, old_rows = list(reader.fieldnames or []), list(reader)
+        if old_fields != fields:
+            fields = old_fields + [k for k in fields if k not in old_fields]
+            with open(path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(old_rows)
     new = not os.path.exists(path)
     with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row))
+        writer = csv.DictWriter(f, fieldnames=fields)
         if new:
             writer.writeheader()
         writer.writerow(row)
@@ -430,7 +460,6 @@ def main(cfg: Config) -> None:
     log_path = os.path.join(run_dir, "log.csv")
     for it in range(start, cfg.iters):
         t0 = time.time()
-        actor.set_capture_clock(capture_clock_at(cfg, it))
         rollout = actor.collect(forward)
         window = build_window(rollout, cfg, it)
         if device.type == "cuda":
@@ -446,11 +475,11 @@ def main(cfg: Config) -> None:
             "t_collect": round(t1 - t0, 2),
             "t_train": round(t2 - t1, 2),
             "steps_per_s": round(cfg.learn.envs * cfg.learn.steps / max(t1 - t0, 1e-6)),
-            "capture_clock": capture_clock_at(cfg, it),
             "replay_positions": replay.positions(),
             **{k: (round(v, 5) if isinstance(v, float) else v) for k, v in stats.items()},
             **{k: (round(v, 5) if isinstance(v, float) else v) for k, v in conversion_metrics(rollout).items()},
             **{k: round(v, 5) for k, v in actor.search.metrics().items()},
+            "gpu_reserved_mb": torch.cuda.memory_reserved() >> 20 if device.type == "cuda" else 0,
         }
         append_row(log_path, row)
         print(f"[it {it}] {row}", flush=True)

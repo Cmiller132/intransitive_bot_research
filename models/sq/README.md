@@ -33,7 +33,7 @@ and maturin; the `engine` wheel comes from `cargo xtask wheel`. On Windows,
 ```
 python -m sq.train   --run <name> [--init weights/sq_g128.pt | --resume runs/<name>/latest.pt] [--iters N] [--<section>.<field> value ...]
 python -m sq.export  --ckpt runs/<name>/latest.pt --out runs/<name>/export.onnx [--weights ema|model]
-python -m sq.convert --old <previous-format.pt> --out weights/sq_g128.pt [--clock-from-iter N]
+python -m sq.convert --old <previous-format.pt> --out weights/sq_g128.pt
 ```
 
 A run is written to `<workspace root>/runs/<name>/` whatever the working
@@ -55,6 +55,25 @@ Export writes `<out>` (input `planes`; outputs `logits`, `q`, `plies_to_end`,
 `draw`) and `<out>.json` (name, checkpoint hash, plane and atom counts, the
 prior temperatures alpha and beta, plies-to-end class centres), then checks
 ONNX Runtime against torch. The Rust side reads both files.
+
+## Training performance notes
+
+- The network is compiled block by block (`train.compile_net`), with static
+  shapes. In training each block keeps only its input for the backward pass
+  and recomputes its activations then (`Block.recompute`), so the learner's
+  saved activations at batch 768 are a few hundred MB instead of several GB;
+  the arithmetic is unchanged.
+- The relation bias is applied inside the attention dot product (DESIGN.md
+  item 4) and never materialised as an 81x81 map per position.
+- The search arena stores visit counts as int16 and re-roots trees with a
+  pointer-jumping pass over the (node, board) grid; a compaction never
+  allocates more than one field's worth of temporaries.
+- The learner stages a batch into pinned buffers and waits on the previous
+  batch's device copies before rewriting them; its optimizer step runs as one
+  CUDA graph after three eager warm-up steps.
+- `log.csv` records `gpu_reserved_mb`, the allocator's reserved device memory
+  at the end of each iteration; it must stay below the card's memory, since
+  Windows spills the excess to system memory instead of failing.
 
 The tests check the kernels against the engine on random positions, the
 search semantics with a tiny network stand-in, one collection and learner

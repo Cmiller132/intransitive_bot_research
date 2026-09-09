@@ -12,6 +12,7 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .config import Config, from_dict, to_dict
 from .config import Net as NetConfig
@@ -24,12 +25,13 @@ N_TTE = len(TTE_EDGES)
 N_OCC = 7
 N_RELATIONS = 8
 RELATION_ADJACENT = 7
+STATE_PAD = 8  # one-hot square states padded to eight columns: the augmented head keeps a multiple of eight
 
 
 class Output(NamedTuple):
     logits: torch.Tensor  # (B, 648)
     q_logits: torch.Tensor  # (B, 648, atoms)
-    q: torch.Tensor  # (B, 648) expectation over atoms, float32
+    q: torch.Tensor  # (B, 648) expectation over atoms, float32; detached in training mode
     occupancy: torch.Tensor | None  # (B, 7, 81)
     plies_to_end: torch.Tensor | None  # (B, 16)
     reply: torch.Tensor | None  # (B, 648)
@@ -102,14 +104,33 @@ class Smolgen(nn.Module):
         return self.out(h).view(b, self.heads, N_SQUARES, N_SQUARES)
 
 
+class Context(NamedTuple):
+    """Per-forward inputs shared by every block."""
+
+    states: torch.Tensor  # (B, 81) square states, 6 = empty
+    onehot: torch.Tensor  # (B, 1, 81, 8) one-hot states, zero-padded, in the stream dtype
+    adjacent: torch.Tensor  # (81, 81)
+    tables: torch.Tensor  # (8, 7, 7) relation truth tables
+    smolgen: Smolgen | None
+
+
 class Block(nn.Module):
     """Pre-norm attention block over the 81 squares: a residual depthwise 3x3
     mix, attention with the positional table, the relation bias and optional
-    Smolgen, then the feed-forward."""
+    Smolgen, then the feed-forward.
+
+    The relation bias `W_h[s_i, s_j]`, `W_h = sum_r relation[h, r] table_r`, is
+    never materialised over square pairs: the query carries the row `W_h[s_i, :]`
+    and the key the one-hot of `s_j`, so the dot product adds it. Only the
+    positional table, the adjacency relation and Smolgen enter as a mask.
+
+    In training the block keeps only its input for the backward pass and
+    recomputes its activations then (`recompute`); the arithmetic is unchanged."""
 
     def __init__(self, cfg: NetConfig, smolgen: bool):
         super().__init__()
         c, self.heads = cfg.width, cfg.heads
+        self.head_dim = c // cfg.heads
         self.mix_norm = nn.LayerNorm(c)
         self.mix = nn.Conv2d(c, c, 3, padding=1, groups=c)
         nn.init.zeros_(self.mix.weight)
@@ -124,45 +145,44 @@ class Block(nn.Module):
         self.relation = nn.Parameter(torch.zeros(cfg.heads, N_RELATIONS))
         self.compress = nn.Linear(c, cfg.smolgen_dim) if smolgen else None
         self.explicit_attention = False
+        self.recompute = True
 
-    def bias(
-        self,
-        states: torch.Tensor,
-        tables: torch.Tensor,
-        adjacent: torch.Tensor,
-        y: torch.Tensor,
-        smolgen: Smolgen | None,
-        dtype,
-    ) -> torch.Tensor:
-        """(B, heads, 81, 81) additive attention bias for this block."""
-        # relation[h, r] folded over the tables gives a (heads, 7, 7) lookup by state pair.
-        pair = torch.einsum("hr,rac->hac", self.relation, tables)
-        bias = pair[:, states[:, :, None], states[:, None, :]].permute(1, 0, 2, 3)
-        bias = bias + self.position[None] + self.relation[:, RELATION_ADJACENT].view(1, -1, 1, 1) * adjacent
-        if self.compress is not None and smolgen is not None:
-            bias = bias + smolgen(self.compress(y))
-        return bias.to(dtype)
+    def relation_matrix(self, ctx: Context, dtype) -> torch.Tensor:
+        """(heads, 8, 8) folded relation matrices `W_h = sum_r relation[h, r] table_r`, scaled
+        by sqrt(head_dim) so that the attention scale cancels; row and column 7 are padding."""
+        w = (self.relation[:, :, None, None] * ctx.tables[None]).sum(1) * self.head_dim**0.5  # (H, 7, 7)
+        return F.pad(w, (0, STATE_PAD - N_STATES, 0, STATE_PAD - N_STATES)).to(dtype)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        states: torch.Tensor,
-        tables: torch.Tensor,
-        adjacent: torch.Tensor,
-        smolgen: Smolgen | None,
-    ) -> torch.Tensor:
+    def mask(self, y: torch.Tensor, ctx: Context, dtype) -> torch.Tensor:
+        """(1, heads, 81, 81) additive attention mask, (B, heads, 81, 81) in Smolgen blocks."""
+        mask = (self.position + self.relation[:, RELATION_ADJACENT].view(-1, 1, 1) * ctx.adjacent)[None]
+        if self.compress is not None and ctx.smolgen is not None:
+            mask = mask + ctx.smolgen(self.compress(y))
+        return mask.to(dtype)
+
+    def forward(self, x: torch.Tensor, ctx: Context) -> torch.Tensor:
+        if self.recompute and self.training and torch.is_grad_enabled():
+            return checkpoint(lambda t: self.compute(t, ctx), x, use_reentrant=False)
+        return self.compute(x, ctx)
+
+    def compute(self, x: torch.Tensor, ctx: Context) -> torch.Tensor:
         b, n, c = x.shape
         grid = self.mix_norm(x).to(x.dtype).transpose(1, 2).reshape(b, c, 9, 9)
         x = x + F.gelu(self.mix(grid)).flatten(2).transpose(1, 2).to(x.dtype)
         y = self.norm1(x).to(x.dtype)
-        q, k, v = self.qkv(y).view(b, n, 3, self.heads, c // self.heads).unbind(2)
-        q, k, v = (t.transpose(1, 2) for t in (q, k, v))
-        bias = self.bias(states, tables, adjacent, y, smolgen, q.dtype)
+        qkv = self.qkv(y).view(b, n, 3, self.heads, self.head_dim)
+        # Row W_h[s_i, :] by a one-hot product (exact; its backward is a plain reduction).
+        rows = torch.matmul(ctx.onehot.to(qkv.dtype), self.relation_matrix(ctx, qkv.dtype))  # (B, H, 81, 8)
+        q = torch.cat([qkv[:, :, 0].transpose(1, 2), rows], -1)
+        k = torch.cat([qkv[:, :, 1].transpose(1, 2), ctx.onehot.expand(b, self.heads, n, -1).to(qkv.dtype)], -1)
+        v = qkv[:, :, 2].transpose(1, 2).contiguous()  # its own buffer, so backward keeps v alone
+        mask = self.mask(y, ctx, q.dtype)
+        scale = self.head_dim**-0.5
         if self.explicit_attention:
-            att = torch.matmul(q, k.transpose(-2, -1)) * (q.shape[-1] ** -0.5) + bias
+            att = torch.matmul(q, k.transpose(-2, -1)) * scale + mask
             o = torch.matmul(torch.softmax(att.float(), -1).to(q.dtype), v)
         else:
-            o = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+            o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scale)
         x = x + self.proj(o.transpose(1, 2).reshape(b, n, c)).to(x.dtype)
         return x + self.ffn_out(F.gelu(self.ffn_in(self.norm2(x).to(x.dtype)))).to(x.dtype)
 
@@ -194,8 +214,9 @@ class FromToHead(nn.Module):
         b = h.shape[0]
         q = self.q(h)  # (B, 81, dh)
         k = F.pad(self.k(h), (0, 0, 0, 1))  # (B, 82, dh); row 81 is zero
-        shifted = k[:, self.targets]  # (B, 8, 81, dh)
-        dot = (q[:, None] * shifted).sum(-1) * self.scale + self.bias.view(1, -1, 1)  # (B, 8, 81)
+        scores = torch.matmul(q, k.transpose(1, 2))  # (B, 81, 82) every from-to pair
+        dot = scores.gather(2, self.targets.t().expand(b, N_SQUARES, N_DIRS)).transpose(1, 2)  # (B, 8, 81)
+        dot = dot * self.scale + self.bias.view(1, -1, 1)
         ft = self.from_term(h)  # (B, 81, 8 * atoms)
         if not self.atoms:
             return (dot + ft.transpose(1, 2)).reshape(b, N_ACTIONS)
@@ -238,8 +259,8 @@ class SqNet(nn.Module):
         for block in [*self.blocks, self.q_block]:
             block.explicit_attention = on
 
-    def forward(self, planes: torch.Tensor, aux: bool = False) -> Output:
-        """planes: (B, 25, 81). `aux=False` skips the training-only heads."""
+    def embed(self, planes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(B, 81, width) stream after the stem, the square states and their padded one-hot."""
         b = planes.shape[0]
         states = square_states(planes)
         x = self.stem(planes.reshape(b, self.cfg.planes, 9, 9)).flatten(2).transpose(1, 2)
@@ -247,14 +268,26 @@ class SqNet(nn.Module):
             x = x.to(torch.bfloat16) + self.position.to(torch.bfloat16)
         else:
             x = x + self.position
+        onehot = F.pad(F.one_hot(states, N_STATES).to(x.dtype), (0, STATE_PAD - N_STATES))[:, None]
+        return x, states, onehot
+
+    def forward(self, planes: torch.Tensor, aux: bool = False) -> Output:
+        """planes: (B, 25, 81). `aux=False` skips the training-only heads."""
+        x, states, onehot = self.embed(planes)
+        ctx = Context(states, onehot, self.adjacent, self.tables, self.smolgen)
         for block in self.blocks:
-            x = block(x, states, self.tables, self.adjacent, self.smolgen)
+            x = block(x, ctx)
+        return self.heads(x, self.q_block(x, ctx), aux)
+
+    def heads(self, x: torch.Tensor, xq: torch.Tensor, aux: bool) -> Output:
+        """All outputs from the policy stream `x` and the action-value stream `xq`."""
+        b = x.shape[0]
         h = F.relu(head_norm(self.head_norm, x))
         logits = self.policy(h)
-        xq = self.q_block(x, states, self.tables, self.adjacent, self.smolgen)
         hq = F.relu(head_norm(self.q_norm, xq))
         q_logits = self.q_head(hq)
-        q = torch.softmax(q_logits.float(), -1) @ self.atoms
+        # The losses train the atom logits; in training mode q is a monitor and carries no graph.
+        q = torch.softmax((q_logits.detach() if self.training else q_logits).float(), -1) @ self.atoms
         if not aux:
             return Output(logits, q_logits, q, None, None, None, None, None)
         pooled = h.mean(1)
@@ -309,8 +342,9 @@ def hl_gauss(target: torch.Tensor, atoms: int, sigma_atoms: float) -> torch.Tens
     """(N, atoms) Gaussian histogram targets: the mass of N(target, sigma^2) in
     each atom's bin, with sigma given in atom spacings; the outer bins are open."""
     step = 2.0 / (atoms - 1)
-    edges = torch.linspace(-1.0 - step / 2, 1.0 + step / 2, atoms + 1, device=target.device)
-    edges[0], edges[-1] = float("-inf"), float("inf")
-    z = (edges[None, :] - target.clamp(-1.0, 1.0)[:, None]) / (sigma_atoms * step * math.sqrt(2.0))
+    inner = torch.linspace(-1.0 + step / 2, 1.0 - step / 2, atoms - 1, device=target.device)
+    z = (inner[None, :] - target.clamp(-1.0, 1.0)[:, None]) / (sigma_atoms * step * math.sqrt(2.0))
     cdf = 0.5 * (1.0 + torch.erf(z))
+    edge = cdf[:, :1]
+    cdf = torch.cat([torch.zeros_like(edge), cdf, torch.ones_like(edge)], dim=1)
     return cdf[:, 1:] - cdf[:, :-1]

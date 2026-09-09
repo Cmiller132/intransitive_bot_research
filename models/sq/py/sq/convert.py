@@ -2,7 +2,7 @@
 format: the same weights under this model's parameter names, the optimizer
 moments carried over, the EMA weights initialised to the model.
 
-    python -m sq.convert --old <old.pt> --out weights/sq_g128.pt [--clock-from-iter N]
+    python -m sq.convert --old <old.pt> --out weights/sq_g128.pt
 """
 
 from __future__ import annotations
@@ -116,16 +116,11 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--old", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument(
-        "--clock-from-iter", type=int, default=None, help="iteration at which the capture-clock ramp started"
-    )
     args = parser.parse_args(argv)
     old = torch.load(args.old, map_location="cpu", weights_only=False)
     cfg = Config()
     old_cfg = old["cfg"]
     cfg.play.alpha, cfg.play.beta = float(old_cfg["alpha"]), float(old_cfg["beta"])
-    if args.clock_from_iter is not None:
-        cfg.rules.clock_from_iter = args.clock_from_iter
     net, optimizer = convert(old, cfg)
     save_checkpoint(args.out, net, copy.deepcopy(net), optimizer, int(old["iter"]), cfg)
     print(

@@ -20,7 +20,10 @@ and needs approval.
    rule-relation bias (beats, beaten by, same type, both own, both enemy,
    occupied-empty, empty-occupied, adjacent) with one weight per head and
    relation, plus a small Smolgen dynamic bias (compress 8, hidden 64,
-   latent 16) on every third block.
+   latent 16) on every third block. The relation bias is a 7x7 matrix per
+   head over square states and is applied inside the dot product (the query
+   carries its row for the from-square's state, the key the one-hot of the
+   to-square's state) rather than as an 81x81 map per position.
 5. Policy head: batch-normalised trunk features, then from-to attention,
    `q[from] . k[to] / 8 + from_term + dir_bias`, over the 648 actions, masked
    to legal moves.
@@ -50,11 +53,10 @@ and needs approval.
     completed Q under the target.
 13. Playout-cap randomisation: 25 % of steps use the full search, the rest a
     16-simulation, 4-candidate search that yields value labels only.
-14. Training rules: capture clock 100 plies ramping to 50 over 50 iterations
-    from a configured start iteration, then held; clock endings pay
-    -0.05 x sign(material lead) to the mover; twofold repetition over game
-    history plus search path is a draw inside the tree; games capped at 1000
-    plies with value zero.
+14. Training rules: a game is drawn after 75 plies without a capture; clock
+    endings pay -0.05 x sign(material lead) to the mover; twofold repetition
+    over game history plus search path is a draw inside the tree; games capped
+    at 1000 plies with value zero.
 
 ## Losses and optimisation
 
