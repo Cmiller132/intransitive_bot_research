@@ -97,6 +97,20 @@ impl Table {
         ))
     }
     #[inline]
+    fn prefetch(&self, key: u64) {
+        #[cfg(target_arch = "x86_64")]
+        if let Self::Local(slots) = self {
+            let entry = &slots[key as usize & (slots.len() - 1)];
+            unsafe {
+                std::arch::x86_64::_mm_prefetch(
+                    (entry as *const Entry).cast(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+            }
+        }
+    }
+
+    #[inline]
     fn get(&self, key: u64) -> Entry {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Table);
@@ -164,6 +178,7 @@ pub struct Searcher {
     killers: [[u16; 2]; MAX_PLY + 2],
     history: [[i32; 648]; 2],
     acc: Vec<Accumulator>,
+    pending: Vec<Option<(Board, u16, u32)>>,
     hashes: [[u64; 2]; MAX_PLY + 2],
     move_buffers: Vec<Vec<u16>>,
     quiet_buffers: Vec<Vec<u16>>,
@@ -330,6 +345,7 @@ impl Searcher {
             killers: [[NO_MOVE; 2]; MAX_PLY + 2],
             history: [[0; 648]; 2],
             acc: Vec::new(),
+            pending: vec![None; MAX_PLY + 2],
             hashes: [[0; 2]; MAX_PLY + 2],
             move_buffers: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(80)).collect(),
             quiet_buffers: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(80)).collect(),
@@ -399,6 +415,7 @@ impl Searcher {
                 .map(|_| Accumulator::empty(model.hidden))
                 .collect();
         }
+        self.pending.fill(None);
         self.acc[0] = model.refresh(&state.board, state.since_capture, 200);
         self.hashes[0] = [
             board_hash(&state.board),
@@ -575,7 +592,7 @@ impl Searcher {
             let score = if terminal != Outcome::Ongoing {
                 terminal_score(terminal, 1)
             } else {
-                self.update_acc(model, state, action, child.since_capture, 0);
+                self.prepare_child(state, action, child.since_capture, 0);
 
                 let mut score = if index == 0 {
                     -self.negamax(model, &child, depth - 1, -beta, -alpha, 1, true)
@@ -646,16 +663,16 @@ impl Searcher {
         }
         let mut actions = std::mem::take(&mut self.move_buffers[ply]);
         actions.clear();
-        {
+        let moves = {
             #[cfg(feature = "profile")]
             let _probe = crate::profile::Probe::new(crate::profile::Zone::Movegen);
-            state.legal_actions_into(&mut actions);
-        }
-        if actions.is_empty() {
+            state.legal_moves()
+        };
+        if moves.is_empty() {
             self.move_buffers[ply] = actions;
             return -MATE + ply as i32;
         }
-        if !pv && depth <= 2 && beta.abs() < 28_000 && actions.len() > 1 {
+        if !pv && depth <= 2 && beta.abs() < 28_000 && moves.len() > 1 {
             let value = self.static_eval(model, state, ply);
             let margin = FUTILITY_MARGIN * depth;
             if value - margin >= beta && pruning_safe(state) {
@@ -666,16 +683,55 @@ impl Searcher {
         let prune_quiets = !pv
             && depth <= 2
             && alpha.abs() < 28_000
-            && actions.len() > 1
+            && moves.len() > 1
             && self.static_eval(model, state, ply) + FUTILITY_MARGIN * depth <= alpha
             && pruning_safe(state);
         let threatened = enemy_goal_threat(&state.board);
+        let history = self.history[state.ply as usize & 1];
+        let killers = self.killers[ply];
+        {
+            #[cfg(feature = "profile")]
+            let _probe = crate::profile::Probe::new(crate::profile::Zone::Movegen);
+            moves.captures_into(&mut actions);
+            moves.quiets_into(1 << 80, &mut actions);
+            for action in [tt_move, killers[0], killers[1]] {
+                if moves.contains(action) && !actions.contains(&action) {
+                    actions.push(action);
+                }
+            }
+        }
         self.order(state, &mut actions, tt_move, ply);
         let mut best_score = -INF;
-        let mut best_action = actions[0];
+        let mut best_action = NO_MOVE;
         let mut quiets = std::mem::take(&mut self.quiet_buffers[ply]);
         quiets.clear();
-        for (index, &action) in actions.iter().enumerate() {
+        let mut index = 0;
+        let mut quiets_generated = false;
+        loop {
+            if index == actions.len() && !quiets_generated {
+                let start = actions.len();
+                {
+                    #[cfg(feature = "profile")]
+                    let _probe = crate::profile::Probe::new(crate::profile::Zone::Movegen);
+                    moves.quiets_into(!(1 << 80), &mut actions);
+                    let mut end = start;
+                    for next in start..actions.len() {
+                        let action = actions[next];
+                        if action != tt_move && !killers.contains(&action) {
+                            actions[end] = action;
+                            end += 1;
+                        }
+                    }
+                    actions.truncate(end);
+                }
+                self.order_using(state, &mut actions[start..], tt_move, ply, Some(&history));
+                quiets_generated = true;
+            }
+            let Some(&action) = actions.get(index) else {
+                break;
+            };
+            let move_index = index;
+            index += 1;
             let (from, target) = action_from_to(action);
             let quiet = state.board[target] == Cell::Empty;
             let (child, terminal) = apply_position(state, action);
@@ -695,11 +751,11 @@ impl Searcher {
                 // The opponent can end the game immediately after this move.
                 -MATE + ply as i32 + 2
             } else {
-                self.update_acc(model, state, action, child.since_capture, ply);
+                self.prepare_child(state, action, child.since_capture, ply);
 
                 let child_threat = enemy_goal_threat(&child.board);
                 let reduction = if depth >= 3
-                    && index >= 4
+                    && move_index >= 4
                     && quiet
                     && !pv
                     && !threatened
@@ -709,14 +765,14 @@ impl Searcher {
                 {
                     history_reduction(
                         depth,
-                        index,
+                        move_index,
                         self.history[state.ply as usize & 1][action as usize],
                     )
                 } else {
                     0
                 };
                 let mut score;
-                if index == 0 {
+                if move_index == 0 {
                     score = -self.negamax(model, &child, depth - 1, -beta, -alpha, ply + 1, pv);
                 } else {
                     score = -self.negamax(
@@ -865,7 +921,7 @@ impl Searcher {
             } else if own_goal_move(&child.board).is_some() {
                 -MATE + ply as i32 + 2
             } else {
-                self.update_acc(model, state, action, child.since_capture, ply);
+                self.prepare_child(state, action, child.since_capture, ply);
 
                 -self.quiescence(model, &child, -beta, -alpha, ply + 1, remaining - 1)
             };
@@ -907,7 +963,7 @@ impl Searcher {
             if terminal != Outcome::Ongoing {
                 best = best.max(terminal_score(terminal, ply + 1));
             } else if own_goal_move(&child.board).is_none() {
-                self.update_acc(model, state, action, child.since_capture, ply);
+                self.prepare_child(state, action, child.since_capture, ply);
                 best = best.max(-self.static_eval(model, &child, ply + 1));
             }
         }
@@ -920,6 +976,7 @@ impl Searcher {
         let score = if entry.key == key && entry.static_valid {
             entry.static_eval
         } else {
+            self.resolve_acc(model, ply);
             model.resolve_race(&state.board, &mut self.acc[ply]);
             let score = model.evaluate(&self.acc[ply]);
             if entry.key != key {
@@ -932,7 +989,8 @@ impl Searcher {
             self.tt.store(entry);
             score
         };
-        if let Some(sink) = &self.leaf_sink {
+        if self.leaf_sink.is_some() {
+            self.resolve_acc(model, ply);
             model.resolve_race(&state.board, &mut self.acc[ply]);
             let record = serde_json::json!({
                 "schema":1,"search_id":self.leaf_search,"worker":self.worker_id,
@@ -940,7 +998,7 @@ impl Searcher {
                 "board":engine::codes(&state.board).as_slice(),"since_capture":state.since_capture,"ply":state.ply,"clock":200,
                 "raw":model.raw(&self.acc[ply]),"score":score,"path":&self.leaf_path[..ply]
             });
-            let mut sink = sink.lock().expect("leaf sink");
+            let mut sink = self.leaf_sink.as_ref().unwrap().lock().expect("leaf sink");
             if sink.error.is_none() {
                 use std::io::Write;
                 let result = serde_json::to_writer(&mut sink.writer, &record)
@@ -957,29 +1015,45 @@ impl Searcher {
         }
         score
     }
-    fn update_acc(
-        &mut self,
-        model: &Model,
-        state: &State,
-        action: u16,
-        child_since_capture: u32,
-        ply: usize,
-    ) {
+    fn prepare_child(&mut self, state: &State, action: u16, child_since_capture: u32, ply: usize) {
         self.leaf_path[ply] = action;
         self.hashes[ply + 1] = child_hashes(self.hashes[ply], &state.board, action);
-        let (parents, children) = self.acc.split_at_mut(ply + 1);
+        self.tt
+            .prefetch(position_key(self.hashes[ply + 1][0], child_since_capture));
+        self.pending[ply + 1] = Some((state.board, action, child_since_capture));
+    }
+
+    /// Materialize the pending ancestor chain only when a static value is needed.
+    fn resolve_acc(&mut self, model: &Model, ply: usize) {
+        let Some((board, action, since_capture)) = self.pending[ply].take() else {
+            return;
+        };
+        self.resolve_acc(model, ply - 1);
+        let (parents, children) = self.acc.split_at_mut(ply);
         model.update_deferred(
-            &parents[ply],
-            &state.board,
+            &parents[ply - 1],
+            &board,
             action,
-            child_since_capture,
+            since_capture,
             &mut children[0],
         );
     }
 
     fn order(&mut self, state: &State, actions: &mut [u16], tt_move: u16, ply: usize) {
+        self.order_using(state, actions, tt_move, ply, None);
+    }
+
+    fn order_using(
+        &mut self,
+        state: &State,
+        actions: &mut [u16],
+        tt_move: u16,
+        ply: usize,
+        history: Option<&[i32; 648]>,
+    ) {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Ordering);
+        let history = history.unwrap_or(&self.history[state.ply as usize & 1]);
         for &action in actions.iter() {
             let (from, to) = action_from_to(action);
             let mut score = if action == tt_move { 2_000_000 } else { 0 };
@@ -995,7 +1069,7 @@ impl Searcher {
             if self.killers[ply][1] == action {
                 score += 50_000;
             }
-            score += self.history[state.ply as usize & 1][action as usize];
+            score += history[action as usize];
             if self.worker_id != 0 {
                 score += (mix(action as u64 ^ self.worker_id.wrapping_mul(0x9e3779b97f4a7c15)) % 97)
                     as i32
@@ -1165,6 +1239,57 @@ fn history_reduction(depth: i32, index: usize, history: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_accumulators_resolve_ancestors_and_replaced_branches() {
+        for features in [1004, 1022] {
+            let mut model =
+                Model::from_bytes(include_bytes!("../tests/fixtures/h768_dense.nnue")).unwrap();
+            model.features = features;
+            model.weights.resize(features * model.hidden, 0);
+            let root = State::initial();
+            let mut search = Searcher::new(1);
+            search.acc = (0..MAX_PLY + 2)
+                .map(|_| Accumulator::empty(model.hidden))
+                .collect();
+            search.acc[0] = model.refresh(&root.board, 0, 200);
+            search.hashes[0] = [
+                board_hash(&root.board),
+                board_hash(&engine::flip(&root.board)),
+            ];
+            let mut state = root.clone();
+            let mut depth = 0;
+            for ply in 0..16 {
+                let action = state.legal_actions()[0];
+                let (child, outcome) = apply_position(&state, action);
+                if outcome != Outcome::Ongoing {
+                    break;
+                }
+                search.prepare_child(&state, action, child.since_capture, ply);
+                state = child;
+                depth += 1;
+            }
+            assert!(depth >= 4);
+            assert!(search.pending[1..=depth].iter().all(Option::is_some));
+            search.resolve_acc(&model, depth);
+            model.resolve_race(&state.board, &mut search.acc[depth]);
+            assert_eq!(
+                search.acc[depth],
+                model.refresh(&state.board, state.since_capture, 200)
+            );
+
+            let action = root.legal_actions()[1];
+            let (child, _) = apply_position(&root, action);
+            search.prepare_child(&root, action, child.since_capture, 0);
+            search.resolve_acc(&model, 1);
+            model.resolve_race(&child.board, &mut search.acc[1]);
+            assert_eq!(
+                search.acc[1],
+                model.refresh(&child.board, child.since_capture, 200)
+            );
+        }
+    }
+
     #[test]
     fn iteration_records_account_for_the_selected_search() {
         let model = Model::from_bytes(include_bytes!("../tests/fixtures/h768_dense.nnue")).unwrap();

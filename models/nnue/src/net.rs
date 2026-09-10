@@ -317,7 +317,7 @@ impl Model {
             self.feature(piece, to),
             (captured != 0).then(|| self.feature(captured, to)),
         );
-        self.update_threats(board, from, to, child);
+        self.update_threats(board, action, child);
         child.pieces = parent.pieces - usize::from(captured != 0);
         child.clock = parent.clock;
         child.clock_rows = clock_rows(child_since_capture, parent.clock);
@@ -373,33 +373,16 @@ impl Model {
         acc.race_dirty = false;
     }
 
-    /// Only squares adjacent to the old/new location can change attack status.
-    /// Their union contains at most 14 squares for a diagonal king move.
-    fn update_threats(&self, board: &Board, from: usize, to: usize, child: &mut Accumulator) {
+    /// Update the occupied and attacked rows affected by the move.
+    fn update_threats(&self, board: &Board, action: u16, child: &mut Accumulator) {
+        let (from, to) = action_from_to(action);
         let mut moved = *board;
         moved[to] = moved[from];
         moved[from] = Cell::Empty;
-        let mut seen = [false; N_SQ];
-        let mut affected = [0usize; 18];
-        let mut count = 0;
-        for center in [from, to] {
-            for dr in -1..=1 {
-                for dc in -1..=1 {
-                    let r = center as i32 / 9 + dr;
-                    let c = center as i32 % 9 + dc;
-                    if !(0..9).contains(&r) || !(0..9).contains(&c) {
-                        continue;
-                    }
-                    let sq = (r * 9 + c) as usize;
-                    if !seen[sq] {
-                        seen[sq] = true;
-                        affected[count] = sq;
-                        count += 1;
-                    }
-                }
-            }
-        }
-        for &sq in &affected[..count] {
+        let mut affected = engine::tactics::attack_candidates(board, action);
+        while affected != 0 {
+            let sq = affected.trailing_zeros() as usize;
+            affected &= affected - 1;
             let old_piece = board[sq].code();
             let new_piece = moved[sq].code();
             let old_threat = old_piece != 0 && is_attacked(board, sq as u8);
@@ -496,6 +479,15 @@ impl Model {
     pub fn sum(&self, acc: &Accumulator) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Readout);
+        #[cfg(target_arch = "x86_64")]
+        if self.vnni {
+            let start = self.bucket(acc) * 2 * self.hidden;
+            let output = &self.output[start..start + 2 * self.hidden];
+            unsafe {
+                return sum_avx512(&acc.own, &output[..self.hidden], self.qa)
+                    + sum_avx512(&acc.opponent, &output[self.hidden..], self.qa);
+            }
+        }
         #[cfg(target_arch = "x86_64")]
         if self.avx2 {
             let start = self.bucket(acc) * 2 * self.hidden;
@@ -860,6 +852,33 @@ unsafe fn add_row_avx2(acc: &mut [i32], row: &[i16], add: bool) {
         };
         _mm256_storeu_si256(acc.as_mut_ptr().add(j).cast(), value);
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn sum_avx512(acc: &[i32], weights: &[i16], qa: i32) -> i64 {
+    use std::arch::x86_64::*;
+    let mut even = _mm512_setzero_si512();
+    let mut odd = _mm512_setzero_si512();
+    for j in (0..acc.len()).step_by(16) {
+        let x = _mm512_min_epi32(
+            _mm512_set1_epi32(qa),
+            _mm512_max_epi32(
+                _mm512_setzero_si512(),
+                _mm512_loadu_si512(acc.as_ptr().add(j).cast()),
+            ),
+        );
+        let squared = _mm512_mullo_epi32(x, x);
+        let w = _mm512_cvtepi16_epi32(_mm256_loadu_si256(weights.as_ptr().add(j).cast()));
+        even = _mm512_add_epi64(even, _mm512_mul_epi32(squared, w));
+        odd = _mm512_add_epi64(
+            odd,
+            _mm512_mul_epi32(_mm512_srli_epi64(squared, 32), _mm512_srli_epi64(w, 32)),
+        );
+    }
+    let mut sums = [0i64; 8];
+    _mm512_storeu_si512(sums.as_mut_ptr().cast(), _mm512_add_epi64(even, odd));
+    sums.iter().sum()
 }
 
 #[cfg(target_arch = "x86_64")]
