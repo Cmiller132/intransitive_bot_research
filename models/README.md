@@ -18,4 +18,7 @@ dependencies, and add one arm to `player_from_spec` in cli/src/main.rs so
 that `<name>:<path>` builds the player. Eval, play and rpsi then work through
 `match::Player` without further changes.
 
-`sq/` is the worked example; `conv/` and `zero/` hold design documents only.
+`sq/` is the worked example (the reference line); `conv/` is the second model,
+built to the same layout; `nnue/` is the CPU line, a sparse integer evaluator
+inside an alpha-beta search, distilled from the others' play and games;
+`zero/` holds a design document only.

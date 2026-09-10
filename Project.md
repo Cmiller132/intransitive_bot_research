@@ -37,8 +37,12 @@ network internals. The site client is a small adapter built on the runner.
 
 Evaluation is one tool with one definition: a paired match, both colours per
 opening, equal simulations (32) per move, no timed clock, against a named
-reference model or an older checkpoint. Anything else is a diagnostic, not an
-eval.
+reference model or an older checkpoint. The one variant is the timed eval
+(`bot eval --move-ms N`), the same paired match under a per-move wall clock
+with a declared thread count per player, for engines whose strength is a
+function of time (the NNUE line); its report carries the complete-pair count
+and a seeded opening-pair bootstrap interval. Anything else is a diagnostic,
+not an eval.
 
 ### Models (Rust + Python)
 
@@ -49,6 +53,16 @@ and the match runner's player interface.
 
 A generic Gumbel search is defined once in Rust and is what the model serving
 the site uses. Models may extend it for their own purposes.
+
+### Arena (Python + React)
+
+Rates every model uploaded to it and serves the site. It is the only place
+strengths are compared: each job is the eval tool between two players of the
+pool, ratings are a Bayesian Elo fit after the KataGo training server, and the
+same engines answer the site's analysis requests. It runs on its own
+container; nothing is evaluated on the training machine. Every tenth
+checkpoint of a run is exported and uploaded by `arena/watch.sh`. Models reach
+it only as `bot` specs (an ONNX export or an RPSI engine).
 
 Planned models, in order:
 
@@ -96,9 +110,10 @@ Measured results live with their run artifacts and in commit messages.
   runner: `cargo xtask check | wheel | linux`) and one crate per model under
   `models/`; each model's Python package sits beside its crate.
 - Windows native, one RTX 4070 Ti, Triton kernels kept for GPU self-play.
-- Deployment target: the site container, CPU inference through ONNX Runtime.
-  `cargo xtask linux` builds the Linux binary inside a Debian 12 WSL distro
-  (the site's platform: x86_64, glibc 2.36) into dist/linux/.
+- Deployment targets: the site bot container and the arena container, both
+  Debian 12 with CPU inference through ONNX Runtime. `cargo xtask linux`
+  builds the Linux binary inside a Debian 12 WSL distro (x86_64, glibc 2.36)
+  into dist/linux/.
 
 ## TODO (later, do not plan further)
 
