@@ -175,7 +175,12 @@ unchanged, everything around them is rebuilt.
     and four threads scores 63.5 % (55.5-71.0) against sq at 32
     simulations, the arena's budget, and 39.5 % (31.5-47.5) against sq at
     128. The arena seat plays at 32 x 2,500 nodes on one thread, so its
-    rating understates the site-budget strength.
+    rating understates the site-budget strength. On a shared clock with
+    the repaired search (sq searching every move, audited per seat): the
+    round-7 network 58.0 % (48.5-67.0) and the round-11 network 65.0 %
+    (57.0-73.0) against sq at 250 ms and four threads each, 50 pairs.
+    The retained search itself holds at that budget: 58.5 % (53.3-63.5)
+    over partial-root alone with the same weights, 100 pairs.
 
 ## Data
 
@@ -305,7 +310,14 @@ unchanged, everything around them is rebuilt.
     against 30 % (worse; the window and teacher rows anchor the network),
     learning rates 2e-4 and 5e-5 scored 51-53 % against 1e-4, the late
     windows alone 50 %, and no windows at all 44.7 %, so the recipe
-    stands and the windows stay in every mixture. Rounds vary: 6 scored 51 % and 7, from the same
+    stands and the windows stay in every mixture. Volume: a round of
+    195k rows scored 55.0 % against its parent, a round of 100k rows from
+    the same parent 55.1 %, so rows per round do not raise the gain.
+    Depth: two node-budget promotions of 55 % each summed to 53.7 % at
+    50 ms, and 160-simulation labels did not transfer better than
+    40-simulation ones on the clock (48.8 %), so the loop's acceptance
+    runs on the clock (500 games at 50 ms) and the site-budget gap is
+    measured against sq at fixed simulations (item 17). Rounds vary: 6 scored 51 % and 7, from the same
     parent with a new seed, 56 %, so one flat round is not saturation.
 31. Retrain when the teacher is clearly stronger: import the new windows
     (`nnue.importer conv --run runs/conv_g128 ...`), relabel the human
