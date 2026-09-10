@@ -143,10 +143,15 @@ class Dataset:
     def __len__(self) -> int:
         return len(self.index)
 
-    def take(self, positions: np.ndarray) -> dict[str, np.ndarray]:
-        """The rows at `positions` (indices into this split), sorted for the memory map."""
+    def take(self, positions: np.ndarray, fields: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
+        """The rows at `positions` (indices into this split), sorted for the
+        memory map. `fields` restricts the columns gathered (the id cache,
+        when the dataset has one, always comes along): a training step that
+        touches only the columns it uses keeps its page faults to the id
+        cache instead of every column of every sampled row."""
         idx = self.index[np.sort(positions)]
-        return {name: np.asarray(array[idx]) for name, array in self.rows.items()}
+        names = list(self.rows) if fields is None else [*fields, *(["ids"] if "ids" in self.rows else [])]
+        return {name: np.asarray(self.rows[name][idx]) for name in names}
 
     def all(self, limit: int | None = None) -> dict[str, np.ndarray]:
         idx = self.index if limit is None else self.index[:limit]
@@ -159,10 +164,13 @@ class Mixture:
     rows of each, sampled uniformly with replacement (the streaming regime
     of DESIGN item 23)."""
 
-    def __init__(self, parts: list[tuple[Dataset, float]], batch: int, seed: int):
+    def __init__(
+        self, parts: list[tuple[Dataset, float]], batch: int, seed: int, fields: tuple[str, ...] | None = None
+    ):
         total = sum(share for _, share in parts)
         self.parts = [(d, share / total) for d, share in parts if len(d)]
         self.batch = batch
+        self.fields = fields  # the columns of every batch (all of them by default; see Dataset.take)
         self.rng = np.random.default_rng(seed)
 
     def state(self) -> dict:
@@ -176,8 +184,8 @@ class Mixture:
         counts = [max(1, round(self.batch * share)) for _, share in self.parts]
         counts[-1] = max(1, self.batch - sum(counts[:-1]))
         for (dataset, _), count in zip(self.parts, counts, strict=True):
-            pieces.append(dataset.take(self.rng.integers(len(dataset), size=count)))
-        names = list(FIELDS) + (["ids"] if all("ids" in p for p in pieces) else [])
+            pieces.append(dataset.take(self.rng.integers(len(dataset), size=count), self.fields))
+        names = [name for name in pieces[0] if all(name in p for p in pieces)]  # ids only when every part has them
         return {name: np.concatenate([p[name] for p in pieces]) for name in names}
 
 

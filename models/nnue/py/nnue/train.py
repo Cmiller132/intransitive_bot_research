@@ -119,7 +119,9 @@ def encode(rows: dict[str, np.ndarray], clock: bool = True) -> tuple[torch.Tenso
         ids = feature_ids(rows["board"], rows["since_capture"], rows["capture_clock"])
     if not clock:
         ids[(ids >= ELAPSED_BASE) & (ids < RACE_BASE)] = PAD
-    return torch.from_numpy(ids), torch.from_numpy(piece_bucket(rows["board"]))
+    # A batch without boards comes from the lean mixture of a one-bucket model, whose head ignores the bucket.
+    bucket = piece_bucket(rows["board"]) if "board" in rows else np.zeros(len(ids), dtype=np.int64)
+    return torch.from_numpy(ids), torch.from_numpy(bucket)
 
 
 def step_loss(
@@ -254,7 +256,12 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     datasets = [(Dataset.open(data_dir(name), TRAIN, quiet=config.quiet), share) for name, share in parts]
     validation = [(name, Dataset.open(data_dir(name), VALIDATION, quiet=config.quiet), share) for name, share in parts]
-    mixture = Mixture(datasets, config.batch, config.seed)
+    # With id caches everywhere and one head, a step needs three small columns and the ids; gathering every
+    # column (the 81-byte board above all) from the memory maps made the trainer page instead of compute.
+    lean = config.buckets == 1 and all("ids" in dataset.rows for dataset, _ in datasets)
+    mixture = Mixture(
+        datasets, config.batch, config.seed, ("target", "weight", "outcome", "outcome_ok") if lean else None
+    )
     device = torch.device(config.device)
     table = torch.from_numpy(symmetry_table()).to(device)
     rng = torch.Generator().manual_seed(config.seed + 1)
