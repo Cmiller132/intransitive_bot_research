@@ -1,5 +1,6 @@
 //! Workspace tasks, run as `cargo xtask <command>`: `check` (formatting,
-//! lints, tests, the engine wheel, Python lints and tests), `wheel` (build and
+//! lints, tests, the engine wheel, Python lints and tests, the arena
+//! frontend's gates), `wheel` (build and
 //! install the engine Python module) and `linux` (release build of `bot` for
 //! Debian 12 inside the WSL distro `Debian`, into dist/linux).
 
@@ -14,9 +15,20 @@ use anyhow::{bail, Context, Result};
 
 const USAGE: &str = "\
 usage: cargo xtask <command>
-  check [--gpu]   cargo fmt --check, clippy, test, wheel, ruff, pytest (CPU unless --gpu)
+  check [--gpu]   cargo fmt --check, clippy, test, wheel, ruff, pytest (CPU unless --gpu), npm gates
   wheel           build the engine wheel and install it into the current python
   linux           release build of `bot` for Debian 12 (WSL distro `Debian`) into dist/linux";
+
+/// Python packages checked after the Rust crates and the wheel.
+const PYTHON_PACKAGES: [&str; 4] = [
+    "models/sq/py",
+    "models/conv/py",
+    "models/nnue/py",
+    "arena/backend",
+];
+/// The arena frontend, checked last through its npm scripts.
+const FRONTEND: &str = "arena/frontend";
+const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
 
 const DISTRO: &str = "Debian";
 /// ONNX Runtime release linked on Linux: the version ort-sys 2.0.0-rc.13 targets.
@@ -110,22 +122,44 @@ impl Tasks {
         )?;
         self.step("cargo test", cmd(&self.cargo, &["test"]))?;
         self.wheel()?;
-        let package = self.root.join("models/sq/py");
+        for package in PYTHON_PACKAGES {
+            self.python(package, gpu)?;
+        }
+        self.frontend()
+    }
+
+    /// Lints and tests of one Python package; a model's Triton kernels run
+    /// on the CPU unless `gpu`.
+    fn python(&mut self, package: &str, gpu: bool) -> Result<()> {
+        let dir = self.root.join(package);
         let mut check = cmd("python", &["-m", "ruff", "check"]);
-        check.arg(&package);
-        self.step("ruff check", check)?;
+        check.arg(&dir);
+        self.step(&format!("ruff check ({package})"), check)?;
         let mut format = cmd("python", &["-m", "ruff", "format", "--check"]);
-        format.arg(&package);
-        self.step("ruff format --check", format)?;
+        format.arg(&dir);
+        self.step(&format!("ruff format --check ({package})"), format)?;
         let mut pytest = cmd("python", &["-m", "pytest", "-q", "-p", "no:warnings"]);
-        pytest.current_dir(&package);
-        let name = if gpu {
-            "pytest (GPU)"
+        pytest.current_dir(&dir);
+        let name = if !package.starts_with("models/") {
+            format!("pytest ({package})")
+        } else if gpu {
+            format!("pytest ({package}, GPU)")
         } else {
             pytest.env("TRITON_INTERPRET", "1");
-            "pytest (CPU, TRITON_INTERPRET=1)"
+            format!("pytest ({package}, CPU, TRITON_INTERPRET=1)")
         };
-        self.step(name, pytest)
+        self.step(&name, pytest)
+    }
+
+    /// The arena frontend's gates: type check, lint, format check, tests, build.
+    fn frontend(&mut self) -> Result<()> {
+        let dir = self.root.join(FRONTEND);
+        for script in ["typecheck", "lint", "format", "test", "build"] {
+            let mut npm = cmd(NPM, &["run", script]);
+            npm.current_dir(&dir);
+            self.step(&format!("npm run {script} ({FRONTEND})"), npm)?;
+        }
+        Ok(())
     }
 
     /// Build engine's Python module into target/wheels and install it.
@@ -187,7 +221,7 @@ impl Tasks {
             wsl(Some(&linux_root), &["sh", "-c", &fetch]),
         )?;
         let build = format!(
-            "export PATH=$HOME/.cargo/bin:$PATH ORT_LIB_LOCATION={linux_root}/target/linux/{ort}/lib              ORT_PREFER_DYNAMIC_LINK=1 && cargo build --release --locked -p cli --target-dir target/linux"
+            "export PATH=$HOME/.cargo/bin:$PATH ORT_LIB_LOCATION={linux_root}/target/linux/{ort}/lib              ORT_PREFER_DYNAMIC_LINK=1 && nice -n 10 cargo build --release --locked -j 4 -p cli --target-dir target/linux"
         );
         self.step(
             "cargo build --release (Debian 12)",

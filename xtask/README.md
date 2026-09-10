@@ -9,13 +9,15 @@ and is named; the passed steps are listed at the end.
 
 - `cargo xtask check [--gpu]`: `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test`, the `wheel` task,
-  `ruff check` and `ruff format --check` on models/sq/py, then `pytest` in
-  models/sq/py with `TRITON_INTERPRET=1` (kernels on the CPU). `--gpu` runs
-  pytest without that variable.
+  then for each Python package (models/sq/py, models/conv/py, models/nnue/py, arena/backend)
+  `ruff check`, `ruff format --check` and `pytest`, the models' with
+  `TRITON_INTERPRET=1` (kernels on the CPU; `--gpu` runs them without it),
+  then in arena/frontend `npm run typecheck`, `lint`, `format`, `test` and
+  `build`.
 - `cargo xtask wheel`: `python -m maturin build --release --features python`
   of the engine crate into target/wheels, then
   `python -m pip install --user --force-reinstall` of that wheel.
-- `cargo xtask linux`: `cargo build --release --locked -p cli --target-dir
+- `cargo xtask linux`: `nice -n 10 cargo build --release --locked -j 4 -p cli --target-dir
   target/linux` inside the WSL distro `Debian` (Debian 12, x86_64, glibc 2.36:
   the site's platform), on this checkout through its /mnt/<drive>/ path.
   ONNX Runtime is Microsoft's Linux x64 release 1.28.0 (the version the `ort`
@@ -26,7 +28,8 @@ and is named; the passed steps are listed at the end.
   Fails, pointing here, when the distro is missing or is not Debian 12.
 
 `python`, `ruff`, `pytest` and `maturin` are those of the interpreter on PATH
-(`pip install -e "models/sq/py[dev]"`).
+(`pip install -e "models/sq/py[dev]"` and the same for models/conv/py, models/nnue/py and
+arena/backend); `npm` needs `npm ci` run once in arena/frontend.
 
 ## Linux build environment
 
