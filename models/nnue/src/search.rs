@@ -620,6 +620,7 @@ impl Searcher {
         (score_best, best)
     }
 
+    /// Searches a child whose terminal outcome has already been resolved.
     #[allow(clippy::too_many_arguments)] // Explicit window/ply arguments stay allocation-free.
     fn negamax(
         &mut self,
@@ -638,9 +639,7 @@ impl Searcher {
         if self.should_stop(false) {
             return 0;
         }
-        if draw_clock(state) {
-            return 0;
-        }
+        debug_assert!(!draw_clock(state));
         if ply >= MAX_PLY {
             return self.frontier(model, state, ply);
         }
@@ -853,6 +852,7 @@ impl Searcher {
         best_score
     }
 
+    /// Searches an ongoing child; below ply one its immediate goal win is excluded.
     fn quiescence(
         &mut self,
         model: &Model,
@@ -867,22 +867,13 @@ impl Searcher {
         if self.should_stop(false) {
             return 0;
         }
-        if draw_clock(state) {
-            return 0;
-        }
-        if own_goal_move(&state.board).is_some() {
+        debug_assert!(!draw_clock(state) && !state.is_stalemated());
+        debug_assert!(ply <= 1 || own_goal_move(&state.board).is_none());
+        if ply <= 1 && own_goal_move(&state.board).is_some() {
             return MATE - ply as i32 - 1;
         }
         if ply >= MAX_PLY {
             return self.frontier(model, state, ply);
-        }
-        let stalemated = {
-            #[cfg(feature = "profile")]
-            let _probe = crate::profile::Probe::new(crate::profile::Zone::Movegen);
-            state.is_stalemated()
-        };
-        if stalemated {
-            return -MATE + ply as i32;
         }
         let threatened = enemy_goal_threat(&state.board);
         let stand = self.static_eval(model, state, ply);
@@ -1330,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn quiescence_proves_stalemate_before_stand_pat() {
+    fn stalemate_is_resolved_before_searching_a_child() {
         let model = Model::from_bytes(include_bytes!("../tests/fixtures/h768_dense.nnue")).unwrap();
         let mut state = State::initial();
         state.board.fill(Cell::Empty);
@@ -1340,9 +1331,18 @@ mod tests {
         }
         assert!(state.legal_actions().is_empty());
         let mut search = Searcher::new(1);
+        let result = search.search(&model, &state, None, Limits::default());
+        assert_eq!((result.action, result.score), (None, -MATE));
+        let mut before = state.clone();
+        before.board[30] = Cell::Empty;
+        before.board[20] = Cell::Enemy(engine::Piece::Paper);
+        before.board = engine::flip(&before.board);
+        let result = search.search(&model, &before, None, Limits::default());
+        let (child, outcome) = apply_position(&before, result.action.unwrap());
+        assert_eq!(outcome, Outcome::Win);
+        assert!(child.is_stalemated());
+        assert_eq!(result.score, MATE - 1);
         search.deadline = Instant::now() + Duration::from_secs(10);
-        search.acc.push(model.refresh(&state.board, 0, 200));
-        assert_eq!(search.quiescence(&model, &state, -INF, -29000, 0, 0), -MATE);
         state.board[30] = Cell::Empty;
         assert!(!state.legal_actions().is_empty());
         search.acc[0] = model.refresh(&state.board, 0, 200);
