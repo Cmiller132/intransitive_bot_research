@@ -341,9 +341,27 @@ unchanged, everything around them is rebuilt.
     (`--device cuda`, 20-60 epochs of 1,000 steps at batch 8,192 take
     15-45 minutes), then the gauntlets of item 28. Expect the evaluator to
     track the teacher's mid-game judgement, which is where the losses
-    against sq were.
+    against sq were. Measured 2026-09-10 with conv@150 (about +60 Elo over
+    conv@40 in the arena): relabelling gave nothing. The continuation
+    trained on the conv@150 human labels scored 63.8 % (61.3-66.3) over
+    1,000 games at 50 ms against its parent, the control with the old
+    conv@40 human labels 65.4 % (62.9-67.9), and the student rounds
+    relabelled by conv@150 in place of the self-labels 61.6 % (59.0-64.2).
+    Relabelling existing sets with a stronger teacher is off the list;
+    importing the teacher's new windows stays (data volume, item 27).
 32. Passes: the many-pass continuation was still improving at its best
     epoch (18 of 20); 60-150 epochs on the GPU are the next evaluator test.
+    Measured 2026-09-10: the recipe `--init <incumbent> --device cuda
+    --batch 8192 --steps_per_epoch 1000 --epochs 20 --lr 0.0003
+    --warmup_steps 200 --qat_start_epoch 0 --patience 8` on the broad
+    mixture (human labels 0.25, conv windows 0.25, the last seven student
+    rounds and the sq set 0.5) took ft_self11, a plateaued self-rescoring
+    lineage, to 63.8 % against itself over 1,000 games at 50 ms and 62.1 %
+    (58.6-65.6) at 100 ms; it is deployed as ft_gpu150a. A second
+    continuation chained on the first scored 52.5 % (49.9-55.0), so the
+    passes are a step, not a ladder; 60 epochs and the padded 768 (item 33)
+    wait for the next GPU window. The trainer must not page: the sampler
+    gathers only the columns a batch needs (`Mixture(..., fields)`).
 33. Width 768 only after the passes are in place: it costs 12 % per node
     and its from-scratch run lost; a 768-wide continuation needs the
     lineage widened rather than random: `NNUE.widen_hidden` pads a 512-wide
@@ -358,7 +376,14 @@ unchanged, everything around them is rebuilt.
     the evaluator's cost per node (profile and SIMD work), both under
     measurement by Astra; then time management at 250 ms; sequential
     testing (SPRT) in `bot eval` if a paired-outcome likelihood is added
-    cleanly.
+    cleanly. Since 2026-09-10 the arena seat plays under a wall clock
+    (`bot rpsi --movetime 100` overrides the host's `go sims 32`), so
+    nodes per second count in the arena as well as in the timed matches;
+    the speed work (a `znver4` target for both Zen 4 machines, staged move
+    generation, evaluation skipped where the search never reads it, the
+    dense head and readout on AVX-512) is Astra's turn 15, and only
+    changes that keep fixed-node decisions identical enter without a
+    gauntlet.
 35. The race blind spot: of 78 goal losses against sq, 59 were runner or
     tempo races and 19 capture or escort sequences; the static value was
     optimistic twelve plies out in 13, nine of them races. Built
@@ -397,4 +422,6 @@ unchanged, everything around them is rebuilt.
 36. Not worth repeating (measured null or negative): clock rows, output
     buckets, the quiet-position filter, human outcome labels alone,
     doubling the windows alone, null move, one-ply extensions, exact
-    tactics beyond the current rule.
+    tactics beyond the current rule, relabelling existing sets with a
+    stronger teacher (item 31), a second many-pass continuation chained on
+    the first (item 32).
