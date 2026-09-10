@@ -110,6 +110,10 @@ enum Command {
         /// Simulations per move when the host gives no time.
         #[arg(long, default_value_t = 32)]
         sims: u32,
+        /// Wall time per move (ms) in place of the simulation count when the
+        /// host gives no time (`go sims N`): a clock budget for an arena seat.
+        #[arg(long)]
+        movetime: Option<i64>,
         #[arg(long, default_value_t = 4)]
         threads: usize,
         #[arg(long, default_value = "intransitive_bot")]
@@ -340,11 +344,13 @@ fn main() -> Result<()> {
             move_ms,
             max_move_ms,
             sims,
+            movetime,
             threads,
             name,
         } => {
             let player = player_from_spec(&player, threads)?;
             let mut session = Session::new(player, Rules::SITE, &name, move_ms, max_move_ms, sims);
+            session.movetime = movetime;
             let stdin = io::stdin();
             let mut input = BufReader::new(stdin.lock());
             let stdout = io::stdout();

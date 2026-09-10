@@ -38,7 +38,10 @@ The two halves share only the feature definition and the file format:
   timed paired evaluation, the reference optionally on its own budget (the
   doubled-time yardstick for thread measurements).
   An `rpsi:<bot> rpsi --player nnue:<file>` seat receives `go movetime`
-  unchanged, so two builds can meet under the same clock.
+  unchanged, so two builds can meet under the same clock; with
+  `--movetime <ms>` the seat searches that long whenever the host sends a
+  simulation count instead (`go sims N`), which is how the arena seat plays
+  under a clock budget while the pool's jobs stay at 32 simulations.
 - `bot nnue convert --input <v3.nnue> --output <v6.nnue>`,
   `bot nnue validate --model <v6.nnue> --input <positions.jsonl>`,
   `bot nnue diagnose --model <v6.nnue> --input <positions.jsonl> --nodes N`:

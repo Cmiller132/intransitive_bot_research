@@ -220,6 +220,10 @@ pub struct Session<P: Player> {
     pub max_move_ms: i64,
     /// Simulations per move when the host gives no time at all.
     pub sims: u32,
+    /// Wall time per move in place of the simulation count when the host
+    /// gives no time (`go sims N` or a bare `go`): the arena's seats play
+    /// under a clock this way. An explicit host movetime or clock still wins.
+    pub movetime: Option<i64>,
     state: Option<State>,
     frame: Option<Frame>,
     history: History,
@@ -244,6 +248,7 @@ impl<P: Player> Session<P> {
             move_ms: move_ms.max(1),
             max_move_ms: max_move_ms.max(1),
             sims: sims.max(1),
+            movetime: None,
             state: None,
             frame: None,
             history: History::new(),
@@ -437,11 +442,14 @@ impl<P: Player> Session<P> {
             (None, Some(ms)) => Clock::Time(Duration::from_millis(
                 move_budget_ms(ms, inc_ms, self.move_ms, self.max_move_ms).max(1) as u64,
             )),
-            (None, None) => Clock::Sims(
-                params
-                    .get("sims")
-                    .map_or(self.sims, |&n| n.clamp(1, u32::MAX as i64) as u32),
-            ),
+            (None, None) => match self.movetime {
+                Some(ms) => Clock::Time(Duration::from_millis(ms.max(1) as u64)),
+                None => Clock::Sims(
+                    params
+                        .get("sims")
+                        .map_or(self.sims, |&n| n.clamp(1, u32::MAX as i64) as u32),
+                ),
+            },
         };
         let started = Instant::now();
         let action = self.player.choose(&state, &self.history, clock);
@@ -604,6 +612,47 @@ mod tests {
             assert!(matches!(clock, Clock::Time(d) if d.as_millis() == ms));
         }
         assert_eq!(seen.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_seat_movetime_replaces_the_simulation_count_but_not_a_host_time() {
+        use std::sync::{Arc, Mutex};
+        struct Budgets(Arc<Mutex<Vec<Clock>>>);
+        impl Player for Budgets {
+            fn new_game(&mut self) {}
+            fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+                self.0.lock().unwrap().push(clock);
+                state.legal_actions()[0]
+            }
+            fn name(&self) -> &str {
+                "budgets"
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut s = Session::new(
+            Budgets(Arc::clone(&seen)),
+            Rules::SITE,
+            "budgets",
+            250,
+            250,
+            32,
+        );
+        let mut out = Vec::new();
+        s.handle(
+            &format!("position fen {SITE_START_FEN} b {TERRITORY}"),
+            &mut out,
+        )
+        .unwrap();
+        s.handle("go sims 32", &mut out).unwrap();
+        s.movetime = Some(100);
+        s.handle("go sims 32", &mut out).unwrap();
+        s.handle("go", &mut out).unwrap();
+        s.handle("go movetime 50", &mut out).unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(matches!(seen[0], Clock::Sims(32)));
+        assert!(matches!(seen[1], Clock::Time(d) if d.as_millis() == 100));
+        assert!(matches!(seen[2], Clock::Time(d) if d.as_millis() == 100));
+        assert!(matches!(seen[3], Clock::Time(d) if d.as_millis() == 50));
     }
 
     #[test]
