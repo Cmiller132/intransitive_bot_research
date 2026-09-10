@@ -2,6 +2,7 @@
 
 pub mod board;
 pub mod notation;
+pub mod race;
 pub mod rules;
 pub mod tactics;
 

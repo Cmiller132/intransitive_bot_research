@@ -57,6 +57,7 @@ pub struct DenseHead {
 
 #[derive(Clone, Debug)]
 pub struct Model {
+    pub features: usize,
     pub hidden: usize,
     pub buckets: usize,
     pub qa: i32,
@@ -78,6 +79,7 @@ pub struct Accumulator {
     pieces: usize,
     clock: u32,
     clock_rows: [usize; 2],
+    race: [u8; 2],
 }
 
 impl Accumulator {
@@ -88,6 +90,7 @@ impl Accumulator {
             pieces: 0,
             clock: 0,
             clock_rows: [0; 2],
+            race: [8; 2],
         }
     }
 }
@@ -100,12 +103,14 @@ impl Model {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < 36 || &bytes[..8] != b"RPSNNUE1" {
-            return Err("invalid format-6 header or magic".into());
+            return Err("invalid NNUE header or magic".into());
         }
         let u = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         let buckets = u(32) as usize;
         let hidden = u(16) as usize;
-        if [u(8), u(12), u(20), u(24)] != [6, 1004, 255, 64]
+        let features = u(12) as usize;
+        if !matches!((u(8), features), (6, 1004) | (7, 1022))
+            || [u(20), u(24)] != [255, 64]
             || f32::from_le_bytes(bytes[28..32].try_into().unwrap()) != 600.
             || ![1, 4].contains(&buckets)
         {
@@ -121,13 +126,13 @@ impl Model {
             );
         }
         let expected = hidden
-            .checked_mul(2074 + 4 * buckets)
+            .checked_mul(2 * features + 66 + 4 * buckets)
             .and_then(|v| v.checked_add(168 + 68 * buckets));
         if expected != Some(bytes.len()) {
-            return Err("invalid format-6 payload length".into());
+            return Err("invalid NNUE payload length".into());
         }
         let features_start = 36 + 2 * hidden;
-        let output_start = features_start + 2 * 1004 * hidden;
+        let output_start = features_start + 2 * features * hidden;
         let bias_start = output_start + buckets * 2 * hidden * 2;
         let width_start = bias_start + buckets * 4;
         let dense_start = width_start + 4;
@@ -149,13 +154,14 @@ impl Model {
                 .collect::<Vec<_>>()
         };
         Ok(Self {
+            features,
             hidden,
             buckets,
             qa: 255,
             qb: 64,
             eval_scale: 600.,
             bias: i16s(36, hidden),
-            weights: i16s(features_start, 1004 * hidden),
+            weights: i16s(features_start, features * hidden),
             output: i16s(output_start, buckets * 2 * hidden),
             output_bias: i32s(bias_start, buckets),
             dense: Some(DenseHead {
@@ -237,11 +243,30 @@ impl Model {
             self.add_row(&mut acc.own, weights, true);
             self.add_row(&mut acc.opponent, weights, true);
         }
+        if self.features == 1022 {
+            let (mover, opponent) = engine::race::race_buckets(board);
+            acc.race = [mover, opponent];
+            for perspective in 0..2 {
+                for side in 0..2 {
+                    let row = 1004 + 9 * side + acc.race[side ^ perspective] as usize;
+                    let values = if perspective == 0 {
+                        &mut acc.own
+                    } else {
+                        &mut acc.opponent
+                    };
+                    self.add_row(
+                        values,
+                        &self.weights[row * self.hidden..(row + 1) * self.hidden],
+                        true,
+                    );
+                }
+            }
+        }
         acc
     }
 
     /// Child canonicalization swaps the two parent perspectives; only moved and
-    /// captured piece-square and changed attack/clock rows need updating.
+    /// captured piece-square and changed attack/clock/race rows need updating.
     /// The caller supplies a legal move and the counter returned by engine::apply.
     pub fn update(
         &self,
@@ -281,6 +306,35 @@ impl Model {
                 for values in [&mut child.own, &mut child.opponent] {
                     self.add_row(values, old_row, false);
                     self.add_row(values, new_row, true);
+                }
+            }
+        }
+        if self.features == 1022 {
+            let mut moved = *board;
+            moved[to] = moved[from];
+            moved[from] = Cell::Empty;
+            let (mover, opponent) = engine::race::race_buckets(&engine::flip(&moved));
+            child.race = [mover, opponent];
+            for perspective in 0..2 {
+                for side in 0..2 {
+                    let old = parent.race[side ^ perspective ^ 1];
+                    let new = child.race[side ^ perspective];
+                    if old != new {
+                        let base = 1004 + 9 * side;
+                        let values = if perspective == 0 {
+                            &mut child.own
+                        } else {
+                            &mut child.opponent
+                        };
+                        for (bucket, add) in [(old, false), (new, true)] {
+                            let row = base + bucket as usize;
+                            self.add_row(
+                                values,
+                                &self.weights[row * self.hidden..(row + 1) * self.hidden],
+                                add,
+                            );
+                        }
+                    }
                 }
             }
         }
