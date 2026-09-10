@@ -5,7 +5,7 @@ match runner stays model-agnostic.
 
 ```
 bot eval  --candidate sq:runs/x/export.onnx [--reference sq:weights/sq_g128.onnx] [--pairs 32] [--sims 32 | --move-ms 100] [--reference-move-ms 100 | --reference-sims 32] [--threads 4] [--player-threads 1] [--seed 0] [--opening-plies 8] [--records games.jsonl] [--stream]
-bot play  --first sq:a.onnx --second sq:b.onnx [--sims 32 | --move-ms 100] [--player-threads 1] [--seed 0] [--opening-plies 8] [--leaves leaves.jsonl]
+bot play  --first sq:a.onnx --second sq:b.onnx [--sims 32 | --move-ms 100] [--player-threads 1] [--seed 0] [--opening-plies 8] [--leaves leaves.jsonl] [--random-moves K --random-from P --random-to Q] [--random-seed S]
 bot rpsi  --player sq:model.onnx [--move-ms 250] [--max-move-ms 250] [--sims 32] [--threads 4] [--name intransitive_bot]
 bot analyse --engine conv:model.onnx [--threads 1]   # or sq:<onnx>, nnue:<file.nnue>
 bot nnue convert --input prototype.nnue --output model.nnue
@@ -85,3 +85,25 @@ Normal builds contain no profiling probes.
 Profiling also reports profile_timer_ns, calibrated with empty sampled scopes.
 Subtract this estimate from each sample mean before estimating category time;
 the remaining instrumentation and sampling error are not removed by that correction.
+
+
+For data collection, play --random-moves K --random-from P --random-to Q
+injects up to K uniformly random safe moves at distinct plies sampled uniformly
+without replacement from the inclusive interval [P,Q]. Plies are zero-based
+indices into the game record's moves, including the opening; P must be at least
+--opening-plies. K must fit the interval. With K > 0 both bounds are required.
+--random-seed defaults to --seed but uses a separate RNG, leaving opening
+generation unchanged. The default K=0 preserves ordinary play and record output.
+
+Each injection is uniform over legal actions after excluding engine::tactics
+loses_in_two moves. If none is safe, the player chooses normally; if the game
+ends, later slots are unused. Skipped slots are not rescheduled. A random move
+can itself win or draw. Both players observe it, but choose is bypassed and its
+stats entry is null. GameRecord.random_plies lists only injections actually
+played and is omitted when empty. These options affect play only, not eval.
+
+
+When auditing paired records, identify the model from first/second and the
+actual mover; the reference changes seat between the two games. A timed NNUE
+move reports sims=0 because this field counts Gumbel simulations. Its search
+work is in search.nodes; zero sims alone does not mean NNUE skipped search.

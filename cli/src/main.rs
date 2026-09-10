@@ -7,8 +7,8 @@ use anyhow::{bail, ensure, Result};
 use clap::{Parser, Subcommand};
 use engine::Rules;
 use r#match::{
-    analysis, eval, play, Analyser, Clock, EvalConfig, Opening, Player, PlayerFactory, RpsiPlayer,
-    Session,
+    analysis, eval, play_with_random_moves, Analyser, Clock, EvalConfig, Opening, Player,
+    PlayerFactory, RandomMoves, RpsiPlayer, Session,
 };
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -84,6 +84,18 @@ enum Command {
         seed: u64,
         #[arg(long, default_value_t = 8)]
         opening_plies: usize,
+        /// Number of guarded random moves injected after the opening.
+        #[arg(long, default_value_t = 0)]
+        random_moves: u32,
+        /// First eligible zero-based game ply, inclusive.
+        #[arg(long)]
+        random_from: Option<u32>,
+        /// Last eligible zero-based game ply, inclusive.
+        #[arg(long)]
+        random_to: Option<u32>,
+        /// Injection RNG seed; defaults to --seed, independently of opening generation.
+        #[arg(long)]
+        random_seed: Option<u64>,
     },
     /// Serve a player to the site client over RPSI on stdin and stdout.
     Rpsi {
@@ -282,7 +294,24 @@ fn main() -> Result<()> {
             leaves,
             seed,
             opening_plies,
+            random_moves,
+            random_from,
+            random_to,
+            random_seed,
         } => {
+            let mut random = if random_moves == 0 {
+                RandomMoves::new(0, 0, 0, random_seed.unwrap_or(seed))?
+            } else {
+                let from = random_from
+                    .ok_or_else(|| anyhow::anyhow!("random-moves requires random-from"))?;
+                let to =
+                    random_to.ok_or_else(|| anyhow::anyhow!("random-moves requires random-to"))?;
+                ensure!(
+                    from as usize >= opening_plies,
+                    "random-from must be at or after the opening"
+                );
+                RandomMoves::new(random_moves, from, to, random_seed.unwrap_or(seed))?
+            };
             ensure!(player_threads > 0, "player-threads must be positive");
             let clock = move_clock(sims, move_ms)?;
             let mut a = player_from_spec(&first, player_threads)?;
@@ -296,7 +325,14 @@ fn main() -> Result<()> {
             }
             let mut rng = StdRng::seed_from_u64(seed);
             let opening = Opening::random(&Rules::SITE, opening_plies, &mut rng);
-            let record = play(&Rules::SITE, &mut *a, &mut *b, &opening, clock);
+            let record = play_with_random_moves(
+                &Rules::SITE,
+                &mut *a,
+                &mut *b,
+                &opening,
+                clock,
+                &mut random,
+            )?;
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
         Command::Rpsi {

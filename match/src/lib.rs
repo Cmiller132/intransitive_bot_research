@@ -11,6 +11,8 @@ pub mod rpsi;
 pub use analysis::{Analyser, Heads};
 pub use client::RpsiPlayer;
 pub use eval::{eval, EvalConfig, PlayerFactory, Report};
-pub use game::{play, play_observed, End, GameRecord, MoveStats, Opening};
+pub use game::{
+    play, play_observed, play_with_random_moves, End, GameRecord, MoveStats, Opening, RandomMoves,
+};
 pub use player::{Clock, History, MoveInfo, Player};
 pub use rpsi::Session;

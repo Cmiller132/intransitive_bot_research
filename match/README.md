@@ -62,3 +62,25 @@ matches, and the site adapter all go through it. It knows the engine and the
 
 Game records are written as JSON lines when a path is given; nothing else is
 persisted.
+
+## Random moves for data generation
+
+RandomMoves::new(count, from, to, seed) samples distinct zero-based game plies
+uniformly from the inclusive interval. play_with_random_moves uses the same
+runner as play and requires the injection interval to start after the opening
+(at its first subsequent ply or later). RandomMoves::plies() exposes the planned
+slots. The chosen action is uniform among legal moves not marked loses_in_two
+by engine::tactics; when every legal move loses immediately, normal play is used.
+Early game end and unsafe slots can reduce the actual count; slots are never
+rescheduled. Winning and drawing random actions are allowed.
+
+GameRecord.random_plies records actual injected indices into moves; it is omitted
+when empty. Injected moves have null stats, bypass choose, and are delivered to
+both players through observe. All ordinary history, clock and end handling is
+shared with normal play. A zero-count schedule preserves ordinary records.
+
+
+When auditing paired records, identify the model from first/second and the
+actual mover; the reference changes seat between the two games. A timed NNUE
+move reports sims=0 because this field counts Gumbel simulations. Its search
+work is in search.nodes; zero sims alone does not mean NNUE skipped search.
