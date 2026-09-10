@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nnue"
+version = "0.1.0"
+description = "Training package for the nnue model: features, quantisation-aware network, export, dataset import, student collection, teacher labelling"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.8",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["nnue*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
