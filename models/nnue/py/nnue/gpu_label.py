@@ -42,7 +42,7 @@ from .games import SITE_CLOCK
 from .label import proofs
 from .paths import data_dir, workspace_root
 
-SEARCH_FIELDS = ("sims", "candidates", "cheap_sims", "cheap_candidates", "reuse_nodes")
+SEARCH_FIELDS = ("sims", "candidates", "cheap_sims", "cheap_candidates", "reuse_nodes", "repetition_draw")
 
 
 class _ConvActor:
@@ -126,15 +126,28 @@ def load_teacher(kind: str, ckpt: Path, device: torch.device):
     return kind, actor, cfg, kernels
 
 
-def searcher(loaded, device: torch.device, sims: int, batch: int, seed: int, reuse_nodes: int | None = None):
+def searcher(
+    loaded,
+    device: torch.device,
+    sims: int,
+    batch: int,
+    seed: int,
+    reuse_nodes: int | None = None,
+    repetition_draw: bool | None = None,
+):
     """`(values_of, search config)`: a function from canonical boards, counters
     and plies (tensors on `device`, `batch` rows) to root values through the
     package's batched search; `reuse_nodes` overrides the tree capacity kept
-    between calls (unused here, every call starts afresh)."""
+    between calls (unused here, every call starts afresh). The positions come
+    without a game history, so a repetition can only occur along the search
+    path; `repetition_draw` overrides the checkpoint's setting for that
+    (the site plays without repetition draws)."""
     kind, actor, cfg, kernels = loaded
     search_cfg = replace(cfg.search, sims=sims, cheap_sims=min(cfg.search.cheap_sims, sims))
     if reuse_nodes is not None:
         search_cfg = replace(search_cfg, reuse_nodes=reuse_nodes)
+    if repetition_draw is not None:
+        search_cfg = replace(search_cfg, repetition_draw=repetition_draw)
     if kind == "conv":
         from conv.search import GumbelSearch
 
@@ -174,12 +187,19 @@ def searcher(loaded, device: torch.device, sims: int, batch: int, seed: int, reu
 
 
 def teacher(
-    kind: str, ckpt: Path, device: torch.device, sims: int, batch: int, seed: int, reuse_nodes: int | None = None
+    kind: str,
+    ckpt: Path,
+    device: torch.device,
+    sims: int,
+    batch: int,
+    seed: int,
+    reuse_nodes: int | None = None,
+    repetition_draw: bool | None = None,
 ):
     """`(values_of, config)` for one checkpoint: `load_teacher` then `searcher`;
     the config carries the search settings in use."""
     loaded = load_teacher(kind, ckpt, device)
-    values_of, search_cfg = searcher(loaded, device, sims, batch, seed, reuse_nodes)
+    values_of, search_cfg = searcher(loaded, device, sims, batch, seed, reuse_nodes, repetition_draw)
     return values_of, replace(loaded[2], search=search_cfg)
 
 
@@ -249,6 +269,7 @@ def label_sets(
     seed: int,
     teacher_kind: str = "conv",
     reuse_nodes: int | None = None,
+    repetition_draw: bool | None = None,
 ) -> list[Path]:
     """Label every `(input, out)` pair with one loaded teacher, in order; a
     pair whose output exists is skipped. Returns the datasets written."""
@@ -262,7 +283,7 @@ def label_sets(
         return []
     device = torch.device("cuda")
     loading = time.perf_counter()
-    values_of, cfg = teacher(teacher_kind, ckpt, device, sims, batch, seed, reuse_nodes)
+    values_of, cfg = teacher(teacher_kind, ckpt, device, sims, batch, seed, reuse_nodes, repetition_draw)
     sha = hashlib.sha256(ckpt.read_bytes()).hexdigest()
     print(
         json.dumps(
@@ -315,7 +336,11 @@ def label_sets(
                     "search": {
                         field: getattr(cfg.search, field) for field in SEARCH_FIELDS if hasattr(cfg.search, field)
                     },
-                    "rules": {"capture_clock": SITE_CLOCK, "repetition_draw": False},
+                    "rules": {
+                        "capture_clock": SITE_CLOCK,
+                        "repetition_draw": bool(getattr(cfg.search, "repetition_draw", False)),
+                        "repetition_history": "search path only",
+                    },
                     "input": {
                         "dataset": str(prepared["source"]),
                         "provenance": prepared["provenance"],
@@ -365,6 +390,13 @@ def main(argv: list[str]) -> None:
     parser.add_argument(
         "--reuse-nodes", type=int, default=None, help="tree capacity kept between calls (config default)"
     )
+    parser.add_argument(
+        "--repetition-draw",
+        choices=("true", "false"),
+        default=None,
+        help="score a repetition along the search path as a draw (the checkpoint's setting by default;"
+        " the site plays without repetition draws)",
+    )
     args = parser.parse_args(argv)
     if len(args.input) != len(args.out):
         parser.error("--input and --out must be given the same number of times")
@@ -377,6 +409,7 @@ def main(argv: list[str]) -> None:
         args.seed,
         args.teacher,
         args.reuse_nodes,
+        None if args.repetition_draw is None else args.repetition_draw == "true",
     )
 
 
