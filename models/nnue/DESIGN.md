@@ -319,6 +319,14 @@ unchanged, everything around them is rebuilt.
     runs on the clock (500 games at 50 ms) and the site-budget gap is
     measured against sq at fixed simulations (item 17). Rounds vary: 6 scored 51 % and 7, from the same
     parent with a new seed, 56 %, so one flat round is not saturation.
+    Saturation did come: from ft_self11 (three promotions deep) plain
+    rounds 14, 15 and 16 scored 48.8, 49.0 and 48.6 % at 50 ms. Diversity
+    is what moved: the same round with two random moves injected in half
+    the families (`nnue.collect --random-moves 2`, Stockfish's random
+    opening moves in data generation) scored 53.3 % (49.6-57.1) against
+    the same incumbent, so from round 17 every round injects. The outcome
+    mix (Stockfish's lambda, `--outcome_weight 0.1` on the self rows)
+    scored 52.4 % (48.5-56.3) on one test and is under a second.
 31. Retrain when the teacher is clearly stronger: import the new windows
     (`nnue.importer conv --run runs/conv_g128 ...`), relabel the human
     and student sets with the new checkpoint through `nnue.gpu_label`,
@@ -361,13 +369,24 @@ unchanged, everything around them is rebuilt.
     about 28-30 % of search throughput (1.06 M to 0.74 M nodes/s on the
     benchmark positions), so on the clock the feature must be worth about
     seven points of score before it breaks even (a doubling of time is
-    worth 15 %). Under test: ft_race16, the incumbent fine-tuned with the
-    rows on round 16's mixture, against ft_self11 on the same binary at 50
-    ms and at 8 simulations (the value net of the cost). If the value is
-    there but the cost eats it, the next step is a cheaper query (skip it
-    when no piece moved closer to a goal, or cache it by position). Also:
-    teacher disagreement rounds at 512 simulations on the rows where
-    student and teacher differ most.
+    worth 15 %). Astra then deferred the query to the nodes that are
+    actually evaluated (about half of the visited nodes) and added early
+    outs, which brought format 7 to 91 % of format 6 throughput with
+    identical search outputs. Measured value: ft_race16, the incumbent
+    fine-tuned with the rows for seven epochs on round 16's mixture,
+    scored 52.5 % (48.6-56.3) against ft_self11 at 8 simulations (fixed
+    nodes, the arena's setting) and 42.7 % (38.8-46.6) at 50 ms on the
+    eager binary; with the 9 % cost the clock result would be about even.
+    A residual analysis explains why: on 60k self-labelled rows the
+    incumbent's error grouped by race bucket is at most 0.046 in value, a
+    per-bucket-pair correction removes 0.8 % of the residual variance,
+    and a runner within three moves exists in 4 % of rows, so the
+    piece-square rows already read races as well as 40-simulation labels
+    can teach them (the optimism the loss study saw is twelve plies out,
+    beyond the labels' horizon). Format 7 stays supported and unused;
+    it would earn its place only with deeper labels or at fixed nodes.
+    Also: teacher disagreement rounds at 512 simulations on the rows
+    where student and teacher differ most.
 36. Not worth repeating (measured null or negative): clock rows, output
     buckets, the quiet-position filter, human outcome labels alone,
     doubling the windows alone, null move, one-ply extensions, exact
