@@ -346,15 +346,28 @@ unchanged, everything around them is rebuilt.
     cleanly.
 35. The race blind spot: of 78 goal losses against sq, 59 were runner or
     tempo races and 19 capture or escort sequences; the static value was
-    optimistic twelve plies out in 13, nine of them races. Proposed
-    feature (Astra, not built): per side, the bucketed goal distance
-    (1-8, none) of the best runner that passes a piece-type and tempo
-    interception filter, 18 rows, two active per perspective; the
-    accumulator cost is small, the interception scan is the cost. The
-    lineage can take it without a retrain: pad the 18 rows with zeros
-    (as `widen_hidden` pads columns) so the network evaluates identically
-    at first, then fine-tune. Also: teacher disagreement rounds at 512
-    simulations on the rows where student and teacher differ most.
+    optimistic twelve plies out in 13, nine of them races. Built
+    2026-09-10 (Astra: engine query and the Rust side, Claude: the Python
+    side) as format 7: per side, the bucketed goal distance (1-8, none) of
+    the best runner that passes a piece-type and tempo interception filter
+    (`engine::race::race_buckets`, a geometric hint that ignores clocks,
+    moving barriers and wins elsewhere), 18 rows after the clock rows, two
+    active per perspective (own side, other side; the pair is queried once
+    on the actual mover's board and swapped for the other perspective, so
+    the tempo is the real one). Python encodes 44 slots for both formats
+    and a format 6 model masks the race ids; `widen_features` pads the
+    lineage with zero rows, and the widened ft_self11 searches identically
+    on the Rust side. Measured cost at H512, one thread: 390 ns per query,
+    about 28-30 % of search throughput (1.06 M to 0.74 M nodes/s on the
+    benchmark positions), so on the clock the feature must be worth about
+    seven points of score before it breaks even (a doubling of time is
+    worth 15 %). Under test: ft_race16, the incumbent fine-tuned with the
+    rows on round 16's mixture, against ft_self11 on the same binary at 50
+    ms and at 8 simulations (the value net of the cost). If the value is
+    there but the cost eats it, the next step is a cheaper query (skip it
+    when no piece moved closer to a goal, or cache it by position). Also:
+    teacher disagreement rounds at 512 simulations on the rows where
+    student and teacher differ most.
 36. Not worth repeating (measured null or negative): clock rows, output
     buckets, the quiet-position filter, human outcome labels alone,
     doubling the windows alone, null move, one-ply extensions, exact

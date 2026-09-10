@@ -103,13 +103,33 @@ symmetries for every dataset), `latest.pt`, `best.pt` and
 `best.nnue` with its JSON sidecar (hashes, shape, the run's settings). Every
 config field is a flag (`--batch 2048`, `--loss bce`, `--buckets 4`,
 `--hidden 768` with a 512-wide `--init` widens it by padding (DESIGN item 33),
+`--race true` trains the 18 race rows of format 7 (a format 6 `--init` is
+widened with zero rows and evaluates identically at first, item 35),
 `--clock false` for the clock-row ablation, `--quiet true` to train only on
 rows where the mover has no capture). Games and verdicts go to
 `runs/nnue_collect/<round>/` and `runs/nnue_gauntlets/<name>/`.
 
-`nnue.export` writes and reads format 6 (`export`, `read`, `load`), evaluates
-a file with NumPy alone (`integer_eval`) and converts the prototype's format 3
-(`convert_v3`).
+`nnue.export` writes and reads formats 6 and 7 (`export`, `read`, `load`),
+evaluates a file with NumPy alone (`integer_eval`) and converts the
+prototype's format 3 (`convert_v3`). Format 7 keeps the 36-byte header with
+version 7 and 1,022 features, adding the race rows 1004..1021 after the clock
+rows; width, heads, scales and payload order are unchanged. The race buckets
+come from the engine's shared query `engine.race_buckets(board) = (m, o)` on
+the actual mover's board (0..7 encode 1..8 of that side's own moves to its
+goal for its fastest runner that passes the piece-type and tempo interception
+filter, 8 means none): the mover perspective activates 1004+m and 1013+o, the
+other perspective 1004+o and 1013+m, so the pair is queried once and swapped,
+never re-queried on the flipped board (that would change whose move it is).
+`nnue.features` always encodes 44 slots per perspective (the two race slots
+last); a format 6 model masks the race ids to padding, so both formats train
+from the same id cache, and caches written with the old 42-slot layout are
+ignored (`nnue.data encode` rewrites them). `NNUE.widen_features()` turns a
+format 6 model into format 7 with zero race rows; the exported file of a
+widened network differs from its source only in the header and the inserted
+zero rows, and the Rust search's outputs on it are identical (checked with
+`bot nnue diagnose`). The query must be in the installed `engine` extension
+(`cargo xtask wheel`; a running process that holds the old `engine.pyd` blocks
+the overwrite, so rename the old file and copy the new one in).
 
 ## Retraining on a stronger teacher
 
