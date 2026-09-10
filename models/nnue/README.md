@@ -21,9 +21,10 @@ The two halves share only the feature definition and the file format:
 
 ## Rust interface
 
-- `NnuePlayer::load(path, threads)`: the player under `Clock::Time` (a
-  deadline less a 20 ms overhead) or `Clock::Sims(n)` (n x 2,500 nodes, one
-  thread, DESIGN item 2). The spec is `nnue:<file>[?hash=<MiB>]` (table
+- `NnuePlayer::load(path, threads)`: the player under `Clock::Time` (a host
+  deadline less a 20 ms overhead; a seat's own `--movetime` budget, given
+  through `choose_self_timed`, is searched in full) or `Clock::Sims(n)` (n x
+  2,500 nodes, one thread, DESIGN item 2). The spec is `nnue:<file>[?hash=<MiB>]` (table
   budget, default 64). Files carry learned clock rows, one or four output
   buckets by piece count (DESIGN items 5 and 7) and any hidden width that
   is a multiple of 32 (768 costs about 12 % more per node than 512). When the deadline
@@ -48,9 +49,10 @@ The two halves share only the feature definition and the file format:
   doubled-time yardstick for thread measurements).
   An `rpsi:<bot> rpsi --player nnue:<file>` seat receives `go movetime`
   unchanged, so two builds can meet under the same clock; with
-  `--movetime <ms>` the seat searches that long whenever the host sends a
-  simulation count instead (`go sims N`), which is how the arena seat plays
-  under a clock budget while the pool's jobs stay at 32 simulations. A seat
+  `--movetime <ms>` the seat searches that long (the full time, no deadline
+  reserve) whenever the host sends a simulation count instead (`go sims N`),
+  which is how the arena seat plays under a clock budget while the pool's
+  jobs stay at 32 simulations. A seat
   may send `info json` search statistics after its move; the host copies
   them into the game record, so an external seat's nodes and time appear in
   `bot eval` records like a native player's (match/README.md).

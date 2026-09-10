@@ -396,9 +396,21 @@ unchanged, everything around them is rebuilt.
     (56.3-61.3) at 50 ms over 1,000 games and 57.5 % (54.0-60.9) at 100 ms
     over 500 against the previous one. The dense head is now the largest
     cost (25 %); lazy evaluation with a margin and a cheaper quiescence
-    change decisions and wait for their own gauntlets (turn 16), together
-    with the 20 ms reserve under a self-imposed `--movetime` and the
-    two-thread scaling the arena seat now uses.
+    change decisions and had their own gauntlets in turn 16, where both
+    failed: lazy evaluation with a margin of 1,152 units (the residual's
+    99.5th percentile; a safe margin skips 0.4 % of dense heads) 50.5 % at
+    50 ms and 47.7 % at 100 ms, a quiescence horizon of 2 instead of 6
+    49.35 % at 50 ms. Kept from turn 16: a seat's own `--movetime` budget
+    is searched in full (the 20 ms reserve serves a host deadline only;
+    56.2 % (53.1-59.5) at 100 ms, +25 % nodes per move) and terminal checks
+    proved by the caller are not repeated (+2-5 %). Scaling at 100 ms with
+    frozen weights: two threads 56.1 % (52.9-59.4) against one at 1.97x the
+    nodes, four threads 67.0 % (64.0-70.0) at 4.05x; a versioned atomic
+    shared table, a shared-entry prefetch and scratch alignment were within
+    noise. An adaptive stop (turn 14: stable move and score over three
+    depths) scored 49.8 % at 50 ms, as expected under a fixed movetime.
+    Arena, 2026-09-10 17:00: ft_gpu150a on two threads at 100 ms settled at
+    +97 (29.9) with the best conv checkpoint at +34 and sq at 0.
 35. The race blind spot: of 78 goal losses against sq, 59 were runner or
     tempo races and 19 capture or escort sequences; the static value was
     optimistic twelve plies out in 13, nine of them races. Built
