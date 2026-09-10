@@ -24,9 +24,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import engine
 import numpy as np
 
 from . import data
+from .games import parse_action
 from .gauntlet import bot_binary
 from .paths import data_dir, workspace_root
 
@@ -91,7 +93,27 @@ def analyse_once(engine_spec: str, rows: list[dict], sims: int) -> list[dict]:
     return responses
 
 
-def label(input_set: str, out: str, engine_spec: str, sims: int, workers: int, sample: int = 0, seed: int = 0) -> Path:
+def captures(board: np.ndarray, since: int, ply: int, token: str) -> bool:
+    """Whether the chosen move (an absolute token from the blue frame the
+    request used) captures: the counter resets on a capture."""
+    action = parse_action(token, False)
+    _, since_after, _, outcome = engine.apply(list(board), int(since), int(ply), action, SITE_CLOCK)
+    return since_after == 0 and outcome == 0
+
+
+def label(
+    input_set: str,
+    out: str,
+    engine_spec: str,
+    sims: int,
+    workers: int,
+    sample: int = 0,
+    seed: int = 0,
+    quiet_best: bool = False,
+) -> Path:
+    """`quiet_best` drops the rows whose chosen move is a capture, Stockfish's
+    generation filter: the evaluator then learns positions the search
+    would evaluate statically, not ones it resolves with a capture."""
     started = time.perf_counter()
     source = Path(data_dir(input_set))
     rows = {name: np.load(source / f"{name}.npy") for name in data.FIELDS}
@@ -110,7 +132,7 @@ def label(input_set: str, out: str, engine_spec: str, sims: int, workers: int, s
     chunks = [requests[k::workers] for k in range(workers)]
     with ThreadPoolExecutor(workers) as pool:
         answers = list(pool.map(lambda chunk: analyse(engine_spec, chunk, sims) if chunk else [], chunks))
-    chosen_q, root_value, errors = [], [], 0
+    chosen_q, root_value, errors, dropped = [], [], 0, 0
     for k, chunk_answers in enumerate(answers):
         for j, response in enumerate(chunk_answers):
             i = open_rows[k + j * workers]
@@ -119,6 +141,14 @@ def label(input_set: str, out: str, engine_spec: str, sims: int, workers: int, s
                 kind[i] = 255
                 continue
             search = response["search"]
+            if (
+                quiet_best
+                and search["lines"]
+                and captures(rows["board"][i], rows["since_capture"][i], rows["ply"][i], search["lines"][0]["move"])
+            ):
+                dropped += 1
+                kind[i] = 255
+                continue
             target[i] = float(np.clip(search["root_value"], -1, 1))
             root_value.append(search["root_value"])
             chosen_q.append(search["lines"][0]["q"] if search["lines"] else float("nan"))
@@ -147,6 +177,8 @@ def label(input_set: str, out: str, engine_spec: str, sims: int, workers: int, s
             "input": {"dataset": str(source), "provenance": provenance, "rows": n, "sample": sample, "seed": seed},
             "proofs": int((kind == data.KIND_PROOF).sum()),
             "errors": errors,
+            "quiet_best": quiet_best,
+            "dropped": dropped,
             "chosen_q_vs_root": {
                 "mean_abs_difference": float(np.nanmean(np.abs(chosen - root))) if len(root) else None,
                 "rows": int(len(root)),
@@ -154,7 +186,17 @@ def label(input_set: str, out: str, engine_spec: str, sims: int, workers: int, s
             "seconds": time.perf_counter() - started,
         },
     )
-    print(json.dumps({"event": "written", "dataset": str(target_dir), "rows": int(keep.sum()), "errors": errors}))
+    print(
+        json.dumps(
+            {
+                "event": "written",
+                "dataset": str(target_dir),
+                "rows": int(keep.sum()),
+                "errors": errors,
+                "dropped": dropped,
+            }
+        )
+    )
     return target_dir
 
 
@@ -167,8 +209,9 @@ def main(argv: list[str]) -> None:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--rows", type=int, default=0, help="label a random sample of this many rows")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--quiet-best", action="store_true", help="drop rows whose best move is a capture")
     args = parser.parse_args(argv)
-    label(args.input, args.out, args.engine, args.sims, args.workers, args.rows, args.seed)
+    label(args.input, args.out, args.engine, args.sims, args.workers, args.rows, args.seed, args.quiet_best)
 
 
 if __name__ == "__main__":

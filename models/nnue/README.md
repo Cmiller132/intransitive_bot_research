@@ -60,7 +60,7 @@ python -m nnue.data encode <set> [<set> ...]
 python -m nnue.train --run <name> --data <set>:<share> [--data <set>:<share> ...] [--init <file.nnue>] [--<field> value ...]
 python -m nnue.train --run <name> --data ... --resume runs/<name>/latest.pt
 python -m nnue.collect --round <name> --student <a.nnue> [--previous <b.nnue> | --opponent <spec> --move-ms N] [--families 64] [--states 10000]
-python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx] [--sims 256] [--workers 8] [--rows N]
+python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx | nnue:<file>] [--sims 256] [--workers 8] [--rows N] [--quiet-best]
 python -m nnue.gpu_label --input <set> --out <set> --ckpt runs/conv_g128/ckpt_000040.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N]
 python -m nnue.gauntlet --name <name> --candidate <a.nnue> --incumbent <b.nnue> [--stage screen|accept|confirm|all] [--sims N] [--incumbent-bin <bot.exe>]
 ```

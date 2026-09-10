@@ -291,7 +291,9 @@ unchanged, everything around them is rebuilt.
     over 500 games at 50 ms against its parent, a full acceptance step
     with no teacher. The loop is now: collect 640 families, label with the
     incumbent at 40 simulations, fine-tune 12 epochs at 30 % share,
-    resolve over 500 games. Recipe checks on the same data: 24 epochs
+    resolve over 500 games. `nnue.label --quiet-best` is Stockfish's
+    generation filter (drop rows whose best move is a capture), under test
+    against the unfiltered labels. Recipe checks on the same data: 24 epochs
     scored 50.8 % against 12 (no change), a 50 % self share scored 44.8 %
     against 30 % (worse; the window and teacher rows anchor the network),
     so the recipe stands. Rounds vary: 6 scored 51 % and 7, from the same

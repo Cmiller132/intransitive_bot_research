@@ -74,3 +74,39 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     assert provenance["sims"] == 64 and provenance["errors"] == 2
     assert provenance["rows"] == n - 2 and provenance["input"]["rows"] == n
     assert sum(count for _, _, count in seen) == n and all(s == 64 for _, s, _ in seen)
+
+
+def test_quiet_best_drops_rows_whose_best_move_captures(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    # Own rock at 40 (e5) beside an enemy scissors at 41 (f5): e5-f5 captures; e5-e6 does not.
+    board = board_with({40: 1, 41: 6, 0: 4, 80: 1})
+    boards = np.stack([board, board])
+    n = 2
+    rows = {
+        "board": boards,
+        "since_capture": np.full(n, 5, dtype=np.uint16),
+        "ply": np.full(n, 20, dtype=np.uint16),
+        "capture_clock": np.full(n, 200, dtype=np.uint16),
+        "target": np.zeros(n, dtype=np.float32),
+        "weight": np.ones(n, dtype=np.float32),
+        "kind": np.full(n, data.KIND_RAW, dtype=np.uint8),
+        "outcome": np.zeros(n, dtype=np.int8),
+        "outcome_ok": np.zeros(n, dtype=bool),
+        "source": np.full(n, data.SOURCE_STUDENT, dtype=np.uint8),
+        "game": np.arange(n, dtype=np.uint32),
+        "orbit": features.orbit_hash(boards),
+        "split": np.zeros(n, dtype=np.uint8),
+    }
+    data.write(paths.data_dir("raw2"), rows, {"producer": "test"})
+    moves = iter(["e5-f5", "e5-e6"])
+
+    def analyse(engine_spec, requests, sims):
+        return [{"search": {"root_value": 0.25, "lines": [{"move": next(moves), "q": 0.25}]}} for _ in requests]
+
+    monkeypatch.setattr(label, "analyse", analyse)
+    if label.proofs(boards).any():
+        return  # the fixture position must be open for the filter to apply
+    target = label.label("raw2", "quiet", "fake:engine", 4, 1, quiet_best=True)
+    provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["dropped"] == 1 and provenance["quiet_best"] is True
+    assert len(np.load(target / "kind.npy")) == 1
