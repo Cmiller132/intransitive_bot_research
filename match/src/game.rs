@@ -4,7 +4,7 @@
 use anyhow::{ensure, Result};
 use engine::{apply, Action, Outcome, Rules, State, GOAL};
 use rand::{rngs::StdRng, seq::index, Rng, SeedableRng};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::player::{Clock, History, MoveInfo, Player};
 use crate::rpsi::Frame;
@@ -100,10 +100,15 @@ impl RandomMoves {
     }
 
     /// Uniform over legal actions that do not allow an immediately winning reply.
-    fn choose(&mut self, rules: &Rules, state: &State) -> Option<Action> {
+    pub fn choose(&mut self, rules: &Rules, state: &State) -> Option<Action> {
         if self.plies.binary_search(&state.ply).is_err() {
             return None;
         }
+        self.choose_safe(rules, state)
+    }
+
+    /// Guarded uniform sampling, also used for self-play opening plies.
+    pub fn choose_safe(&mut self, rules: &Rules, state: &State) -> Option<Action> {
         let legal = state.legal_actions();
         let losses = engine::tactics::loses_in_two(rules, state, &legal);
         let safe: Vec<Action> = legal
@@ -121,7 +126,7 @@ impl RandomMoves {
 
 /// A mover's search summary as recorded: absolute move tokens, values from
 /// the mover's point of view.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MoveStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search: Option<serde_json::Value>,
@@ -134,7 +139,7 @@ pub struct MoveStats {
     pub top: Vec<TopMove>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TopMove {
     #[serde(rename = "move")]
     pub action: String,
@@ -166,7 +171,7 @@ impl MoveStats {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum End {
     Goal,
     Elimination,
@@ -174,11 +179,13 @@ pub enum End {
     CaptureClock,
     /// The loser produced no legal move (an external engine failed).
     Forfeit,
+    PlyCap,
+    Interrupted,
 }
 
 /// Result of one game; `winner` is 0 for the first player, 1 for the second,
-/// `None` for a draw.
-#[derive(Clone, Debug, Serialize)]
+/// `None` for a draw or a censored game, distinguished by `end`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GameRecord {
     pub first: String,
     pub second: String,
@@ -188,9 +195,10 @@ pub struct GameRecord {
     /// Every move as an absolute token, opening included.
     pub moves: Vec<String>,
     /// The mover's search summary for each move, when it exposes one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stats: Vec<Option<MoveStats>>,
     /// Zero-based indices into moves, only for injections actually played.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub random_plies: Vec<u32>,
 }
 

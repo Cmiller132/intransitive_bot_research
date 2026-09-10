@@ -44,6 +44,21 @@ pub enum Outcome {
     Draw,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    Goal,
+    Elimination,
+    Stalemate,
+    CaptureClock,
+}
+
+/// Terminal result in absolute player coordinates (player zero moves at ply zero).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Terminal {
+    pub winner: Option<u8>,
+    pub reason: EndReason,
+}
+
 /// One flag per action index.
 pub type ActionMask = [bool; N_ACTIONS];
 
@@ -143,6 +158,30 @@ pub struct PositionKey {
 }
 
 impl State {
+    /// Check a root before searching, with the same precedence as move application.
+    pub fn terminal(&self, rules: &Rules) -> Option<Terminal> {
+        let mover = (self.ply % 2) as u8;
+        let result = if self.board[0].is_enemy() {
+            (Some(1 - mover), EndReason::Goal)
+        } else if self.board[GOAL as usize].is_own() {
+            (Some(mover), EndReason::Goal)
+        } else if self.own_count() == 0 {
+            (Some(1 - mover), EndReason::Elimination)
+        } else if self.enemy_count() == 0 {
+            (Some(mover), EndReason::Elimination)
+        } else if self.is_stalemated() {
+            (Some(1 - mover), EndReason::Stalemate)
+        } else if rules.clock_expired(self) {
+            (None, EndReason::CaptureClock)
+        } else {
+            return None;
+        };
+        Some(Terminal {
+            winner: result.0,
+            reason: result.1,
+        })
+    }
+
     pub fn initial() -> State {
         State {
             board: initial_board(),

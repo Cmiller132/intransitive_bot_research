@@ -62,6 +62,17 @@ pub struct SearchResult {
     pub iterations: Vec<Iteration>,
 }
 
+impl SearchResult {
+    /// The completed root label, independent of a later partial playing choice.
+    pub fn completed_root(&self) -> Option<(u16, i32, u8)> {
+        self.iterations
+            .iter()
+            .rev()
+            .find(|i| i.completed)
+            .and_then(|i| i.action.map(|action| (action, i.score, i.depth)))
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Entry {
     key: u64,
@@ -371,6 +382,7 @@ impl Searcher {
         self.clear_heuristics();
     }
     fn clear_heuristics(&mut self) {
+        self.generation = 0;
         self.history = [[0; 648]; 2];
         self.killers.fill([NO_MOVE; 2]);
     }
@@ -1411,5 +1423,90 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn completed_label_does_not_follow_a_partial_playing_choice() {
+        let mut result = SearchResult {
+            action: Some(2),
+            score: 123,
+            depth: 1,
+            nodes: 17,
+            qnodes: 8,
+            elapsed: Duration::ZERO,
+            aborted: true,
+            partial: true,
+            pv: vec![2],
+            root_moves: 4,
+            iterations: vec![
+                Iteration {
+                    depth: 1,
+                    nodes: 6,
+                    elapsed_ms: 1.,
+                    action: Some(1),
+                    score: -45,
+                    completed: true,
+                    changed: true,
+                },
+                Iteration {
+                    depth: 2,
+                    nodes: 11,
+                    elapsed_ms: 2.,
+                    action: Some(2),
+                    score: 123,
+                    completed: false,
+                    changed: true,
+                },
+            ],
+        };
+        assert_eq!(result.completed_root(), Some((1, -45, 1)));
+        result.iterations.clear();
+        result.score = MATE - 1;
+        assert_eq!(result.completed_root(), None);
+    }
+
+    #[test]
+    fn game_reset_removes_previous_worker_assignment_history() {
+        let model = Model::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/h768_dense.nnue"
+        ))
+        .unwrap();
+        let mut searcher = Searcher::new(1);
+        let limits = Limits {
+            nodes: 2000,
+            time: Duration::MAX,
+            ..Limits::default()
+        };
+        let signature = |r: SearchResult| {
+            (
+                r.action,
+                r.score,
+                r.depth,
+                r.nodes,
+                r.iterations
+                    .iter()
+                    .map(|i| (i.action, i.score, i.depth, i.nodes, i.completed))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let expected = signature(searcher.search(&model, &State::initial(), None, limits));
+        let child = engine::apply(
+            &Rules::SITE,
+            &State::initial(),
+            State::initial().legal_actions()[0],
+        )
+        .0;
+        searcher.search(&model, &child, None, limits);
+        searcher.clear();
+        assert_eq!(searcher.generation, 0);
+        assert_eq!(
+            signature(searcher.search(&model, &State::initial(), None, limits)),
+            expected
+        );
     }
 }

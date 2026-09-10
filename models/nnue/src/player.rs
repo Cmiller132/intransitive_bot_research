@@ -233,7 +233,7 @@ impl Analyser for NnuePlayer {
 }
 
 /// NNUE paths optionally carry one table-budget parameter, in MiB.
-fn player_options(spec: &str) -> Result<(&str, usize)> {
+pub fn player_options(spec: &str) -> Result<(&str, usize)> {
     let (path, hash_mib) = if let Some((path, query)) = spec.split_once('?') {
         let value = query
             .strip_prefix("hash=")

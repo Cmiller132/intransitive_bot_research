@@ -93,3 +93,39 @@ When auditing paired records, identify the model from first/second and the
 actual mover; the reference changes seat between the two games. A timed NNUE
 move reports sims=0 because this field counts Gumbel simulations. Its search
 work is in search.nodes; zero sims alone does not mean NNUE skipped search.
+
+## Self-play records
+
+`selfplay::Record` extends `GameRecord` with schema version 1, `game_id`,
+derived `seed`, `initial` and `final_position`, `capture_clock`, compact
+`roots`, `opening_plies`, `random_plan`, `random_skipped`, `censored`,
+`outcome` and `outcome_after_ply`. The existing per-move `stats` are omitted;
+`moves` still contains every absolute move token. `random_plies` lists all
+actual random deviations, including opening moves. Planned slots and skipped
+slots are separate, so a skipped injection is never counted as a deviation.
+
+A position contains 81 canonical mover-relative cell codes, `ply`, `mover`,
+`since_capture` and `blue_home` (0). Move tokens use the absolute blue-home
+frame. Root action integers are canonical to the pre-move board; reconstruct
+that board by replaying the tokens. Each root stores `ply`, `mover`,
+`since_capture`, `capture_clock`, `board_fingerprint` (FNV-1a of the 81 codes),
+`searched_best`, `played_action`, integer `root_score`, `score_kind`,
+`completed_depth`, total `nodes` and `elapsed_ns`.
+
+`score_kind=search` uses the LAST COMPLETED iteration's best and score. The
+played move can differ when the next iteration was unfinished. `unlabelled`
+has null best/score and zero completed depth. `engine_proof` independently
+checks that the selected action immediately wins under engine rules; its
+score is 29999 and completed depth is zero. Uniform random moves have no
+root entry. An interrupted search may have a root with no played action.
+
+Positive root scores favor that root's mover. The score target is
+`tanh(root_score / 600)`. `outcome` is +1 for absolute player zero winning,
+-1 for player one winning, and 0 only for an engine draw. Convert its sign
+for each root's mover. Outcome supervision starts at `outcome_after_ply`,
+one ply after the last actual random deviation; earlier completed scores
+remain usable. Censored games (`PlyCap` or `Interrupted`) have null outcome
+and null outcome-supervision boundary. Terminal games use only engine
+`Goal`, `Elimination`, `Stalemate` or `CaptureClock` results: clock 200, no
+repetition draw or score adjudication. Engine terminal results take precedence
+when a stop arrives on the terminal move.

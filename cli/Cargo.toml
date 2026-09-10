@@ -17,3 +17,8 @@ clap.workspace = true
 rand.workspace = true
 serde_json.workspace = true
 nnue = { path = "../models/nnue" }
+serde.workspace = true
+flate2 = "1.1"
+sha2 = "0.10"
+ctrlc = { version = "3.5", features = ["termination"] }
+core_affinity = "0.8"

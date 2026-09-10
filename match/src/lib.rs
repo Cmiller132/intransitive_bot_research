@@ -7,6 +7,7 @@ pub mod eval;
 pub mod game;
 pub mod player;
 pub mod rpsi;
+pub mod selfplay;
 
 pub use analysis::{Analyser, Heads};
 pub use client::RpsiPlayer;

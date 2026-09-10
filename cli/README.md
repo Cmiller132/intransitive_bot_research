@@ -110,3 +110,63 @@ When auditing paired records, identify the model from first/second and the
 actual mover; the reference changes seat between the two games. A timed NNUE
 move reports sims=0 because this field counts Gumbel simulations. Its search
 work is in search.nodes; zero sims alone does not mean NNUE skipped search.
+
+## Self-play generation
+
+`bot selfplay` runs independent, one-thread NNUE games in one process. It
+shares immutable weights, keeps each game's TT between moves, and clears
+TT and ordering state before the next game. Default concurrency is 16.
+
+```text
+bot selfplay --player nnue:runs/nnue_candidates/ft_gpu150a.nnue?hash=64 --nodes 250000 --games 20000 --threads 16 --seed 20260912001 --opening-plies 8 --random-moves 2 --random-from 8 --random-to 40 --multipv 1 --multipv-margin 60 --max-plies 1024 --records runs/generation --shard-games 256
+bot selfplay --records runs/generation --verify
+```
+
+`--nodes` includes quiescence; there is no search SMP. The search depth limit
+is 64. Random count defaults to zero; distinct injection slots use the
+inclusive, zero-based window. Opening moves and injections use the existing
+uniform safe-legal sampler. If every move loses immediately, the slot is
+marked skipped and normal search plays. `--multipv` currently accepts only
+1; the nonnegative margin (default 60) is recorded but unused.
+
+Pin the parent before starting the generator. For Windows PowerShell, the
+following sets this shell and its children to logical CPUs 16-31 and below
+normal priority; run the command above in that shell:
+
+```powershell
+$generationProcess = [Diagnostics.Process]::GetCurrentProcess()
+$generationProcess.PriorityClass = 'BelowNormal'
+$generationProcess.ProcessorAffinity = [IntPtr]4294901760
+```
+
+Python's `psutil.Process().cpu_affinity(list(range(16,32)))` before
+`subprocess.run([...])` is equivalent for affinity. Linux can use
+`taskset -c 16-31 nice -n 10 bot selfplay ...`. The manifest records the
+actual allowed logical CPUs, effective settings, model/binary/rule SHA256,
+seed derivation and TT policy. Rules hashes normalize source line endings.
+
+Each gzip JSONL line extends `GameRecord`; see match/README.md for the schema.
+Shards have fixed game-ID ranges, zero gzip timestamps and atomic publication.
+The atomically replaced manifest lists their sizes, hashes and counts. A
+single writer lock prevents concurrent writers to the same directory.
+Progress goes to stderr; the final stdout JSON reports generated games,
+eligible roots, total nodes, summed search time and generation-wall rates.
+Eligible means a completed label at ply >=16, before deduplication.
+
+Resume by repeating **all** original options and adding `--resume`. Model,
+binary, rules, effective settings (including target games, worker count and
+CPU mask) must match exactly. Each game has its own derived seed. Per-move
+journals preserve flushed decisions; completed games are stored durably
+before joining a shard. Ctrl-C/termination preserves completed labels and
+censors unfinished games with null outcomes. After an abrupt process exit,
+resume recovers complete journal lines and ignores a torn final event.
+Pending games wait for their full shard range; they are not silently lost.
+Published shards and shard reconstruction from persisted records are
+byte-identical. A fresh rerun reproduces game decisions, not measured
+elapsed times. Per-move flushes protect against process exit; the last
+un-synced events are not guaranteed across power loss.
+
+`--verify` needs no model: it checks every published shard hash and replays
+every game through the engine, including frames, root board fingerprints,
+legal actions, random guards, engine proofs and terminal/censored results.
+It does not re-search labels or audit unpublished active journals.

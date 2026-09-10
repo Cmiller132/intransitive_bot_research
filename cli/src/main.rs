@@ -1,5 +1,7 @@
 //! `bot`: eval, play, rpsi and analyse over every model crate.
 
+mod selfplay;
+
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 
@@ -24,6 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Generate resumable, CPU-only NNUE self-play datasets, or audit their replay.
+    Selfplay(selfplay::Args),
     /// NNUE migration conversion, parity validation and fixed-node diagnostics.
     Nnue {
         #[command(subcommand)]
@@ -240,6 +244,7 @@ fn analyser_from_spec(spec: &str, threads: usize) -> Result<Box<dyn Analyser>> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Selfplay(args) => selfplay::run(args)?,
         Command::Nnue { command } => nnue_command(command)?,
         Command::Eval {
             candidate,

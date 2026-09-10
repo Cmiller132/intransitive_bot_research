@@ -6,4 +6,4 @@ mod player;
 pub mod profile;
 pub mod search;
 pub use net::Model;
-pub use player::NnuePlayer;
+pub use player::{player_options, NnuePlayer};
