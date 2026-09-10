@@ -34,6 +34,18 @@ impl Default for Limits {
     }
 }
 
+/// One root iteration, including aspiration retries, from the selected worker.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Iteration {
+    pub depth: u8,
+    pub nodes: u64,
+    pub elapsed_ms: f64,
+    pub action: Option<u16>,
+    pub score: i32,
+    pub completed: bool,
+    pub changed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchResult {
     pub action: Option<u16>,
@@ -46,6 +58,8 @@ pub struct SearchResult {
     /// The chosen move improved in an unfinished iteration; depth is the last completed depth.
     pub partial: bool,
     pub pv: Vec<u16>,
+    pub root_moves: usize,
+    pub iterations: Vec<Iteration>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -410,6 +424,8 @@ impl Searcher {
             aborted: false,
             partial: false,
             pv: Vec::new(),
+            root_moves: root_moves.len(),
+            iterations: Vec::new(),
         };
         if root_moves.is_empty() {
             result.score = -MATE;
@@ -444,6 +460,9 @@ impl Searcher {
             if self.should_stop(true) {
                 break;
             }
+            let iteration_start = Instant::now();
+            let iteration_nodes = self.nodes;
+            let previous_action = result.action;
             if let Some(best) = result.action {
                 if let Some(i) = ordered.iter().position(|&m| m == best) {
                     ordered.swap(0, i);
@@ -478,6 +497,15 @@ impl Searcher {
                 result.pv = best.into_iter().collect();
                 break;
             }
+            result.iterations.push(Iteration {
+                depth,
+                nodes: self.nodes - iteration_nodes,
+                elapsed_ms: iteration_start.elapsed().as_secs_f64() * 1000.,
+                action: result.action,
+                score: result.score,
+                completed: !self.stopped,
+                changed: result.action != previous_action,
+            });
             if self.stopped || result.score.abs() >= MATE - MAX_PLY as i32 {
                 break;
             }
@@ -1137,6 +1165,45 @@ fn history_reduction(depth: i32, index: usize, history: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn iteration_records_account_for_the_selected_search() {
+        let model = Model::from_bytes(include_bytes!("../tests/fixtures/h768_dense.nnue")).unwrap();
+        let state = State::initial();
+        let result = Searcher::new(1).search(
+            &model,
+            &state,
+            None,
+            Limits {
+                nodes: 10_000,
+                time: Duration::from_secs(30),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(result.root_moves, state.legal_actions().len());
+        assert_eq!(
+            result.iterations.iter().map(|i| i.nodes).sum::<u64>(),
+            result.nodes
+        );
+        assert_eq!(
+            result.iterations.iter().filter(|i| i.completed).count(),
+            result.depth as usize
+        );
+        for (index, iteration) in result.iterations.iter().enumerate() {
+            assert_eq!(iteration.depth as usize, index + 1);
+            assert!(iteration.elapsed_ms >= 0.);
+            if index > 0 {
+                assert_eq!(
+                    iteration.changed,
+                    iteration.action != result.iterations[index - 1].action
+                );
+            }
+        }
+        let last = result.iterations.last().unwrap();
+        assert_eq!(last.action, result.action);
+        assert_eq!(last.score, result.score);
+        assert_eq!(!last.completed, result.aborted);
+    }
+
     #[test]
     fn quiescence_proves_stalemate_before_stand_pat() {
         let model = Model::from_bytes(include_bytes!("../tests/fixtures/h768_dense.nnue")).unwrap();

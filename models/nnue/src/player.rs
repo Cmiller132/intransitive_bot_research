@@ -103,7 +103,8 @@ impl Player for NnuePlayer {
             serde_json::json!({
                 "nodes": s.nodes, "qnodes": s.qnodes, "depth": s.depth,
                 "score": s.score, "pv": s.pv, "elapsed_ms": s.elapsed.as_secs_f64()*1000.,
-                "aborted": s.aborted, "partial": s.partial, "hash_mib": self.hash_mib, "leaf_error": self.search.leaf_error()
+                "aborted": s.aborted, "partial": s.partial, "hash_mib": self.hash_mib, "leaf_error": self.search.leaf_error(),
+                "root_moves": s.root_moves, "iterations": s.iterations
             })
         })
     }

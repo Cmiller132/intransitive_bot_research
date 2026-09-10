@@ -29,6 +29,11 @@ The two halves share only the feature definition and the file format:
   is a multiple of 32 (768 costs about 12 % more per node than 512). When the deadline
   interrupts an iteration, a completed root child inside the aspiration
   window may replace the previous choice (`partial` in the search record).
+  Search records include `root_moves` and `iterations`: depth, nodes,
+  elapsed milliseconds (including aspiration retries), selected action and
+  score, completion, and whether the selected action changed. With several
+  workers the iterations belong to the worker whose result was selected;
+  top-level nodes count all workers and `aborted` means any worker stopped.
 - `bot eval --move-ms N --player-threads T [--reference-move-ms M]`: the
   timed paired evaluation, the reference optionally on its own budget (the
   doubled-time yardstick for thread measurements).
