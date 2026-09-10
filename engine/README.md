@@ -11,12 +11,18 @@ kernels, which must be tested against this crate.
   frame (`mirror_anti`, `swap_side`, `flip`) and the initial position.
 - `rules`: `State`, `Rules`, `Outcome`, `legal_mask`, `apply`, `beats`;
   `State::legal_actions_into` generates the legal moves into a caller's buffer
-  for searches that visit millions of positions.
+  for searches that visit millions of positions. `State::legal_moves` builds
+  compact capture and quiet masks: `len`, `is_empty`, `contains`, `all_into`,
+  `captures_into` and `quiets_into(target_squares, out)` allow a search to
+  enumerate captures before quiets. Appended actions are in ascending order;
+  the quiet target set is a `u128` square bitmask.
 - `tactics`: exact short tactics per legal move, `wins_at_once`,
   `loses_in_two` (the reply wins at once) and `wins_in_three` (every reply
   leaves a win at once), plus `any_win_at_once`; tested against brute force. `can_capture`,
   `is_attacked`, `goal_move` and `goal_threat` supply the NNUE feature and
-  quiescence queries without duplicating rules.
+  quiescence queries without duplicating rules. `attack_candidates(board, action)`
+  returns a square bitmask covering every occupancy or attack-status change
+  after a legal move, for incremental feature updates.
 - `notation`: square and move spelling (`a1`, `a1-b2`) in the canonical frame.
 - `race::race_buckets(&board) -> (u8, u8)`: geometric runner hints for the
   actual mover and opponent. Buckets 0..7 mean 1..8 moves by that side; 8

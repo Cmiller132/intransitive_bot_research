@@ -134,6 +134,41 @@ pub fn can_capture(attacker: Cell, target: Cell) -> bool {
         _ => false,
     }
 }
+
+/// Squares whose occupancy or attacked status can change after this legal move.
+pub fn attack_candidates(board: &Board, action: Action) -> u128 {
+    const NEIGHBOURS: [u128; 81] = {
+        let mut masks = [0; 81];
+        let mut square = 0;
+        while square < 81 {
+            let mut dir = 0;
+            while dir < N_DIRS {
+                let (dr, df) = crate::board::DIRS[dir];
+                let r = square as i8 / 9 + dr;
+                let f = square as i8 % 9 + df;
+                if r >= 0 && r < 9 && f >= 0 && f < 9 {
+                    masks[square] |= 1 << (r * 9 + f);
+                }
+                dir += 1;
+            }
+            square += 1;
+        }
+        masks
+    };
+    let (from, to) = crate::from_to(action);
+    let mover = board[from as usize];
+    let captured = board[to as usize];
+    let mut affected = (1 << from) | (1 << to);
+    let mut adjacent = NEIGHBOURS[from as usize] | NEIGHBOURS[to as usize];
+    while adjacent != 0 {
+        let square = adjacent.trailing_zeros() as usize;
+        adjacent &= adjacent - 1;
+        if can_capture(mover, board[square]) || can_capture(captured, board[square]) {
+            affected |= 1 << square;
+        }
+    }
+    affected
+}
 /// A legal goal-entry action, if present.
 pub fn goal_move(board: &Board) -> Option<Action> {
     for (from, dir) in [(70, 7), (71, 6), (79, 4)] {

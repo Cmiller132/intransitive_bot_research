@@ -16,6 +16,57 @@ fn place(cells: &[(usize, Cell)]) -> State {
 }
 
 #[test]
+fn staged_move_masks_match_the_rule_mask() {
+    let mut seed = 0x2026091015u64;
+    for _ in 0..1000 {
+        let mut state = State::initial();
+        for cell in &mut state.board {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *cell = Cell::from_code((seed % 7) as u8).unwrap();
+        }
+        let mask = state.legal_mask();
+        let expected: Vec<_> = (0..N_ACTIONS as Action)
+            .filter(|&a| mask[a as usize])
+            .collect();
+        let moves = state.legal_moves();
+        assert_eq!(moves.len(), expected.len());
+        assert_eq!(moves.is_empty(), expected.is_empty());
+        let mut all = Vec::new();
+        moves.all_into(&mut all);
+        assert_eq!(all, expected);
+        let mut captures = Vec::new();
+        let mut quiets = Vec::new();
+        moves.captures_into(&mut captures);
+        moves.quiets_into(u128::MAX, &mut quiets);
+        assert!(captures
+            .iter()
+            .all(|&a| state.board[from_to(a).1 as usize].is_enemy()));
+        assert!(quiets
+            .iter()
+            .all(|&a| state.board[from_to(a).1 as usize] == Cell::Empty));
+        captures.extend(quiets);
+        captures.sort_unstable();
+        assert_eq!(captures, expected);
+        for action in 0..N_ACTIONS as Action {
+            assert_eq!(moves.contains(action), mask[action as usize]);
+        }
+        assert!(!moves.contains(u16::MAX));
+        let mut goals = Vec::new();
+        moves.quiets_into(1 << 80, &mut goals);
+        assert_eq!(
+            goals,
+            expected
+                .iter()
+                .copied()
+                .filter(|&a| from_to(a).1 == 80 && state.board[80] == Cell::Empty)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn initial_position_has_twenty_pieces_and_blue_moves_first() {
     let state = State::initial();
     assert_eq!(state.own_count(), 10);

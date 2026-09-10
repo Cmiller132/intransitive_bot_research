@@ -47,6 +47,88 @@ pub enum Outcome {
 /// One flag per action index.
 pub type ActionMask = [bool; N_ACTIONS];
 
+/// Legal origins by direction, partitioned by whether the target is occupied.
+pub struct LegalMoves {
+    captures: [u128; 8],
+    quiets: [u128; 8],
+}
+
+impl LegalMoves {
+    pub fn len(&self) -> usize {
+        self.captures
+            .iter()
+            .chain(&self.quiets)
+            .map(|m| m.count_ones() as usize)
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn contains(&self, action: Action) -> bool {
+        let dir = action as usize / N_SQUARES;
+        dir < 8
+            && (self.captures[dir] | self.quiets[dir]) & (1 << (action as usize % N_SQUARES)) != 0
+    }
+
+    /// Append captures in ascending action order.
+    pub fn captures_into(&self, out: &mut Vec<Action>) {
+        append_origins(&self.captures, out);
+    }
+
+    /// Append quiet moves onto any square in `targets`, in ascending action order.
+    pub fn quiets_into(&self, targets: u128, out: &mut Vec<Action>) {
+        let origins = std::array::from_fn(|dir| self.quiets[dir] & target_origins(targets, dir));
+        append_origins(&origins, out);
+    }
+
+    /// Append all legal moves in ascending action order.
+    pub fn all_into(&self, out: &mut Vec<Action>) {
+        let origins = std::array::from_fn(|dir| self.captures[dir] | self.quiets[dir]);
+        append_origins(&origins, out);
+    }
+}
+
+fn append_origins(origins: &[u128; 8], out: &mut Vec<Action>) {
+    for (dir, &mask) in origins.iter().enumerate() {
+        let mut remaining = mask;
+        while remaining != 0 {
+            out.push((dir * N_SQUARES + remaining.trailing_zeros() as usize) as Action);
+            remaining &= remaining - 1;
+        }
+    }
+}
+
+fn target_origins(targets: u128, dir: usize) -> u128 {
+    let (dr, df) = DIRS[dir];
+    let delta = dr * 9 + df;
+    if delta < 0 {
+        targets << -delta
+    } else {
+        targets >> delta
+    }
+}
+
+const ORIGIN_MASKS: [u128; 8] = {
+    let mut masks = [0; 8];
+    let mut dir = 0;
+    while dir < 8 {
+        let (dr, df) = DIRS[dir];
+        let mut from = 0;
+        while from < 81 {
+            let r = from / 9 + dr;
+            let f = from % 9 + df;
+            if r >= 0 && r < 9 && f >= 0 && f < 9 {
+                masks[dir] |= 1 << from;
+            }
+            from += 1;
+        }
+        dir += 1;
+    }
+    masks
+};
+
 /// `own` beats `enemy`.
 pub fn beats(own: Piece, enemy: Piece) -> bool {
     own.beats(enemy)
@@ -113,18 +195,33 @@ impl State {
     /// Append the legal action indices to `out` in ascending order, without
     /// allocating: the form a search calling this millions of times uses.
     pub fn legal_actions_into(&self, out: &mut Vec<Action>) {
-        for dir in 0..DIRS.len() as u8 {
-            for from in 0..N_SQUARES as u8 {
-                let Cell::Own(piece) = self.board[from as usize] else {
-                    continue;
-                };
-                if let Some(to) = step(from, dir) {
-                    if self.may_move(piece, self.board[to as usize]) {
-                        out.push(dir as Action * N_SQUARES as Action + from as Action);
-                    }
-                }
+        self.legal_moves().all_into(out);
+    }
+
+    /// Build compact capture and quiet masks for staged move generation.
+    pub fn legal_moves(&self) -> LegalMoves {
+        let mut own = [0u128; 3];
+        let mut enemy = [0u128; 3];
+        for (square, &cell) in self.board.iter().enumerate() {
+            match cell {
+                Cell::Own(piece) => own[piece.code() as usize - 1] |= 1 << square,
+                Cell::Enemy(piece) => enemy[piece.code() as usize - 1] |= 1 << square,
+                Cell::Empty => {}
             }
         }
+        let mover = own[0] | own[1] | own[2];
+        let empty = !(mover | enemy[0] | enemy[1] | enemy[2]) & ((1u128 << 81) - 1);
+        let mut moves = LegalMoves {
+            captures: [0; 8],
+            quiets: [0; 8],
+        };
+        for (dir, &edge) in ORIGIN_MASKS.iter().enumerate() {
+            moves.quiets[dir] = mover & target_origins(empty, dir) & edge;
+            for (piece, &origins) in own.iter().enumerate() {
+                moves.captures[dir] |= origins & target_origins(enemy[(piece + 2) % 3], dir) & edge;
+            }
+        }
+        moves
     }
 
     /// True when the mover has no legal move.

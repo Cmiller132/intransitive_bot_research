@@ -8,6 +8,39 @@ const RULES: Rules = Rules {
     capture_clock: None,
 };
 
+#[test]
+fn attack_candidates_cover_every_changed_square() {
+    use engine::tactics::{attack_candidates, is_attacked};
+    let mut seed = 0x2026091016u64;
+    for _ in 0..1000 {
+        let mut state = State::initial();
+        for cell in &mut state.board {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *cell = Cell::from_code((seed % 7) as u8).unwrap();
+        }
+        let legal = state.legal_actions();
+        if legal.is_empty() {
+            continue;
+        }
+        let action = legal[seed as usize % legal.len()];
+        let affected = attack_candidates(&state.board, action);
+        let child = engine::flip(&apply(&RULES, &state, action).0.board);
+        for square in 0..81 {
+            if state.board[square] != child[square]
+                || is_attacked(&state.board, square as u8) != is_attacked(&child, square as u8)
+            {
+                assert_ne!(
+                    affected & (1 << square),
+                    0,
+                    "action {action}, square {square}"
+                );
+            }
+        }
+    }
+}
+
 fn brute_win1(state: &State, action: Action) -> bool {
     apply(&RULES, state, action).1 == Outcome::Win
 }
