@@ -1,0 +1,15 @@
+[package]
+name = "nnue"
+edition.workspace = true
+version.workspace = true
+[features]
+profile = []
+[dependencies]
+engine = { path = "../../engine" }
+match = { path = "../../match" }
+search = { path = "../../search" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+[dev-dependencies]
+rand.workspace = true

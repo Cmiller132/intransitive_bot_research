@@ -1,0 +1,16 @@
+{
+  "format": "RPSNNUE1",
+  "version": 6,
+  "features": 1004,
+  "hidden": 768,
+  "buckets": 1,
+  "dense": 32,
+  "qa": 255,
+  "qb": 64,
+  "eval_scale": 600.0,
+  "bytes": 1596140,
+  "sha256": "9ce99a7c37393828f1ec12a9e5bab3bbdeba91d4963152cb68986f997fe4effc",
+  "seed": 202609094,
+  "purpose": "Rust scalar/SIMD/incremental parity with active dense head",
+  "residual_initialization_std": 0.08
+}
