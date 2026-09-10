@@ -1,7 +1,7 @@
 //! Workspace tasks, run as `cargo xtask <command>`: `check` (formatting,
 //! lints, tests, the engine wheel, Python lints and tests, the arena
 //! frontend's gates), `wheel` (build and
-//! install the engine Python module) and `linux` (release build of `bot` for
+//! install the engine Python module), `release` (host `bot` build) and `linux` (release build of `bot` for
 //! Debian 12 inside the WSL distro `Debian`, into dist/linux).
 
 use std::env;
@@ -17,7 +17,8 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
   check [--gpu]   cargo fmt --check, clippy, test, wheel, ruff, pytest (CPU unless --gpu), npm gates
   wheel           build the engine wheel and install it into the current python
-  linux           release build of `bot` for Debian 12 (WSL distro `Debian`) into dist/linux";
+  release [--portable]  build `bot` for Zen 4, or baseline x86-64 with --portable
+  linux [--portable]    release build of `bot` for Debian 12 (WSL distro `Debian`) into dist/linux";
 
 /// Python packages checked after the Rust crates and the wheel.
 const PYTHON_PACKAGES: [&str; 4] = [
@@ -50,7 +51,10 @@ fn main() {
         ("check", []) => tasks.check(false),
         ("check", [flag]) if flag == "--gpu" => tasks.check(true),
         ("wheel", []) => tasks.wheel(),
-        ("linux", []) => tasks.linux(),
+        ("release", []) => tasks.release(false),
+        ("release", [flag]) if flag == "--portable" => tasks.release(true),
+        ("linux", []) => tasks.linux(false),
+        ("linux", [flag]) if flag == "--portable" => tasks.linux(true),
         _ => usage(),
     };
     tasks.summary();
@@ -195,9 +199,30 @@ impl Tasks {
         self.step("pip install (engine wheel)", install)
     }
 
+    /// Build the host CLI for the serving CPU, with a baseline x86-64 option.
+    fn release(&mut self, portable: bool) -> Result<()> {
+        let mut build = cmd(
+            &self.cargo,
+            &["build", "--release", "--locked", "-j", "4", "-p", "cli"],
+        );
+        let flags = env::var("RUSTFLAGS").unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let flags = format!("{flags} -C link-arg=-Wl,-rpath,$ORIGIN");
+        build.env(
+            "RUSTFLAGS",
+            format!("{flags} -C target-cpu={}", target_cpu(portable)),
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            build.creation_flags(0x00004000); // BELOW_NORMAL_PRIORITY_CLASS
+        }
+        self.step("cargo build --release", build)
+    }
+
     /// Release build of `bot` inside the Debian 12 WSL distro, with Microsoft's
     /// ONNX Runtime release linked dynamically; `bot` and the library go to dist/linux.
-    fn linux(&mut self) -> Result<()> {
+    fn linux(&mut self, portable: bool) -> Result<()> {
         let release = wsl_output(None, &["sh", "-c", ". /etc/os-release && echo $VERSION_ID"])
             .with_context(|| format!("WSL distro `{DISTRO}` does not start; {SETUP}"))?;
         if release.trim() != "12" {
@@ -221,7 +246,8 @@ impl Tasks {
             wsl(Some(&linux_root), &["sh", "-c", &fetch]),
         )?;
         let build = format!(
-            "export PATH=$HOME/.cargo/bin:$PATH ORT_LIB_LOCATION={linux_root}/target/linux/{ort}/lib              ORT_PREFER_DYNAMIC_LINK=1 && nice -n 10 cargo build --release --locked -j 4 -p cli --target-dir target/linux"
+            "export PATH=$HOME/.cargo/bin:$PATH ORT_LIB_LOCATION={linux_root}/target/linux/{ort}/lib              ORT_PREFER_DYNAMIC_LINK=1 RUSTFLAGS='-C target-cpu={} -C link-arg=-Wl,-rpath,$ORIGIN' && nice -n 10 cargo build --release --locked -j 4 -p cli --target-dir target/linux",
+            target_cpu(portable)
         );
         self.step(
             "cargo build --release (Debian 12)",
@@ -259,6 +285,14 @@ impl Tasks {
         )?;
         print!("{sums}");
         Ok(())
+    }
+}
+
+fn target_cpu(portable: bool) -> &'static str {
+    if portable {
+        "x86-64"
+    } else {
+        "znver4"
     }
 }
 
