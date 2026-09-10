@@ -326,7 +326,14 @@ unchanged, everything around them is rebuilt.
     opening moves in data generation) scored 53.3 % (49.6-57.1) against
     the same incumbent, so from round 17 every round injects. The outcome
     mix (Stockfish's lambda, `--outcome_weight 0.1` on the self rows)
-    scored 52.4 % (48.5-56.3) on one test and is under a second.
+    scored 52.4 % (48.5-56.3) and 48.8 % (44.9-52.6) on two tests, null,
+    and is not used. Acceptance for small gains: a 500-game bar of LB >
+    50 % needs 54 % observed, which +2-3 % candidates almost never
+    reach, so from round 17 promotion is 1,000 games at 50 ms with at
+    least 52.5 % observed (a null candidate passes 5 % of the time, a
+    true +3 % about 63 %); deployment keeps LB > 50 % at 100 ms against
+    the deployed network, so the arena changes only when chained
+    promotions add up.
 31. Retrain when the teacher is clearly stronger: import the new windows
     (`nnue.importer conv --run runs/conv_g128 ...`), relabel the human
     and student sets with the new checkpoint through `nnue.gpu_label`,
