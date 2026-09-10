@@ -3,6 +3,7 @@ through the engine), so the replay, the value-drop alternatives, the leaf
 reservoir and the sampling shares are checked without the binary."""
 
 import json
+from pathlib import Path
 
 import engine
 import numpy as np
@@ -132,3 +133,30 @@ def test_collect_writes_a_raw_dataset_with_the_declared_shares(fake_bot):
     assert not list((fake_bot / "runs" / "nnue_collect" / "round").glob("leaves_*"))
     assert (fake_bot / "runs" / "nnue_collect" / "round" / "games.jsonl").exists()
     assert len(rows["board"]) > 0
+
+
+def test_random_moves_mark_odd_families_and_reach_the_command(monkeypatch, tmp_path):
+    games = collect.schedule(Path("a.nnue"), Path("b.nnue"), 4, random_moves=2)
+    marked = {g.family for g in games if g.random_moves}
+    assert marked == {1, 3} and all(g.random_moves == 2 for g in games if g.family in marked)
+    assert all(g.random_moves == 0 for g in collect.schedule(Path("a.nnue"), Path("b.nnue"), 4))
+    seen = []
+
+    def run(command, **kwargs):
+        seen.append(command)
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"moves": [], "winner": None, "end": "x", "plies": 0, "stats": []})
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(collect.subprocess, "run", run)
+    collect.play(games[2], 7, tmp_path)  # family 1, first game
+    command = seen[0]
+    assert "--random-moves" in command and command[command.index("--random-moves") + 1] == "2"
+    assert command[command.index("--random-from") + 1] == str(collect.RANDOM_PLIES[0])
+    assert command[command.index("--random-seed") + 1] == "7"
+    collect.play(games[0], 7, tmp_path)  # family 0: no injection
+    assert "--random-moves" not in seen[1]

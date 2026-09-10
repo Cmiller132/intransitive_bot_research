@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +55,10 @@ class Game:
     budget: int  # Clock::Sims budget, or 0 under a wall clock
     move_ms: int  # wall clock per move, or 0 under a node budget
     leaves: bool
+    random_moves: int = 0  # random legal moves injected at distinct plies (diversity)
+
+
+RANDOM_PLIES = (8, 80)  # the interval the injected plies are drawn from, after the opening
 
 
 def spec_of(network: Path | str) -> str:
@@ -63,7 +67,9 @@ def spec_of(network: Path | str) -> str:
     return text if text.startswith(("sq:", "conv:", "nnue:", "rpsi:")) else f"nnue:{text}"
 
 
-def schedule(student: Path, previous: Path | str | None, families: int, move_ms: int = 0) -> list[Game]:
+def schedule(
+    student: Path, previous: Path | str | None, families: int, move_ms: int = 0, random_moves: int = 0
+) -> list[Game]:
     """Two games per family; the student's own leaves are traced on the
     cheapest budget only, on every fourth family."""
     me, other_spec = spec_of(student), spec_of(previous) if previous else spec_of(student)
@@ -79,6 +85,10 @@ def schedule(student: Path, previous: Path | str | None, families: int, move_ms:
         traced = budget == BUDGETS[0] and family % 4 == 0
         games.append(Game(family, me, other_spec, budget, 0, traced))
         games.append(Game(family, other_spec, me, other, 0, False))
+    if random_moves:
+        # Half the families (the odd ones) carry injected random moves, so the
+        # round holds both faithful play and diversified play.
+        games = [replace(g, random_moves=random_moves) if g.family % 2 else g for g in games]
     return games
 
 
@@ -123,6 +133,9 @@ def play(game: Game, seed: int, out: Path) -> tuple[dict, Path | None]:
     if leaves:
         leaves.unlink(missing_ok=True)
         command += ["--leaves", str(leaves)]
+    if game.random_moves:
+        command += ["--random-moves", str(game.random_moves), "--random-from", str(RANDOM_PLIES[0])]
+        command += ["--random-to", str(RANDOM_PLIES[1]), "--random-seed", str(seed)]
     result = subprocess.run(command, capture_output=True, text=True, cwd=workspace_root(), check=False)
     if result.returncode != 0:
         raise RuntimeError(f"bot play failed: {result.stderr.strip()}")
@@ -171,12 +184,13 @@ def collect(
     workers: int,
     seed: int,
     move_ms: int = 0,
+    random_moves: int = 0,
 ) -> Path:
     started = time.perf_counter()
     out = run_dir("nnue_collect") / round_name
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    games = schedule(student, previous, families, move_ms)
+    games = schedule(student, previous, families, move_ms, random_moves)
     with ThreadPoolExecutor(workers) as pool:
         played = list(pool.map(lambda g: play(g, seed + g.family, out), games))
     with (out / "games.jsonl").open("w", encoding="utf-8") as sink:
@@ -273,10 +287,19 @@ def main(argv: list[str]) -> None:
     parser.add_argument("--states", type=int, default=10_000)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=20260909)
+    parser.add_argument("--random-moves", type=int, default=0, help="random moves injected in half the games")
     args = parser.parse_args(argv)
     previous = args.previous.resolve() if args.previous else args.opponent
     collect(
-        args.round, args.student.resolve(), previous, args.families, args.states, args.workers, args.seed, args.move_ms
+        args.round,
+        args.student.resolve(),
+        previous,
+        args.families,
+        args.states,
+        args.workers,
+        args.seed,
+        args.move_ms,
+        args.random_moves,
     )
 
 
