@@ -89,16 +89,24 @@ impl Geometry {
             let barriers = self.occupied[side] & !runners;
             let mut reach = [0u128; 9];
             reach[0] = self.pieces[1 - side][predator];
-            for k in 1..9 {
-                reach[k] = expand(reach[k - 1]) & !barriers;
-            }
+            let mut computed = 0;
             let prey = (kind + 2) % 3;
             let blocked =
                 self.occupied[side] | (self.occupied[1 - side] & !self.pieces[1 - side][prey]);
+            if blocked & LAYERS[side][0] != 0 {
+                continue;
+            }
             // All runners at a given distance share the same time-indexed filter.
             for distance in 1..=usize::from(best).min(8) {
                 let mut paths = runners & LAYERS[side][distance];
+                if paths == 0 {
+                    continue;
+                }
                 if side == 1 {
+                    if computed == 0 {
+                        reach[1] = expand(reach[0]) & !barriers;
+                        computed = 1;
+                    }
                     paths &= !reach[1];
                 }
                 for k in 1..=distance {
@@ -106,6 +114,10 @@ impl Geometry {
                         break;
                     }
                     let defender_moves = k + side - usize::from(k == distance);
+                    while computed < defender_moves {
+                        reach[computed + 1] = expand(reach[computed]) & !barriers;
+                        computed += 1;
+                    }
                     paths = expand(paths)
                         & LAYERS[side][distance - k]
                         & !blocked

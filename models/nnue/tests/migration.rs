@@ -188,45 +188,56 @@ fn shared_table_search_and_pv_stay_legal() {
 
 #[test]
 fn leaf_paths_replay_to_the_recorded_evaluation() {
-    let model = model();
-    let path = std::env::temp_dir().join(format!("nnue-leaf-test-{}.jsonl", std::process::id()));
-    let mut pool = SearchPool::new(1, 1);
-    pool.set_leaves(&path).unwrap();
-    pool.search(
-        &model,
-        &State::initial(),
-        None,
-        Limits {
-            nodes: 100,
-            depth: 2,
-            time: Duration::from_secs(5),
-        },
-    );
-    assert!(pool.leaf_error().is_none());
-    drop(pool);
-    let records = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
-    assert!(!records.is_empty());
-    for line in records.lines() {
-        let v: serde_json::Value = serde_json::from_str(line).unwrap();
-        let mut state = State::initial();
-        for a in v["path"].as_array().unwrap() {
-            let (child, end) = apply(&Rules::SITE, &state, a.as_u64().unwrap() as u16);
-            assert_eq!(end, Outcome::Ongoing);
-            state = child;
+    for model in [
+        model(),
+        Model::from_bytes(include_bytes!("fixtures/h256_race.nnue")).unwrap(),
+    ] {
+        let path =
+            std::env::temp_dir().join(format!("nnue-leaf-test-{}.jsonl", std::process::id()));
+        let mut pool = SearchPool::new(1, 1);
+        pool.set_leaves(&path).unwrap();
+        pool.search(
+            &model,
+            &State::initial(),
+            None,
+            Limits {
+                nodes: 1000,
+                depth: 2,
+                time: Duration::from_secs(5),
+            },
+        );
+        assert!(pool.leaf_error().is_none());
+        drop(pool);
+        let records = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(!records.is_empty());
+        for line in records.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let mut state = State::initial();
+            for a in v["path"].as_array().unwrap() {
+                let (child, end) = apply(&Rules::SITE, &state, a.as_u64().unwrap() as u16);
+                assert_eq!(end, Outcome::Ongoing);
+                state = child;
+            }
+            assert_eq!(
+                serde_json::json!(engine::codes(&state.board).as_slice()),
+                v["board"]
+            );
+            assert_eq!(
+                state.since_capture as u64,
+                v["since_capture"].as_u64().unwrap()
+            );
+            assert!(
+                (model.raw(&model.refresh(&state.board, state.since_capture, 200))
+                    - v["raw"].as_f64().unwrap())
+                .abs()
+                    < 1e-12
+            );
+            assert_eq!(
+                model.evaluate(&model.refresh(&state.board, state.since_capture, 200)),
+                v["score"].as_i64().unwrap() as i32
+            );
         }
-        assert_eq!(
-            serde_json::json!(engine::codes(&state.board).as_slice()),
-            v["board"]
-        );
-        assert_eq!(
-            state.since_capture as u64,
-            v["since_capture"].as_u64().unwrap()
-        );
-        assert_eq!(
-            model.evaluate(&model.refresh(&state.board, state.since_capture, 200)),
-            v["score"].as_i64().unwrap() as i32
-        );
     }
 }
 
@@ -464,7 +475,10 @@ fn python_format7_export_matches_oracle_and_incremental_trajectory() {
     // rows; the positions carry integer_eval's raw values, which the
     // diagnostic checks against the Rust evaluation.
     let model = Model::from_bytes(include_bytes!("fixtures/h256_race.nnue")).unwrap();
-    assert_eq!((model.features, model.hidden, model.buckets), (1022, 256, 4));
+    assert_eq!(
+        (model.features, model.hidden, model.buckets),
+        (1022, 256, 4)
+    );
     let fixture = include_str!("fixtures/h256_race_positions.jsonl");
     let mut output = Vec::new();
     nnue::diagnostic::run(&model, fixture.as_bytes(), &mut output, None, 1).unwrap();

@@ -892,6 +892,7 @@ impl Searcher {
         let score = if entry.key == key && entry.static_valid {
             entry.static_eval
         } else {
+            model.resolve_race(&state.board, &mut self.acc[ply]);
             let score = model.evaluate(&self.acc[ply]);
             if entry.key != key {
                 entry = Entry::default();
@@ -904,6 +905,7 @@ impl Searcher {
             score
         };
         if let Some(sink) = &self.leaf_sink {
+            model.resolve_race(&state.board, &mut self.acc[ply]);
             let record = serde_json::json!({
                 "schema":1,"search_id":self.leaf_search,"worker":self.worker_id,
                 "root":{"board":engine::codes(&self.leaf_root.board).as_slice(),"since_capture":self.leaf_root.since_capture,"ply":self.leaf_root.ply,"clock":200},
@@ -938,7 +940,7 @@ impl Searcher {
         self.leaf_path[ply] = action;
         self.hashes[ply + 1] = child_hashes(self.hashes[ply], &state.board, action);
         let (parents, children) = self.acc.split_at_mut(ply + 1);
-        model.update(
+        model.update_deferred(
             &parents[ply],
             &state.board,
             action,

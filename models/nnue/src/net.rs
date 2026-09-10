@@ -14,6 +14,7 @@ fn mirror_anti(s: usize) -> usize {
 fn swap_side(c: u8) -> u8 {
     Cell::from_code(c).expect("valid cell").swap_side().code()
 }
+
 /// Size of the converted prototype (H512/B1).
 pub const FILE_SIZE: usize = 1_064_172;
 const CLOCK_BOUNDS: [u32; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160];
@@ -80,6 +81,7 @@ pub struct Accumulator {
     clock: u32,
     clock_rows: [usize; 2],
     race: [u8; 2],
+    race_dirty: bool,
 }
 
 impl Accumulator {
@@ -91,6 +93,7 @@ impl Accumulator {
             clock: 0,
             clock_rows: [0; 2],
             race: [8; 2],
+            race_dirty: false,
         }
     }
 }
@@ -276,6 +279,25 @@ impl Model {
         child_since_capture: u32,
         child: &mut Accumulator,
     ) {
+        self.update_deferred(parent, board, action, child_since_capture, child);
+        if self.features == 1022 {
+            let (from, to) = action_from_to(action);
+            let mut moved = *board;
+            moved[to] = moved[from];
+            moved[from] = Cell::Empty;
+            self.resolve_race(&engine::flip(&moved), child);
+        }
+    }
+
+    /// Carry existing race rows through the frame swap until a value is needed.
+    pub(crate) fn update_deferred(
+        &self,
+        parent: &Accumulator,
+        board: &Board,
+        action: u16,
+        child_since_capture: u32,
+        child: &mut Accumulator,
+    ) {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Accumulator);
         let (from, to) = action_from_to(action);
@@ -309,35 +331,46 @@ impl Model {
                 }
             }
         }
-        if self.features == 1022 {
-            let mut moved = *board;
-            moved[to] = moved[from];
-            moved[from] = Cell::Empty;
-            let (mover, opponent) = engine::race::race_buckets(&engine::flip(&moved));
-            child.race = [mover, opponent];
-            for perspective in 0..2 {
-                for side in 0..2 {
-                    let old = parent.race[side ^ perspective ^ 1];
-                    let new = child.race[side ^ perspective];
-                    if old != new {
-                        let base = 1004 + 9 * side;
-                        let values = if perspective == 0 {
-                            &mut child.own
-                        } else {
-                            &mut child.opponent
-                        };
-                        for (bucket, add) in [(old, false), (new, true)] {
-                            let row = base + bucket as usize;
-                            self.add_row(
-                                values,
-                                &self.weights[row * self.hidden..(row + 1) * self.hidden],
-                                add,
-                            );
-                        }
+        child.race = [parent.race[1], parent.race[0]];
+        child.race_dirty = self.features == 1022;
+    }
+
+    /// Resolve pending rows against this accumulator's canonical board.
+    pub(crate) fn resolve_race(&self, board: &Board, acc: &mut Accumulator) {
+        if !acc.race_dirty {
+            return;
+        }
+        #[cfg(feature = "profile")]
+        let query_probe = crate::profile::Probe::new(crate::profile::Zone::RaceQuery);
+        let (mover, opponent) = engine::race::race_buckets(board);
+        #[cfg(feature = "profile")]
+        drop(query_probe);
+        #[cfg(feature = "profile")]
+        let _rows_probe = crate::profile::Probe::new(crate::profile::Zone::RaceRows);
+        let next = [mover, opponent];
+        for perspective in 0..2 {
+            for side in 0..2 {
+                let old = acc.race[side ^ perspective];
+                let new = next[side ^ perspective];
+                if old != new {
+                    let values = if perspective == 0 {
+                        &mut acc.own
+                    } else {
+                        &mut acc.opponent
+                    };
+                    for (bucket, add) in [(old, false), (new, true)] {
+                        let row = 1004 + 9 * side + bucket as usize;
+                        self.add_row(
+                            values,
+                            &self.weights[row * self.hidden..(row + 1) * self.hidden],
+                            add,
+                        );
                     }
                 }
             }
         }
+        acc.race = next;
+        acc.race_dirty = false;
     }
 
     /// Only squares adjacent to the old/new location can change attack status.
@@ -476,12 +509,20 @@ impl Model {
     }
 
     pub fn raw(&self, acc: &Accumulator) -> f64 {
+        debug_assert!(
+            !acc.race_dirty,
+            "race rows must be resolved before evaluation"
+        );
         self.sum(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
             + self.output_bias[self.bucket(acc)] as f64 / self.qb as f64
             + self.dense_sum(acc, self.avx2) as f64 / (self.qa as f64 * self.qb as f64)
     }
 
     pub fn raw_scalar(&self, acc: &Accumulator) -> f64 {
+        debug_assert!(
+            !acc.race_dirty,
+            "race rows must be resolved before evaluation"
+        );
         self.sum_scalar(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
             + self.output_bias[self.bucket(acc)] as f64 / self.qb as f64
             + self.dense_sum(acc, false) as f64 / (self.qa as f64 * self.qb as f64)
@@ -905,5 +946,48 @@ mod width_tests {
             }
             assert_eq!(actual, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+    use engine::{apply, Outcome, Rules, State};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    #[test]
+    fn pending_race_rows_survive_multiple_unresolved_ancestors() {
+        let model = Model::from_bytes(include_bytes!("../tests/fixtures/h256_race.nnue")).unwrap();
+        let mut rng = StdRng::seed_from_u64(2026091101);
+        let mut state = State::initial();
+        let mut acc = model.refresh(&state.board, 0, 200);
+        let mut captures = 0;
+        let mut pending_ancestors = 0;
+        for turn in 0..2000 {
+            pending_ancestors += usize::from(acc.race_dirty);
+            let legal = state.legal_actions();
+            let action = legal[rng.random_range(0..legal.len())];
+            let (child, end) = apply(&Rules::SITE, &state, action);
+            captures += usize::from(child.since_capture == 0);
+            let mut next = Accumulator::empty(model.hidden);
+            model.update_deferred(&acc, &state.board, action, child.since_capture, &mut next);
+            let mut resolved = next.clone();
+            model.resolve_race(&child.board, &mut resolved);
+            assert_eq!(
+                resolved,
+                model.refresh(&child.board, child.since_capture, 200)
+            );
+            assert_eq!(model.raw(&resolved), model.raw_scalar(&resolved));
+            let mut repeated = resolved.clone();
+            model.resolve_race(&child.board, &mut repeated);
+            assert_eq!(repeated, resolved);
+            state = child;
+            acc = if turn % 7 == 0 { resolved } else { next };
+            if end != Outcome::Ongoing {
+                state = State::initial();
+                acc = model.refresh(&state.board, 0, 200);
+            }
+        }
+        assert!(captures > 10 && pending_ancestors > 1000);
     }
 }

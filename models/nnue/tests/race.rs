@@ -183,3 +183,38 @@ fn zero_race_rows_preserve_format6_evaluations() {
         };
     }
 }
+
+#[test]
+fn deferred_search_matches_eager_snapshot_at_twenty_thousand_nodes() {
+    let mut bytes = random_file(512, 1004, 1);
+    let random = random_file(512, 1022, 1);
+    let at = 36 + 2 * 512 * 1005;
+    bytes[8..12].copy_from_slice(&7u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&1022u32.to_le_bytes());
+    bytes.splice(at..at, random[at..at + 18 * 512 * 2].iter().copied());
+    let model = Model::from_bytes(&bytes).unwrap();
+    // Positions and full search outputs from the eager format-7 binary.
+    let fixture: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/race_search.json")).unwrap();
+    assert_eq!(fixture.len(), 100);
+    let input = fixture
+        .iter()
+        .map(|r| r["position"].to_string() + "\n")
+        .collect::<String>();
+    let mut output = Vec::new();
+    nnue::diagnostic::run(
+        &model,
+        std::io::Cursor::new(input),
+        &mut output,
+        Some(20_000),
+        1,
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(output.lines().count(), fixture.len());
+    for (line, row) in output.lines().zip(fixture) {
+        let mut actual: serde_json::Value = serde_json::from_str(line).unwrap();
+        actual.as_object_mut().unwrap().remove("elapsed_ms");
+        assert_eq!(actual, row["expected"]);
+    }
+}
