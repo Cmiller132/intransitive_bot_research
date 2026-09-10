@@ -61,7 +61,7 @@ python -m nnue.train --run <name> --data <set>:<share> [--data <set>:<share> ...
 python -m nnue.train --run <name> --data ... --resume runs/<name>/latest.pt
 python -m nnue.collect --round <name> --student <a.nnue> [--previous <b.nnue> | --opponent <spec> --move-ms N] [--families 64] [--states 10000] [--random-moves K]
 python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx | nnue:<file>] [--sims 256] [--workers 8] [--rows N] [--quiet-best]
-python -m nnue.gpu_label --input <set> --out <set> --ckpt runs/conv_g128/ckpt_000040.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N]
+python -m nnue.gpu_label --input <set> --out <set> [--input <set> --out <set> ...] --ckpt runs/conv_g128/ckpt_000150.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N] [--reuse-nodes K]
 python -m nnue.gauntlet --name <name> --candidate <a.nnue> --incumbent <b.nnue> [--stage screen|accept|confirm|all] [--sims N] [--incumbent-bin <bot.exe>]
 ```
 
@@ -75,7 +75,10 @@ teacher's root value from `bot analyse`, and `nnue.gpu_label` does the same
 in bulk when the GPU is free, through conv's or sq's batched search from a
 training checkpoint (`--teacher`; about 250 positions per second at 128
 simulations on the RTX 4070 Ti, against one or two per second per CPU
-thread; it is not part of the test suite); `nnue.gauntlet` plays a candidate
+thread; the GPU is saturated by the teacher's forward pass, so several sets
+given to one call share the loaded teacher and the next set's exact proofs
+are computed on the CPU while the GPU searches; it is not part of the test
+suite); `nnue.gauntlet` plays a candidate
 against the incumbent in three predeclared stages through `bot eval
 --move-ms`, or under a fixed node budget (`--sims`) for evaluator-only
 changes, seating a different build of `bot` through `rpsi:` when a search
