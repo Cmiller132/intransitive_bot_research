@@ -3,6 +3,7 @@
 pub mod board;
 pub mod notation;
 pub mod rules;
+pub mod tactics;
 
 #[cfg(feature = "python")]
 mod python;

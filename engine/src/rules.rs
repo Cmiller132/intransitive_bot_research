@@ -105,16 +105,43 @@ impl State {
 
     /// Legal action indices in ascending order.
     pub fn legal_actions(&self) -> Vec<Action> {
-        self.legal_mask()
-            .iter()
-            .enumerate()
-            .filter_map(|(action, &legal)| legal.then_some(action as Action))
-            .collect()
+        let mut out = Vec::with_capacity(80);
+        self.legal_actions_into(&mut out);
+        out
+    }
+
+    /// Append the legal action indices to `out` in ascending order, without
+    /// allocating: the form a search calling this millions of times uses.
+    pub fn legal_actions_into(&self, out: &mut Vec<Action>) {
+        for dir in 0..DIRS.len() as u8 {
+            for from in 0..N_SQUARES as u8 {
+                let Cell::Own(piece) = self.board[from as usize] else {
+                    continue;
+                };
+                if let Some(to) = step(from, dir) {
+                    if self.may_move(piece, self.board[to as usize]) {
+                        out.push(dir as Action * N_SQUARES as Action + from as Action);
+                    }
+                }
+            }
+        }
     }
 
     /// True when the mover has no legal move.
     pub fn is_stalemated(&self) -> bool {
-        !self.legal_mask().iter().any(|&legal| legal)
+        for from in 0..N_SQUARES as u8 {
+            let Cell::Own(piece) = self.board[from as usize] else {
+                continue;
+            };
+            for dir in 0..DIRS.len() as u8 {
+                if let Some(to) = step(from, dir) {
+                    if self.may_move(piece, self.board[to as usize]) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     pub fn own_count(&self) -> u32 {

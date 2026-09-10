@@ -62,10 +62,37 @@ fn apply(
     ))
 }
 
+/// Three 648-flag lists over the mover's actions: wins at once, loses in two,
+/// wins in three (engine::tactics), with the capture clock disabled.
+#[pyfunction]
+fn tactics(board: Vec<u8>) -> PyResult<(Vec<bool>, Vec<bool>, Vec<bool>)> {
+    use crate::board::N_ACTIONS;
+    use crate::tactics::{loses_in_two, wins_at_once, wins_in_three};
+
+    let state = state_from(board, 0, 0)?;
+    let rules = Rules {
+        capture_clock: None,
+    };
+    let legal = state.legal_actions();
+    let spread = |flags: Vec<bool>| {
+        let mut out = vec![false; N_ACTIONS];
+        for (&action, flag) in legal.iter().zip(flags) {
+            out[action as usize] = flag;
+        }
+        out
+    };
+    Ok((
+        spread(wins_at_once(&rules, &state, &legal)),
+        spread(loses_in_two(&rules, &state, &legal)),
+        spread(wins_in_three(&rules, &state, &legal)),
+    ))
+}
+
 #[pymodule]
 fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(initial_board, m)?)?;
     m.add_function(wrap_pyfunction!(legal_mask, m)?)?;
     m.add_function(wrap_pyfunction!(apply, m)?)?;
+    m.add_function(wrap_pyfunction!(tactics, m)?)?;
     Ok(())
 }
