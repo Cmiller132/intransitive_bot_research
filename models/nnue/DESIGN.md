@@ -383,7 +383,22 @@ unchanged, everything around them is rebuilt.
     generation, evaluation skipped where the search never reads it, the
     dense head and readout on AVX-512) is Astra's turn 15, and only
     changes that keep fixed-node decisions identical enter without a
-    gauntlet.
+    gauntlet. Measured (turn 15, 2026-09-10): the retained bundle is
+    +35 % nodes per second on one thread (1.06 M to 1.38 M on the 100
+    benchmark positions, all 100 fixed-node search results identical);
+    the pieces were the znver4 target +6.6 %, staged move generation with
+    compact legal-origin masks +12.2 %, deferred accumulators +7.8 %,
+    table prefetch +4.4 %, AVX-512 readout +2.5 %, a cheaper attack-status
+    update +4.1 %; an exact evaluation cache lost 4 %, a wider accumulator
+    kernel and quiescence target masks gained nothing, and skipping the
+    unused stand-pat evaluation changed 8 of 100 results through table
+    side effects. With frozen weights the new search scored 58.8 %
+    (56.3-61.3) at 50 ms over 1,000 games and 57.5 % (54.0-60.9) at 100 ms
+    over 500 against the previous one. The dense head is now the largest
+    cost (25 %); lazy evaluation with a margin and a cheaper quiescence
+    change decisions and wait for their own gauntlets (turn 16), together
+    with the 20 ms reserve under a self-imposed `--movetime` and the
+    two-thread scaling the arena seat now uses.
 35. The race blind spot: of 78 goal losses against sq, 59 were runner or
     tempo races and 19 capture or escort sequences; the static value was
     optimistic twelve plies out in 13, nine of them races. Built

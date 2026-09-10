@@ -34,6 +34,15 @@ The two halves share only the feature definition and the file format:
   score, completion, and whether the selected action changed. With several
   workers the iterations belong to the worker whose result was selected;
   top-level nodes count all workers and `aborted` means any worker stopped.
+- Builds: `cargo xtask release` and `cargo xtask linux` target Zen 4
+  (`-C target-cpu=znver4`; the executable needs AVX-512 and faults at start
+  without it) and `--portable` builds baseline x86-64 with the run-time SIMD
+  dispatch, about 8 % slower. One search thread visits about 1.4 M nodes per
+  second on an idle Zen 4 core with `ft_gpu150a` (staged move generation,
+  accumulators materialised only when an evaluation needs them, the table
+  entry prefetched before generation, an AVX-512 readout), 1.17 M on the
+  arena container under its load; a plain `cargo build --release` keeps
+  the generic target.
 - `bot eval --move-ms N --player-threads T [--reference-move-ms M]`: the
   timed paired evaluation, the reference optionally on its own budget (the
   doubled-time yardstick for thread measurements).
@@ -41,7 +50,10 @@ The two halves share only the feature definition and the file format:
   unchanged, so two builds can meet under the same clock; with
   `--movetime <ms>` the seat searches that long whenever the host sends a
   simulation count instead (`go sims N`), which is how the arena seat plays
-  under a clock budget while the pool's jobs stay at 32 simulations.
+  under a clock budget while the pool's jobs stay at 32 simulations. A seat
+  may send `info json` search statistics after its move; the host copies
+  them into the game record, so an external seat's nodes and time appear in
+  `bot eval` records like a native player's (match/README.md).
 - `bot nnue convert --input <v3.nnue> --output <v6.nnue>`,
   `bot nnue validate --model <v6.nnue> --input <positions.jsonl>`,
   `bot nnue diagnose --model <v6.nnue> --input <positions.jsonl> --nodes N`:
