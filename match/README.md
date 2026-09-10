@@ -10,19 +10,55 @@ matches, and the site adapter all go through it. It knows the engine and the
 - `Player` (player.rs): `new_game()`, `choose(state, history, clock) -> Action`,
   `name()`. A player receives every position it must move in; it keeps its
   own tree or cache across calls. `Clock` is `Sims(n)` or `Time(duration)`.
+  Defaulted methods: `observe(action)` is told every move (opening
+  plies included) for players that track the game externally, `forfeited()`
+  reports that the last `choose` produced no move, and `info()` returns the
+  search behind the last move (`MoveInfo`: root value, the played move's Q
+  and visit share, plies left, the top root moves) for players that expose it.
+  `supports_clock` validates budget support, `set_leaves` configures an optional
+  training leaf sink, and `search_details` adds model-specific search fields
+  to recorded MoveStats without inventing policy visits for alpha-beta.
 - `play` (game.rs): one game between two players from an `Opening` (random
-  legal plies) under `Rules`, returning the winner, the end reason and the
-  move list as a `GameRecord`.
+  legal plies) under `Rules`, returning the winner, the end reason (goal,
+  elimination, stalemate, capture clock or forfeit), the moves as absolute
+  tokens (Blue's home a1) and each mover's `MoveStats` as a `GameRecord`.
+  `play_observed` also reports every played move as it happens.
 - `eval` (eval.rs): the one evaluation. Paired games: each opening is played
-  twice with colours swapped, every move at a fixed simulation count (32),
-  no clock, pairs spread over threads. Reports wins, draws, losses, the paired
-  margin and its 95 % interval.
+  twice with colours swapped, every move at a fixed simulation count (32)
+  or `EvalConfig.move_ms` wall time, pairs spread over threads. An optional
+  `reference_move_ms` overrides only the reference time; `reference_sims` instead
+  sets its simulation count. Both require a timed candidate and are mutually
+  exclusive; the runner swaps budgets with the players. Reports carry effective
+  `reference_move_ms` and `reference_sims`, with the unused unit null. Reports wins,
+  draws, losses, the paired margin and its 95 % interval, plus a seeded
+  10,000-resample opening-pair bootstrap interval on the same [-1,1] scale.
+  Complete pairs exclude forfeits, which remain counted in the WDL report.
+  Timed reports carry `move_ms` and `sims=0`. With `stream` every game's start, moves (with
+  stats) and end go to stdout as JSON lines while it plays.
 - `rpsi` (rpsi.rs): the site adapter. `Session` speaks the RPSI protocol on
   stdin and stdout to the site's bot client (`rpsi`, `isready`, `setoption`,
   `newgame`, `position fen`, `legalmoves`, `go`, `stop`, `quit`), `Frame`
   converts the site's frame (Blue's home corner, FEN with rank 1 first and
   uppercase Blue, `a1-b2` move tokens) to the engine's canonical frame and
   back, and `move_budget_ms` sets the thinking time under the site clock.
+  `go sims N` fixes the simulation count for one move. Explicit
+  `go movetime N` passes N milliseconds unchanged to the player, including
+  short eval budgets; only Fischer clocks use the site clock allocation.
+- `analysis` (analysis.rs): `Analyser`, what a model exposes for analysis
+  (`heads`: network policy, action values, state value and its source,
+  plies-to-end distribution, draw mass; `search`: a fresh model search), and
+  `serve`, the JSON-lines protocol behind `bot analyse`: a request names a
+  setup board (or the standard one), the side to move, the capture clock, a
+  move line and a simulation count; the response carries the legal moves,
+  the heads, the search lines with principal variations, or how the game
+  ended. All boards and tokens are absolute.
+- `client` (client.rs): the other end of RPSI. `RpsiPlayer::spawn(command)`
+  starts an external engine on its stdin and stdout, completes the handshake,
+  and plays it as a `Player`: every move request is the site's start FEN
+  (Blue's home at i1) with the full move list, the legal moves, and
+  `go sims N` or `go movetime ms`. An illegal, unparsable or late move
+  (180 s), a crash or a failed handshake forfeits the game; the engine's
+  stderr passes through. Any engine that plays on the site can take a seat.
 
 Game records are written as JSON lines when a path is given; nothing else is
 persisted.

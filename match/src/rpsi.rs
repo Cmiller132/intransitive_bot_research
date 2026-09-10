@@ -22,10 +22,11 @@ pub const MODE_NAME: &str = "Intransitive";
 
 /// Clocks below this play with a one-simulation search.
 const PANIC_CLOCK_MS: i64 = 800;
-const PANIC_MOVETIME_MS: i64 = 300;
 /// Below this the move is planned from the increment alone.
 const LOW_CLOCK_MS: i64 = 3000;
 const MOVE_OVERHEAD_MS: i64 = 150;
+/// The territory field of a site FEN; the engine does not use it.
+const TERRITORY: &str = "9/9/9/9/9/9/9/9/9";
 
 /// Wall time for one move under a Fischer clock.
 pub fn move_budget_ms(clock_ms: i64, inc_ms: i64, move_ms: i64, cap_ms: i64) -> i64 {
@@ -431,15 +432,16 @@ impl<P: Player> Session<P> {
         let inc_ms = params.get(&format!("{side}inc")).copied().unwrap_or(0);
         let movetime = params.get("movetime").copied();
         let clock = match (movetime, clock_ms) {
-            (Some(ms), _) if ms < PANIC_MOVETIME_MS => Clock::Sims(1),
+            (Some(ms), _) => Clock::Time(Duration::from_millis(ms.max(1) as u64)),
             (_, Some(ms)) if ms < PANIC_CLOCK_MS => Clock::Sims(1),
-            (Some(ms), _) => {
-                Clock::Time(Duration::from_millis(ms.saturating_sub(100).max(100) as u64))
-            }
             (None, Some(ms)) => Clock::Time(Duration::from_millis(
                 move_budget_ms(ms, inc_ms, self.move_ms, self.max_move_ms).max(1) as u64,
             )),
-            (None, None) => Clock::Sims(self.sims),
+            (None, None) => Clock::Sims(
+                params
+                    .get("sims")
+                    .map_or(self.sims, |&n| n.clamp(1, u32::MAX as i64) as u32),
+            ),
         };
         let started = Instant::now();
         let action = self.player.choose(&state, &self.history, clock);
@@ -516,14 +518,93 @@ pub fn site_start(blue_home: u8) -> [u8; 81] {
     site
 }
 
+/// The start position as the site's FEN fields (pieces, side to move,
+/// territory) with Blue's home at `blue_home`.
+pub fn start_fen(blue_home: u8) -> String {
+    let site = site_start(blue_home);
+    let rows: Vec<String> = site
+        .chunks(9)
+        .map(|row| {
+            row.iter()
+                .map(|&code| match code {
+                    0 => '.',
+                    1 => 'R',
+                    2 => 'P',
+                    3 => 'S',
+                    4 => 'r',
+                    5 => 'p',
+                    _ => 's',
+                })
+                .collect()
+        })
+        .collect();
+    format!("{} b {TERRITORY}", rows.join("/"))
+}
+
 /// The piece type of a site cell code, for tests.
 pub fn piece_of(code: u8) -> Option<Piece> {
     Piece::from_code(if code > 3 { code - 3 } else { code })
 }
 
+/// Plays the first legal action; enough to drive the protocol in tests.
+#[cfg(test)]
+pub(crate) struct FirstMove;
+
+#[cfg(test)]
+impl Player for FirstMove {
+    fn new_game(&mut self) {}
+
+    fn choose(&mut self, state: &State, _: &History, _: Clock) -> Action {
+        state.legal_actions()[0]
+    }
+
+    fn name(&self) -> &str {
+        "first"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_movetime_reaches_the_player_without_panic_conversion() {
+        use std::sync::{Arc, Mutex};
+        struct Budgets(Arc<Mutex<Vec<Clock>>>);
+        impl Player for Budgets {
+            fn new_game(&mut self) {}
+            fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+                self.0.lock().unwrap().push(clock);
+                state.legal_actions()[0]
+            }
+            fn name(&self) -> &str {
+                "budgets"
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut s = Session::new(
+            Budgets(Arc::clone(&seen)),
+            Rules::SITE,
+            "budgets",
+            250,
+            250,
+            32,
+        );
+        let mut out = Vec::new();
+        s.handle(
+            &format!("position fen {SITE_START_FEN} b {TERRITORY}"),
+            &mut out,
+        )
+        .unwrap();
+        for ms in [50, 100, 250, 1000] {
+            s.handle(&format!("go movetime {ms} btime 10 rtime 10"), &mut out)
+                .unwrap();
+        }
+        for (clock, ms) in seen.lock().unwrap().iter().zip([50, 100, 250, 1000]) {
+            assert!(matches!(clock, Clock::Time(d) if d.as_millis() == ms));
+        }
+        assert_eq!(seen.lock().unwrap().len(), 4);
+    }
 
     #[test]
     fn frames_round_trip_for_every_home_corner() {
@@ -563,25 +644,14 @@ mod tests {
         assert!(move_budget_ms(1_000, 0, 250, 250) >= 50);
     }
 
-    /// Plays the first legal action; enough to drive the protocol.
-    struct FirstMove;
-
-    impl Player for FirstMove {
-        fn new_game(&mut self) {}
-
-        fn choose(&mut self, state: &State, _: &History, _: Clock) -> Action {
-            state.legal_actions()[0]
-        }
-
-        fn name(&self) -> &str {
-            "first"
-        }
-    }
-
     /// The opening as the site serves it: rank 1 first, uppercase Blue, Blue's home at i1.
     const SITE_START_FEN: &str =
         "........./....PR.../....SPR../.....SPR./.ps...SP./.rps...../..rps..../...rp..../.........";
-    const TERRITORY: &str = "9/9/9/9/9/9/9/9/9";
+
+    #[test]
+    fn start_fen_is_the_site_opening() {
+        assert_eq!(start_fen(8), format!("{SITE_START_FEN} b {TERRITORY}"));
+    }
 
     fn session() -> Session<FirstMove> {
         Session::new(FirstMove, Rules::SITE, "test", 250, 250, 4)
