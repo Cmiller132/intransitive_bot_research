@@ -36,21 +36,7 @@ impl NnuePlayer {
             hash_mib,
         })
     }
-}
-
-impl Player for NnuePlayer {
-    fn new_game(&mut self) {
-        self.search.clear();
-        self.last = None;
-        self.failed = false;
-        self.sims = 0;
-    }
-
-    fn set_leaves(&mut self, path: &Path) -> Result<()> {
-        self.search.set_leaves(path)
-    }
-
-    fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+    fn choose_with_reserve(&mut self, state: &State, clock: Clock, reserve: Duration) -> Action {
         let result = match clock {
             Clock::Time(time) => {
                 self.sims = 0;
@@ -59,7 +45,7 @@ impl Player for NnuePlayer {
                     state,
                     None,
                     Limits {
-                        time: time.saturating_sub(Duration::from_millis(20)),
+                        time: time.saturating_sub(reserve),
                         ..Limits::default()
                     },
                 )
@@ -84,6 +70,27 @@ impl Player for NnuePlayer {
         });
         self.last = Some(result);
         action
+    }
+}
+
+impl Player for NnuePlayer {
+    fn new_game(&mut self) {
+        self.search.clear();
+        self.last = None;
+        self.failed = false;
+        self.sims = 0;
+    }
+
+    fn set_leaves(&mut self, path: &Path) -> Result<()> {
+        self.search.set_leaves(path)
+    }
+
+    fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+        self.choose_with_reserve(state, clock, Duration::from_millis(20))
+    }
+
+    fn choose_self_timed(&mut self, state: &State, _: &History, time: Duration) -> Action {
+        self.choose_with_reserve(state, Clock::Time(time), Duration::ZERO)
     }
 
     fn info(&self) -> Option<MoveInfo> {

@@ -10,6 +10,8 @@ matches, and the site adapter all go through it. It knows the engine and the
 - `Player` (player.rs): `new_game()`, `choose(state, history, clock) -> Action`,
   `name()`. A player receives every position it must move in; it keeps its
   own tree or cache across calls. `Clock` is `Sims(n)` or `Time(duration)`.
+  `choose_self_timed(state, history, time)` identifies a seat-owned budget with
+  no host deadline; its default forwards to `choose` with `Clock::Time`.
   Defaulted methods: `observe(action)` is told every move (opening
   plies included) for players that track the game externally, `forfeited()`
   reports that the last `choose` produced no move, and `info()` returns the
@@ -44,6 +46,8 @@ matches, and the site adapter all go through it. It knows the engine and the
   `go sims N` fixes the simulation count for one move. Explicit
   `go movetime N` passes N milliseconds unchanged to the player, including
   short eval budgets; only Fischer clocks use the site clock allocation.
+  A configured seat `movetime` replaces simulation requests through
+  `choose_self_timed`; explicit host movetime and site clocks take precedence.
   Players exposing `MoveInfo` also emit `info json {"info":...,"search":...}`
   before `bestmove`. `info` contains canonical action indices and `search`
   carries the player's optional search details, including NNUE nodes and time.

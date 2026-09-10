@@ -99,6 +99,11 @@ pub trait Player {
     /// and always has a legal move.
     fn choose(&mut self, state: &State, history: &History, clock: Clock) -> Action;
 
+    /// A seat-owned time budget with no external response deadline.
+    fn choose_self_timed(&mut self, state: &State, history: &History, time: Duration) -> Action {
+        self.choose(state, history, Clock::Time(time))
+    }
+
     /// True after `choose` when the player could not produce a move; the game
     /// is then lost by forfeit.
     fn forfeited(&self) -> bool {
@@ -135,6 +140,10 @@ impl Player for Box<dyn Player> {
 
     fn choose(&mut self, state: &State, history: &History, clock: Clock) -> Action {
         (**self).choose(state, history, clock)
+    }
+
+    fn choose_self_timed(&mut self, state: &State, history: &History, time: Duration) -> Action {
+        (**self).choose_self_timed(state, history, time)
     }
 
     fn forfeited(&self) -> bool {

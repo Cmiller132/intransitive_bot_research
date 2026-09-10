@@ -452,7 +452,15 @@ impl<P: Player> Session<P> {
             },
         };
         let started = Instant::now();
-        let action = self.player.choose(&state, &self.history, clock);
+        let action = if let (None, None, Some(ms)) = (movetime, clock_ms, self.movetime) {
+            self.player.choose_self_timed(
+                &state,
+                &self.history,
+                Duration::from_millis(ms.max(1) as u64),
+            )
+        } else {
+            self.player.choose(&state, &self.history, clock)
+        };
         let elapsed = started.elapsed().as_millis();
         let token = self.pick_spelling(&frame, action, out)?;
         say(out, &format!("info time {elapsed} pv {token}"))?;
@@ -627,11 +635,15 @@ mod tests {
     #[test]
     fn a_seat_movetime_replaces_the_simulation_count_but_not_a_host_time() {
         use std::sync::{Arc, Mutex};
-        struct Budgets(Arc<Mutex<Vec<Clock>>>);
+        struct Budgets(Arc<Mutex<Vec<(Clock, bool)>>>);
         impl Player for Budgets {
             fn new_game(&mut self) {}
             fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
-                self.0.lock().unwrap().push(clock);
+                self.0.lock().unwrap().push((clock, false));
+                state.legal_actions()[0]
+            }
+            fn choose_self_timed(&mut self, state: &State, _: &History, time: Duration) -> Action {
+                self.0.lock().unwrap().push((Clock::Time(time), true));
                 state.legal_actions()[0]
             }
             fn name(&self) -> &str {
@@ -658,11 +670,15 @@ mod tests {
         s.handle("go sims 32", &mut out).unwrap();
         s.handle("go", &mut out).unwrap();
         s.handle("go movetime 50", &mut out).unwrap();
+        s.handle("go btime 10000 rtime 10000", &mut out).unwrap();
+        s.handle("go btime 10 rtime 10", &mut out).unwrap();
         let seen = seen.lock().unwrap();
-        assert!(matches!(seen[0], Clock::Sims(32)));
-        assert!(matches!(seen[1], Clock::Time(d) if d.as_millis() == 100));
-        assert!(matches!(seen[2], Clock::Time(d) if d.as_millis() == 100));
-        assert!(matches!(seen[3], Clock::Time(d) if d.as_millis() == 50));
+        assert!(matches!(seen[0], (Clock::Sims(32), false)));
+        assert!(matches!(seen[1], (Clock::Time(d), true) if d.as_millis() == 100));
+        assert!(matches!(seen[2], (Clock::Time(d), true) if d.as_millis() == 100));
+        assert!(matches!(seen[3], (Clock::Time(d), false) if d.as_millis() == 50));
+        assert!(matches!(seen[4], (Clock::Time(_), false)));
+        assert!(matches!(seen[5], (Clock::Sims(1), false)));
     }
 
     #[test]
