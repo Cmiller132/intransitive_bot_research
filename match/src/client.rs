@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use engine::{Action, State};
 
-use crate::player::{Clock, History, Player};
+use crate::player::{Clock, History, MoveInfo, Player, Telemetry};
 use crate::rpsi::{start_fen, Frame, MODE_ID};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -105,6 +105,7 @@ pub struct RpsiPlayer<W: Wire = Process> {
     moves: Vec<String>,
     frame: Frame,
     forfeited: bool,
+    telemetry: Option<Telemetry>,
 }
 
 impl RpsiPlayer<Process> {
@@ -137,6 +138,7 @@ impl<W: Wire> RpsiPlayer<W> {
             moves: Vec::new(),
             frame: Frame::with_home(BLUE_HOME, false),
             forfeited: false,
+            telemetry: None,
         })
     }
 
@@ -161,6 +163,10 @@ impl<W: Wire> RpsiPlayer<W> {
         let deadline = Instant::now() + MOVE_TIMEOUT;
         let token = loop {
             let line = self.wire.recv(remaining(deadline))?;
+            if let Some(json) = line.strip_prefix("info json ") {
+                self.telemetry =
+                    Some(serde_json::from_str(json).context("invalid RPSI telemetry")?);
+            }
             if let Some(rest) = line.trim().strip_prefix("bestmove") {
                 break rest
                     .split_whitespace()
@@ -186,6 +192,7 @@ impl<W: Wire> Player for RpsiPlayer<W> {
         self.moves.clear();
         self.frame.red_to_move = false;
         self.forfeited = false;
+        self.telemetry = None;
         if let Err(error) = self.wire.send(&format!("newgame {MODE_ID}")) {
             eprintln!("{} forfeits: {error}", self.name);
             self.forfeited = true;
@@ -198,6 +205,7 @@ impl<W: Wire> Player for RpsiPlayer<W> {
     }
 
     fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+        self.telemetry = None;
         if !self.forfeited {
             match self.ask(state, clock) {
                 Ok(action) => return action,
@@ -212,6 +220,14 @@ impl<W: Wire> Player for RpsiPlayer<W> {
 
     fn forfeited(&self) -> bool {
         self.forfeited
+    }
+
+    fn info(&self) -> Option<MoveInfo> {
+        self.telemetry.as_ref().map(|t| t.info.clone())
+    }
+
+    fn search_details(&self) -> Option<serde_json::Value> {
+        self.telemetry.as_ref().and_then(|t| t.search.clone())
     }
 
     fn name(&self) -> &str {
@@ -231,8 +247,8 @@ mod tests {
     use crate::rpsi::{FirstMove, Session};
 
     /// An in-process engine: a `Session` answering each line at once.
-    struct Loopback {
-        session: Session<FirstMove>,
+    struct Loopback<P: Player = FirstMove> {
+        session: Session<P>,
         queue: VecDeque<String>,
         notes: Vec<String>,
     }
@@ -247,7 +263,7 @@ mod tests {
         }
     }
 
-    impl Wire for Loopback {
+    impl<P: Player> Wire for Loopback<P> {
         fn send(&mut self, line: &str) -> Result<()> {
             let mut out = Vec::new();
             self.session.handle(line, &mut out)?;
@@ -263,6 +279,58 @@ mod tests {
         fn recv(&mut self, _: Duration) -> Result<String> {
             self.queue.pop_front().ok_or_else(|| anyhow!("no reply"))
         }
+    }
+
+    #[test]
+    fn telemetry_round_trips_and_does_not_survive_an_unreported_move() {
+        struct Tracked(u32, Action);
+        impl Player for Tracked {
+            fn new_game(&mut self) {
+                self.0 = 0;
+            }
+            fn choose(&mut self, state: &State, _: &History, _: Clock) -> Action {
+                self.0 += 1;
+                self.1 = state.legal_actions()[0];
+                self.1
+            }
+            fn name(&self) -> &str {
+                "tracked"
+            }
+            fn info(&self) -> Option<MoveInfo> {
+                (self.0 == 1).then(|| MoveInfo {
+                    sims: 17,
+                    value: 0.25,
+                    plies_left: None,
+                    q: 0.125,
+                    pi: 1.0,
+                    exact_win: false,
+                    top: vec![(self.1, 17, 0.125)],
+                })
+            }
+            fn search_details(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({"nodes":12345,"elapsed_ms":2.5,"pv":[self.1]}))
+            }
+        }
+        let wire = Loopback {
+            session: Session::new(Tracked(0, 0), Rules::SITE, "tracked", 250, 250, 4),
+            queue: VecDeque::new(),
+            notes: Vec::new(),
+        };
+        let mut player = RpsiPlayer::new(wire).unwrap();
+        let root = State::initial();
+        let action = player.choose(&root, &History::new(), Clock::Sims(17));
+        let info = player.info().unwrap();
+        assert_eq!((info.sims, info.value, info.top[0].0), (17, 0.25, action));
+        assert_eq!(player.search_details().unwrap()["nodes"], 12345);
+        assert_eq!(player.search_details().unwrap()["pv"][0], action);
+        player.observe(action);
+        let child = engine::apply(&Rules::SITE, &root, action).0;
+        player.choose(&child, &History::new(), Clock::Sims(17));
+        assert!(!player.forfeited());
+        assert!(player.info().is_none());
+        assert!(player.search_details().is_none());
+        player.new_game();
+        assert!(player.info().is_none());
     }
 
     /// Completes the handshake, then answers every `go` with an unplayable move.

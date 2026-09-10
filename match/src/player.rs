@@ -19,7 +19,7 @@ pub enum Clock {
 }
 
 /// Summary of the search behind one move, from the mover's point of view.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MoveInfo {
     pub sims: u32,
     /// Root value after the search.
@@ -32,6 +32,13 @@ pub struct MoveInfo {
     pub exact_win: bool,
     /// Up to five root moves by visits: `(action, visits, q)`.
     pub top: Vec<(Action, u32, f32)>,
+}
+
+/// Optional RPSI statistics in the mover's canonical frame.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Telemetry {
+    pub info: MoveInfo,
+    pub search: Option<serde_json::Value>,
 }
 
 impl MoveInfo {

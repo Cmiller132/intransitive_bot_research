@@ -44,6 +44,9 @@ matches, and the site adapter all go through it. It knows the engine and the
   `go sims N` fixes the simulation count for one move. Explicit
   `go movetime N` passes N milliseconds unchanged to the player, including
   short eval budgets; only Fischer clocks use the site clock allocation.
+  Players exposing `MoveInfo` also emit `info json {"info":...,"search":...}`
+  before `bestmove`. `info` contains canonical action indices and `search`
+  carries the player's optional search details, including NNUE nodes and time.
 - `analysis` (analysis.rs): `Analyser`, what a model exposes for analysis
   (`heads`: network policy, action values, state value and its source,
   plies-to-end distribution, draw mass; `search`: a fresh model search), and
@@ -59,6 +62,8 @@ matches, and the site adapter all go through it. It knows the engine and the
   `go sims N` or `go movetime ms`. An illegal, unparsable or late move
   (180 s), a crash or a failed handshake forfeits the game; the engine's
   stderr passes through. Any engine that plays on the site can take a seat.
+  Optional `info json` telemetry is forwarded to game records and cleared
+  before every move and new game; engines without it have no recorded stats.
 
 Game records are written as JSON lines when a path is given; nothing else is
 persisted.

@@ -456,6 +456,16 @@ impl<P: Player> Session<P> {
         let elapsed = started.elapsed().as_millis();
         let token = self.pick_spelling(&frame, action, out)?;
         say(out, &format!("info time {elapsed} pv {token}"))?;
+        if let Some(info) = self.player.info() {
+            let telemetry = crate::player::Telemetry {
+                info,
+                search: self.player.search_details(),
+            };
+            say(
+                out,
+                &format!("info json {}", serde_json::to_string(&telemetry)?),
+            )?;
+        }
         say(out, &format!("bestmove {token}"))
     }
 
