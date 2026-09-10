@@ -170,8 +170,12 @@ unchanged, everything around them is rebuilt.
     and the NNUE scored 42.5 %. Every NNUE loss was by goal, seen by the
     search 8-20 plies out while the static value stayed optimistic in
     some goal races, which points at late-game race positions as the next
-    data target (item 35). The comparison is to be repeated with sq at a
-    fixed simulation budget (`--reference-sims`, the arena's 32).
+    data target (item 35). Measured 2026-09-10 with `--reference-sims`
+    (sq searching every move, audited): the round-7 network at 250 ms
+    and four threads scores 63.5 % (55.5-71.0) against sq at 32
+    simulations, the arena's budget, and 39.5 % (31.5-47.5) against sq at
+    128. The arena seat plays at 32 x 2,500 nodes on one thread, so its
+    rating understates the site-budget strength.
 
 ## Data
 
@@ -292,11 +296,16 @@ unchanged, everything around them is rebuilt.
     with no teacher. The loop is now: collect 640 families, label with the
     incumbent at 40 simulations, fine-tune 12 epochs at 30 % share,
     resolve over 500 games. `nnue.label --quiet-best` is Stockfish's
-    generation filter (drop rows whose best move is a capture), under test
-    against the unfiltered labels. Recipe checks on the same data: 24 epochs
+    generation filter (drop rows whose best move is a capture); measured
+    on the same 30k rows it dropped 18 % and scored 50.7 % (46.8-54.5)
+    against the unfiltered labels, so the loop stays unfiltered. Label depth: the same 30k rows at 160
+    simulations against 40 scored 48.8 % (44.9-52.5), so the loop keeps
+    40 and spends the time on rows. Recipe checks on the same data: 24 epochs
     scored 50.8 % against 12 (no change), a 50 % self share scored 44.8 %
     against 30 % (worse; the window and teacher rows anchor the network),
-    so the recipe stands. Rounds vary: 6 scored 51 % and 7, from the same
+    learning rates 2e-4 and 5e-5 scored 51-53 % against 1e-4, the late
+    windows alone 50 %, and no windows at all 44.7 %, so the recipe
+    stands and the windows stay in every mixture. Rounds vary: 6 scored 51 % and 7, from the same
     parent with a new seed, 56 %, so one flat round is not saturation.
 31. Retrain when the teacher is clearly stronger: import the new windows
     (`nnue.importer conv --run runs/conv_g128 ...`), relabel the human
@@ -323,10 +332,17 @@ unchanged, everything around them is rebuilt.
     measurement by Astra; then time management at 250 ms; sequential
     testing (SPRT) in `bot eval` if a paired-outcome likelihood is added
     cleanly.
-35. Teacher disagreement rounds: relabel at 512 simulations the rows where
-    the student and the teacher differ most (`chosen_q_vs_root` and the
-    value drop records exist), and oversample endgames, where the proofs
-    show the student's blind spots.
+35. The race blind spot: of 78 goal losses against sq, 59 were runner or
+    tempo races and 19 capture or escort sequences; the static value was
+    optimistic twelve plies out in 13, nine of them races. Proposed
+    feature (Astra, not built): per side, the bucketed goal distance
+    (1-8, none) of the best runner that passes a piece-type and tempo
+    interception filter, 18 rows, two active per perspective; the
+    accumulator cost is small, the interception scan is the cost. The
+    lineage can take it without a retrain: pad the 18 rows with zeros
+    (as `widen_hidden` pads columns) so the network evaluates identically
+    at first, then fine-tune. Also: teacher disagreement rounds at 512
+    simulations on the rows where student and teacher differ most.
 36. Not worth repeating (measured null or negative): clock rows, output
     buckets, the quiet-position filter, human outcome labels alone,
     doubling the windows alone, null move, one-ply extensions, exact
