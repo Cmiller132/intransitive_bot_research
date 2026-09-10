@@ -70,6 +70,34 @@ class _ConvActor:
         return *result, regret[:, 0], regret[:, 1]
 
 
+RECORDED_HEADS = ("wdl", "reply", "regret")  # conv heads the search records but never folds into a value
+
+
+def without_stale_heads(cfg, checkpoint: dict):
+    """The config and checkpoint with every recorded head dropped whose stored
+    weights no longer fit the conv package (a checkpoint older than a change
+    in models/conv); the search takes zeros for an absent head, so the values
+    are unchanged. Other mismatches still fail in conv's own loader."""
+    from conv.model import ConvNet
+
+    reference = ConvNet(cfg.net).state_dict()
+    stale = set()
+    for weights in ("model", "ema"):
+        for key, value in checkpoint.get(weights, {}).items():
+            head = key.split(".", 1)[0]
+            if head in RECORDED_HEADS and (key not in reference or tuple(reference[key].shape) != tuple(value.shape)):
+                stale.add(head)
+    if not stale:
+        return cfg, checkpoint
+    print(json.dumps({"event": "stale_heads", "dropped": sorted(stale)}), flush=True)
+    cfg = replace(cfg, net=replace(cfg.net, **{head: False for head in stale}))
+    checkpoint = dict(checkpoint)
+    for weights in ("model", "ema"):
+        if weights in checkpoint:
+            checkpoint[weights] = {k: v for k, v in checkpoint[weights].items() if k.split(".", 1)[0] not in stale}
+    return cfg, checkpoint
+
+
 def load_teacher(kind: str, ckpt: Path, device: torch.device):
     """`(kind, actor, config, kernels)`: the network of a conv or sq training
     checkpoint (EMA weights) as the package's own compiled actor."""
@@ -80,7 +108,7 @@ def load_teacher(kind: str, ckpt: Path, device: torch.device):
         from conv.train import compile_net, student_evaluator
 
         checkpoint = load_checkpoint(str(ckpt), device)
-        cfg = config_of(checkpoint)
+        cfg, checkpoint = without_stale_heads(config_of(checkpoint), checkpoint)
         net = build(cfg, checkpoint, device, "ema").eval()
         forward = compile_net(net, cfg)
         actor = _ConvActor(student_evaluator(forward, cfg.play.draw_kernel_width), forward, kernels)
@@ -122,9 +150,7 @@ def searcher(loaded, device: torch.device, sims: int, batch: int, seed: int, reu
                     self.evaluate = root_actor
 
         clock = torch.full((batch,), SITE_CLOCK, dtype=torch.int32, device=device)
-        search = LabelSearch(
-            search_cfg, batch, device, clock, cfg.rules.clock_penalty, cfg.rules.max_plies, seed, None
-        )
+        search = LabelSearch(search_cfg, batch, device, clock, cfg.rules.clock_penalty, cfg.rules.max_plies, seed, None)
 
         def values_of(b, s, p):
             _, legal, _ = kernels.derive_batch(b, s, p, clock)
