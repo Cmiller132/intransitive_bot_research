@@ -19,17 +19,23 @@ pub struct Node {
     pub visits: Vec<u32>,
     pub total: Vec<f64>,
     pub children: Vec<NodeId>,
-    /// Legal actions that win at once; their completed Q is +1 without visits.
+    /// Legal actions that win at once or in three; their completed Q is +1 without visits.
     pub wins: Vec<bool>,
+    /// Legal actions after which the reply wins at once; their completed Q is -1.
+    pub losses: Vec<bool>,
     /// Exact game value from this node's mover's view when the game is over here.
     pub terminal: Option<f32>,
 }
 
 impl Node {
-    pub fn expanded(state: State, eval: Eval, wins: Vec<bool>) -> Node {
+    /// A node from its evaluation and exact tactics: worth +1 with a winning
+    /// move, -1 when every move loses, else the evaluator's value.
+    pub fn expanded(state: State, eval: Eval, wins: Vec<bool>, losses: Vec<bool>) -> Node {
         let edges = eval.legal.len();
         let value = if wins.iter().any(|&win| win) {
             1.0
+        } else if edges > 0 && losses.iter().all(|&loss| loss) {
+            -1.0
         } else {
             eval.value
         };
@@ -45,6 +51,7 @@ impl Node {
             total: vec![0.0; edges],
             children: vec![NONE; edges],
             wins,
+            losses,
             terminal: None,
         }
     }
@@ -62,15 +69,18 @@ impl Node {
             total: Vec::new(),
             children: Vec::new(),
             wins: Vec::new(),
+            losses: Vec::new(),
             terminal: Some(value),
         }
     }
 
-    /// Mean backed-up value of an edge, +1 for an immediate win, or the
-    /// network's q when unvisited.
+    /// Mean backed-up value of an edge, +1 for a winning move, -1 for a
+    /// losing one, or the network's q when unvisited.
     pub fn completed_q(&self, edge: usize) -> f64 {
         if self.wins[edge] {
             1.0
+        } else if self.losses[edge] {
+            -1.0
         } else if self.visits[edge] > 0 {
             self.total[edge] / self.visits[edge] as f64
         } else {
@@ -134,6 +144,7 @@ impl Tree {
                 total: node.total.clone(),
                 children: vec![NONE; node.children.len()],
                 wins: node.wins.clone(),
+                losses: node.losses.clone(),
                 terminal: node.terminal,
             });
             if parent != NONE {

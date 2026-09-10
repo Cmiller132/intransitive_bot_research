@@ -1,9 +1,11 @@
 //! Gumbel MCTS: root candidates by prior plus Gumbel noise, sequential halving,
 //! deficit selection below the root, batched leaf evaluation with virtual
-//! visits, immediate-win detection, tree reuse and budget planning.
+//! visits, exact short tactics from `engine::tactics`, tree reuse and budget
+//! planning.
 
 use std::time::Instant;
 
+use engine::tactics::{loses_in_two, wins_at_once, wins_in_three};
 use engine::{apply, Action, Outcome, Rules, State};
 use rand::Rng;
 
@@ -81,12 +83,17 @@ pub struct Info {
     pub nodes: u32,
     /// Leaf evaluations requested from the evaluator.
     pub evaluations: u64,
+    /// Visit-weighted mean of the root moves' completed Q, or the network's
+    /// value when nothing was visited.
     pub root_value: f32,
     pub plies_left: Option<f32>,
-    /// The move wins at once; no search was run.
+    /// The move wins at once or in three; no search was run.
     pub exact_win: bool,
     /// `(action, visits, completed Q)` for every legal root action, ascending by action.
     pub root: Vec<(Action, u32, f64)>,
+    /// The most visited continuation after each root action (up to seven
+    /// plies), aligned with `root`.
+    pub pvs: Vec<Vec<Action>>,
     /// Candidates by root score, then the remaining legal actions by prior.
     pub order: Vec<Action>,
 }
@@ -97,7 +104,7 @@ pub struct Gumbel {
     root: Option<NodeId>,
     /// Seconds per simulation, carried between moves for deadline planning.
     sim_cost: Option<f64>,
-    /// High-water seconds per uncached leaf evaluation.
+    /// High-water seconds per leaf evaluation in the current search.
     call_cost: Option<f64>,
     evaluations: u64,
     path: Vec<(NodeId, usize)>,
@@ -130,14 +137,6 @@ struct Pending {
     depth: usize,
     /// Earlier occurrences of the leaf position in the game plus on the path.
     repeats: u32,
-}
-
-/// Legal actions of `state` that win at once.
-pub fn immediate_wins(rules: &Rules, state: &State, legal: &[Action]) -> Vec<bool> {
-    legal
-        .iter()
-        .map(|&action| apply(rules, state, action).1 == Outcome::Win)
-        .collect()
 }
 
 impl Gumbel {
@@ -180,6 +179,7 @@ impl Gumbel {
         rng: &mut R,
     ) -> (Action, Info) {
         let started = Instant::now();
+        self.call_cost = None;
         let evaluations0 = self.evaluations;
         let root = self.root_for(evaluator, state, history);
         self.observe_call(
@@ -229,7 +229,7 @@ impl Gumbel {
                     .batch
                     .min(schedule.len() - at)
                     .min((budget_sims - used) as usize);
-                let take = self.take(wanted, budget);
+                let take = self.take(wanted, budget, used);
                 if take == 0 {
                     out_of_time = true;
                     break;
@@ -246,7 +246,7 @@ impl Gumbel {
         // One survivor: spend whatever is left deepening its line.
         while used < budget_sims && candidates.len() == 1 && !out_of_time {
             let wanted = self.params.batch.min((budget_sims - used) as usize);
-            let take = self.take(wanted, budget);
+            let take = self.take(wanted, budget, used);
             if take == 0 {
                 break;
             }
@@ -281,21 +281,50 @@ impl Gumbel {
         rest.sort_by(|&a, &b| node.log_prior[b].total_cmp(&node.log_prior[a]));
         let mut order: Vec<Action> = candidates.iter().map(|&i| node.legal[i]).collect();
         order.extend(rest.iter().map(|&i| node.legal[i]));
+        let visits: u32 = node.visits.iter().sum();
+        let root_value = if visits > 0 {
+            ((0..k)
+                .map(|i| node.visits[i] as f64 * node.completed_q(i))
+                .sum::<f64>()
+                / visits as f64) as f32
+        } else {
+            node.value
+        };
         Info {
             sims,
             nodes: self.tree.nodes.len() as u32,
             evaluations: self.evaluations - evaluations0,
-            root_value: node.value,
+            root_value,
             plies_left: node.plies_left,
             exact_win: false,
             root: (0..k)
                 .map(|i| (node.legal[i], node.visits[i], node.completed_q(i)))
                 .collect(),
+            pvs: (0..k)
+                .map(|i| self.continuation(node.children[i]))
+                .collect(),
             order,
         }
     }
 
-    /// The winning root move with the highest prior, if any wins at once.
+    /// The most visited line below `node`, up to seven plies.
+    fn continuation(&self, mut node: NodeId) -> Vec<Action> {
+        let mut line = Vec::new();
+        while node != NONE && line.len() < 7 {
+            let current = self.tree.get(node);
+            let Some(edge) = (0..current.legal.len())
+                .filter(|&i| current.visits[i] > 0)
+                .max_by_key(|&i| current.visits[i])
+            else {
+                break;
+            };
+            line.push(current.legal[edge]);
+            node = current.children[edge];
+        }
+        line
+    }
+
+    /// The winning root move with the highest prior, if any wins.
     fn best_immediate_win(&self, root: NodeId) -> Option<usize> {
         let node = self.tree.get(root);
         (0..node.legal.len())
@@ -303,21 +332,38 @@ impl Gumbel {
             .max_by(|&a, &b| node.log_prior[a].total_cmp(&node.log_prior[b]))
     }
 
-    /// Reuse the kept subtree if it contains `state`, else evaluate a fresh root.
+    /// Reuse the kept subtree if it contains `state`, else evaluate a fresh
+    /// root; either way the root's moves that win in three count as wins.
     fn root_for<E: Evaluator>(
         &mut self,
         evaluator: &mut E,
         state: &State,
         history: &History,
     ) -> NodeId {
-        if let Some(root) = self.reroot(state, history) {
-            return root;
+        let root = match self.reroot(state, history) {
+            Some(root) => root,
+            None => {
+                self.reset();
+                let eval = self.evaluate_one(evaluator, state, 1);
+                let rules = self.params.rules;
+                let wins = wins_at_once(&rules, state, &eval.legal);
+                let losses = loses_in_two(&rules, state, &eval.legal);
+                let root = self
+                    .tree
+                    .push(Node::expanded(state.clone(), eval, wins, losses));
+                self.root = self.params.reuse.then_some(root);
+                root
+            }
+        };
+        let rules = self.params.rules;
+        let node = self.tree.get_mut(root);
+        if !node.wins.iter().any(|&win| win) {
+            let forced = wins_in_three(&rules, &node.state, &node.legal);
+            if forced.iter().any(|&win| win) {
+                node.wins = forced;
+                node.value = 1.0;
+            }
         }
-        self.reset();
-        let eval = self.evaluate_one(evaluator, state, 1);
-        let wins = immediate_wins(&self.params.rules, state, &eval.legal);
-        let root = self.tree.push(Node::expanded(state.clone(), eval, wins));
-        self.root = self.params.reuse.then_some(root);
         root
     }
 
@@ -435,9 +481,11 @@ impl Gumbel {
             let evals = evaluator.evaluate(&states, &signs);
             self.evaluations += states.len() as u64;
             self.observe_call(started.elapsed().as_secs_f64(), states.len() as u64);
+            let rules = self.params.rules;
             for (pending, eval) in self.pending.iter().zip(evals) {
-                let wins = immediate_wins(&self.params.rules, &pending.state, &eval.legal);
-                let mut node = Node::expanded(pending.state.clone(), eval, wins);
+                let wins = wins_at_once(&rules, &pending.state, &eval.legal);
+                let losses = loses_in_two(&rules, &pending.state, &eval.legal);
+                let mut node = Node::expanded(pending.state.clone(), eval, wins, losses);
                 if self.params.repetition_penalty != 0.0 && pending.repeats > 0 {
                     // The opponent (odd depth) likes a repeat from its own view.
                     let shift = if pending.depth % 2 == 1 {
@@ -562,11 +610,18 @@ impl Gumbel {
     }
 
     /// Non-root selection: argmax of softmax(prior + sigma * utility) - visits / (1 + total).
+    /// Moves that lose in two are never selected while another move exists.
     fn select(&self, id: NodeId) -> usize {
         let node = self.tree.get(id);
         let scale = self.sigma(node);
         let z: Vec<f64> = (0..node.legal.len())
-            .map(|i| node.log_prior[i] as f64 + scale * self.utility(node, i))
+            .map(|i| {
+                if excluded(node, i) {
+                    f64::NEG_INFINITY
+                } else {
+                    node.log_prior[i] as f64 + scale * self.utility(node, i)
+                }
+            })
             .collect();
         let top = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let norm: f64 = z.iter().map(|v| (v - top).exp()).sum();
@@ -574,6 +629,9 @@ impl Gumbel {
         let mut best = 0;
         let mut best_value = f64::NEG_INFINITY;
         for (i, &zi) in z.iter().enumerate() {
+            if zi == f64::NEG_INFINITY {
+                continue;
+            }
             let value = (zi - top).exp() / norm - node.visits[i] as f64 / (1.0 + total as f64);
             if value > best_value {
                 best = i;
@@ -620,8 +678,12 @@ impl Gumbel {
         }
     }
 
+    /// Moves that lose in two sort last while another move exists.
     fn root_score(&self, root: NodeId, noise: &[f64], edge: usize) -> f64 {
         let node = self.tree.get(root);
+        if excluded(node, edge) {
+            return f64::NEG_INFINITY;
+        }
         noise[edge] + node.log_prior[edge] as f64 + self.sigma(node) * self.utility(node, edge)
     }
 
@@ -647,18 +709,22 @@ impl Gumbel {
         }
     }
 
-    /// How many of `cap` descents fit before the deadline.
-    fn take(&self, cap: usize, budget: Budget) -> usize {
+    /// Descents that fit, allowing a first descent whenever time remains.
+    fn take(&self, cap: usize, budget: Budget, used: u32) -> usize {
         let Budget::Deadline(deadline) = budget else {
             return cap;
         };
         let left = deadline
             .saturating_duration_since(Instant::now())
             .as_secs_f64();
+        if left == 0.0 {
+            return 0;
+        }
         let usable = (left - RETURN_RESERVE_SECONDS).max(0.0);
         let fresh_leaf = self.call_cost.unwrap_or(DEFAULT_SIM_COST).max(1e-6);
         let bound = fresh_leaf.max(self.cost()) * CALL_COST_MARGIN;
-        cap.min((usable / bound).floor() as usize)
+        let minimum = usize::from(used == 0);
+        cap.min(((usable / bound).floor() as usize).max(minimum))
     }
 
     fn cost(&self) -> f64 {
@@ -680,6 +746,11 @@ impl Gumbel {
             Some(previous.map_or(measured, |old| COST_EMA * old + (1.0 - COST_EMA) * measured))
         };
     }
+}
+
+/// True when `edge` loses in two and the node has a move that does not.
+fn excluded(node: &Node, edge: usize) -> bool {
+    node.losses[edge] && !node.losses.iter().all(|&loss| loss)
 }
 
 fn ceil_log2(value: usize) -> usize {
@@ -726,6 +797,105 @@ mod tests {
             state.board[square] = cell;
         }
         state
+    }
+
+    #[test]
+    fn deadline_admits_a_first_descent_despite_the_cost_bound() {
+        use std::time::Duration;
+
+        let mut search = Gumbel::new(Params::default());
+        search.call_cost = Some(1.0);
+        search.sim_cost = Some(1.0);
+        let budget = Budget::Deadline(Instant::now() + Duration::from_millis(40));
+        assert_eq!(search.take(8, budget, 0), 1);
+        assert_eq!(search.take(8, budget, 1), 0);
+        assert_eq!(search.take(0, budget, 0), 0);
+        assert_eq!(search.take(8, Budget::Deadline(Instant::now()), 0), 0);
+        assert_eq!(search.take(8, Budget::Sims(32), 0), 8);
+        assert_eq!(search.take(8, Budget::Sims(32), 8), 8);
+    }
+
+    #[test]
+    fn fixed_simulations_ignore_timing_estimates() {
+        for candidates in [1, 16] {
+            let params = Params {
+                candidates,
+                ..Params::default()
+            };
+            let mut fresh = Gumbel::new(params.clone());
+            let mut slow = Gumbel::new(params);
+            slow.call_cost = Some(1.0);
+            slow.sim_cost = Some(1.0);
+            let state = State::initial();
+            let history = History::new();
+            let mut fresh_rng = StdRng::seed_from_u64(809);
+            let mut slow_rng = fresh_rng.clone();
+            for sims in [1, 8, 32, 64] {
+                let expected = fresh.choose(
+                    &mut Flat,
+                    &state,
+                    &history,
+                    Budget::Sims(sims),
+                    &mut fresh_rng,
+                );
+                let actual = slow.choose(
+                    &mut Flat,
+                    &state,
+                    &history,
+                    Budget::Sims(sims),
+                    &mut slow_rng,
+                );
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                assert_eq!(actual.1.sims, sims);
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_recovers_after_one_slow_evaluation() {
+        use std::time::Duration;
+        struct SlowOnce(bool);
+        impl Evaluator for SlowOnce {
+            fn evaluate(&mut self, states: &[&State], signs: &[i8]) -> Vec<Eval> {
+                if self.0 {
+                    self.0 = false;
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                Flat.evaluate(states, signs)
+            }
+        }
+        let mut evaluator = SlowOnce(true);
+        let mut search = Gumbel::new(Params::default());
+        let mut rng = StdRng::seed_from_u64(809);
+        let state = State::initial();
+        let history = History::new();
+        let (_, first) = search.choose(
+            &mut evaluator,
+            &state,
+            &history,
+            Budget::Deadline(Instant::now() + Duration::from_millis(40)),
+            &mut rng,
+        );
+        assert_eq!(
+            first.sims, 0,
+            "root evaluation exhausted the first deadline"
+        );
+        for new_game in [false, true] {
+            if new_game {
+                search.reset();
+            }
+            let (_, info) = search.choose(
+                &mut evaluator,
+                &state,
+                &history,
+                Budget::Deadline(Instant::now() + Duration::from_millis(40)),
+                &mut rng,
+            );
+            assert!(
+                info.sims > 0,
+                "fast calls must recover, new_game={new_game}"
+            );
+        }
     }
 
     #[test]
@@ -794,5 +964,95 @@ mod tests {
         assert_eq!(root, 0);
         assert!(search.tree.nodes.len() <= before);
         assert_eq!(search.tree.get(0).state, grandchild);
+    }
+
+    #[test]
+    fn a_win_in_three_is_played_without_search() {
+        // Own scissors g8 beside the enemy paper on i9: the enemy can neither
+        // capture scissors nor block, so a step to h8 or h9 wins in three.
+        let state = place(&[
+            (69, Cell::Own(Piece::Scissors)),
+            (80, Cell::Enemy(Piece::Paper)),
+            (40, Cell::Enemy(Piece::Paper)),
+        ]);
+        let mut search = Gumbel::new(Params::default());
+        let mut rng = StdRng::seed_from_u64(2);
+        let (action, info) = search.choose(
+            &mut Flat,
+            &state,
+            &History::new(),
+            Budget::Sims(32),
+            &mut rng,
+        );
+        assert!(info.exact_win);
+        assert!([70, 79].contains(&from_to(action).1), "{info:?}");
+        assert_eq!(info.sims, 0);
+    }
+
+    #[test]
+    fn moves_that_lose_in_two_are_valued_before_any_visit() {
+        let state = place(&[
+            (10, Cell::Enemy(Piece::Paper)),
+            (20, Cell::Own(Piece::Scissors)),
+            (60, Cell::Own(Piece::Rock)),
+            (80 - 1, Cell::Enemy(Piece::Rock)),
+        ]);
+        let mut search = Gumbel::new(Params::default());
+        let root = search.root_for(&mut Flat, &state, &History::new());
+        for (action, visits, q) in search.info(root, &[], 0, 0).root {
+            assert_eq!(visits, 0);
+            assert_eq!(q == -1.0, from_to(action) != (20, 10), "{action}");
+        }
+    }
+
+    /// Every move looks lost (Q -1) but only one loses at once.
+    struct Hopeless;
+
+    impl Evaluator for Hopeless {
+        fn evaluate(&mut self, states: &[&State], _signs: &[i8]) -> Vec<Eval> {
+            states
+                .iter()
+                .map(|state| {
+                    let legal = state.legal_actions();
+                    let n = legal.len().max(1) as f32;
+                    Eval {
+                        log_prior: vec![-(n.ln()); legal.len()],
+                        q: vec![-1.0; legal.len()],
+                        legal,
+                        value: -1.0,
+                        plies_left: None,
+                    }
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_hopeless_move_still_beats_one_that_loses_at_once() {
+        // A lone own scissors on b2; the enemy scissors on b1 enters a1 next move
+        // unless our scissors steps onto a1. Everything else loses in two.
+        let state = place(&[
+            (10, Cell::Own(Piece::Scissors)),
+            (1, Cell::Enemy(Piece::Scissors)),
+            (18, Cell::Enemy(Piece::Paper)),
+            (11, Cell::Enemy(Piece::Paper)),
+            (22, Cell::Enemy(Piece::Rock)),
+            (40, Cell::Enemy(Piece::Paper)),
+        ]);
+        for seed in 0..8 {
+            let mut search = Gumbel::new(Params {
+                reuse: false,
+                ..Params::default()
+            });
+            let mut rng = StdRng::seed_from_u64(seed);
+            let (action, info) = search.choose(
+                &mut Hopeless,
+                &state,
+                &History::new(),
+                Budget::Sims(8),
+                &mut rng,
+            );
+            assert_eq!(from_to(action), (10, 0), "seed {seed}: {info:?}");
+        }
     }
 }
