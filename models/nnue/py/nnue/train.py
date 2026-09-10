@@ -32,7 +32,16 @@ from torch.nn import functional as F  # noqa: E402
 
 from . import export as export_module  # noqa: E402
 from .data import KIND_RETURN, TRAIN, VALIDATION, Dataset, Mixture  # noqa: E402
-from .features import ELAPSED_BASE, PAD, feature_ids, piece_bucket, symmetry_table  # noqa: E402
+from .features import (  # noqa: E402
+    ELAPSED_BASE,
+    FEATURES,
+    FORMAT6_FEATURES,
+    PAD,
+    RACE_BASE,
+    feature_ids,
+    piece_bucket,
+    symmetry_table,
+)
 from .model import NNUE  # noqa: E402
 from .paths import data_dir, run_dir  # noqa: E402
 
@@ -54,6 +63,7 @@ class Config:
     outcome_weight: float = 0.0
     symmetry_weight: float = 0.2
     clock: bool = True  # false: the 32 clock rows stay zero and never fire (the ablation of item 5)
+    race: bool = False  # true: the 18 race rows of format 7 train (a format 6 init is widened with zero rows)
     quiet: bool = False  # true: train and validate only on rows where the mover has no capture
     threads: int = 4
     device: str = "cpu"  # or cuda when the GPU is free; the file and the checkpoints are device-free
@@ -108,7 +118,7 @@ def encode(rows: dict[str, np.ndarray], clock: bool = True) -> tuple[torch.Tenso
     else:
         ids = feature_ids(rows["board"], rows["since_capture"], rows["capture_clock"])
     if not clock:
-        ids[ids >= ELAPSED_BASE] = PAD
+        ids[(ids >= ELAPSED_BASE) & (ids < RACE_BASE)] = PAD
     return torch.from_numpy(ids), torch.from_numpy(piece_bucket(rows["board"]))
 
 
@@ -212,14 +222,29 @@ def initial_model(config: Config) -> NNUE:
             model = model.widen_buckets()
         elif model.buckets != config.buckets:
             raise ValueError(f"{config.init} has {model.buckets} buckets, config says {config.buckets}")
+        if config.race and model.features < FEATURES:
+            model = model.widen_features()
+        elif not config.race and model.features == FEATURES:
+            raise ValueError(f"{config.init} has the race rows, pass --race true")
     else:
-        model = NNUE(config.hidden, config.buckets)
+        model = NNUE(config.hidden, config.buckets, FEATURES if config.race else FORMAT6_FEATURES)
         if config.init:
-            model.load_state_dict(torch.load(config.init, map_location="cpu", weights_only=False)["model"])
+            load_state(model, torch.load(config.init, map_location="cpu", weights_only=False)["model"])
     if not config.clock:
         with torch.no_grad():
-            model.embedding.weight[ELAPSED_BASE:PAD].zero_()
+            model.embedding.weight[ELAPSED_BASE:RACE_BASE].zero_()
     return model
+
+
+def load_state(model: NNUE, state: dict) -> None:
+    """Load a checkpoint's parameters; a checkpoint written before the race
+    rows (a 1,005-row table) fills the first rows and leaves the rest zero."""
+    weight = state["embedding.weight"]
+    if weight.shape[0] < model.embedding.weight.shape[0]:
+        padded = torch.zeros_like(model.embedding.weight)
+        padded[: weight.shape[0] - 1] = weight[:-1]  # the old padding row is dropped
+        state = {**state, "embedding.weight": padded}
+    model.load_state_dict(state)
 
 
 def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:

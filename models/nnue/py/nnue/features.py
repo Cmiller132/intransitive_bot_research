@@ -10,9 +10,18 @@ anti-diagonal reflection with colours swapped) index the same feature table:
   beats it, `486 + (piece - 1) * 81 + square`;
 - 972-987: elapsed-clock bucket of `since_capture`;
 - 988-1003: remaining-clock bucket of `clock - since_capture`;
-- 1004: padding (an all-zero row).
+- 1004-1012: race bucket of the perspective's own side (format 7, item 36);
+- 1013-1021: race bucket of the perspective's other side;
+- 1022: padding (an all-zero row).
 
-Every perspective has 42 slots: 20 pieces, 20 attacked pieces, 2 clock rows.
+Every perspective has 44 slots: 20 pieces, 20 attacked pieces, 2 clock rows
+and 2 race rows. The race buckets come from the engine's shared query
+`engine.race_buckets(board) -> (mover, opponent)` on the actual mover's
+board: 0-7 mean that side's fastest unstoppable-looking runner reaches its
+goal in 1-8 of its own moves, 8 means none. The pair is queried once and
+swapped for the opponent's perspective (querying the flipped board would
+change whose move it is and so the interception tempo). Format 6 files
+(1,004 features) never use the race rows: the model masks them to padding.
 The Rust crate indexes the same rows; `tests/test_features.py` checks the
 encoder against a slow enumeration and the perspective exchange.
 """
@@ -27,10 +36,13 @@ CLOCK_BOUNDS = np.array([0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 1
 CLOCK_BUCKETS = len(CLOCK_BOUNDS)
 ELAPSED_BASE = 2 * PIECE_ROWS
 REMAINING_BASE = ELAPSED_BASE + CLOCK_BUCKETS
-FEATURES = REMAINING_BASE + CLOCK_BUCKETS
+RACE_BASE = REMAINING_BASE + CLOCK_BUCKETS
+RACE_BUCKETS = 9
+FORMAT6_FEATURES = RACE_BASE  # the feature count of format 6 files (no race rows)
+FEATURES = RACE_BASE + 2 * RACE_BUCKETS
 PAD = FEATURES
 MAX_PIECES = 20
-SLOTS = 2 * MAX_PIECES + 2
+SLOTS = 2 * MAX_PIECES + 4
 
 # Bucket boundaries of the output heads by total pieces (DESIGN item 7).
 BUCKET_BOUNDS = np.array([0, 5, 9, 13], dtype=np.int64)
@@ -72,11 +84,33 @@ def attacked(board: np.ndarray) -> np.ndarray:
     return (piece > 0) & np.any(enemy & beats, axis=-1)
 
 
-def feature_ids(board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray) -> np.ndarray:
-    """(N, 2, 42) int64 feature ids of every position, padded with `PAD`."""
+def race_buckets(board: np.ndarray) -> np.ndarray:
+    """(N, 2) uint8: the engine's race buckets (mover, opponent) of every
+    board in the mover's frame."""
+    import engine
+
     board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
     if np.any(board > 6):
         raise ValueError("cell codes must be 0..6")
+    out = np.empty((len(board), 2), dtype=np.uint8)
+    for i, row in enumerate(board):
+        out[i] = engine.race_buckets(row.tobytes())
+    return out
+
+
+def feature_ids(
+    board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray, race: np.ndarray | None = None
+) -> np.ndarray:
+    """(N, 2, 44) int64 feature ids of every position, padded with `PAD`;
+    `race` is the (N, 2) result of `race_buckets` (queried when omitted)."""
+    board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
+    if np.any(board > 6):
+        raise ValueError("cell codes must be 0..6")
+    if race is None:
+        race = race_buckets(board)
+    race = np.asarray(race, dtype=np.int64).reshape(-1, 2)
+    if len(race) != len(board) or np.any(race < 0) or np.any(race >= RACE_BUCKETS):
+        raise ValueError("one (mover, opponent) race bucket pair in 0..8 per board")
     since = np.asarray(since_capture, dtype=np.int64).reshape(-1)
     clock = np.asarray(clock, dtype=np.int64).reshape(-1)
     if len(since) != len(board) or len(clock) != len(board):
@@ -99,6 +133,11 @@ def feature_ids(board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray)
     ids = ids.reshape(-1, 2, SLOTS)
     ids[:, :, 2 * MAX_PIECES] = (ELAPSED_BASE + clock_bucket(since))[:, None]
     ids[:, :, 2 * MAX_PIECES + 1] = (REMAINING_BASE + clock_bucket(clock - since))[:, None]
+    # The mover's perspective sees (own = mover, other = opponent); the opponent's the swap.
+    ids[:, 0, 2 * MAX_PIECES + 2] = RACE_BASE + race[:, 0]
+    ids[:, 0, 2 * MAX_PIECES + 3] = RACE_BASE + RACE_BUCKETS + race[:, 1]
+    ids[:, 1, 2 * MAX_PIECES + 2] = RACE_BASE + race[:, 1]
+    ids[:, 1, 2 * MAX_PIECES + 3] = RACE_BASE + RACE_BUCKETS + race[:, 0]
     return ids
 
 
@@ -119,7 +158,8 @@ def transform_board(board: np.ndarray, symmetry: int) -> np.ndarray:
 def symmetry_table() -> np.ndarray:
     """(6, FEATURES + 1) permutation of feature ids under every symmetry; it
     commutes with both perspectives, so `table[k, ids]` are the ids of the
-    transformed position. Clock rows and the padding row map to themselves."""
+    transformed position. Clock, race and padding rows map to themselves (the
+    race query is invariant under the diagonal reflection and type renaming)."""
     table = np.tile(np.arange(FEATURES + 1), (6, 1))
     f = np.arange(2 * PIECE_ROWS)
     group, rest = divmod(f, PIECE_ROWS)

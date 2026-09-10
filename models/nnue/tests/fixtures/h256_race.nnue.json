@@ -1,0 +1,14 @@
+{
+  "format": "RPSNNUE1",
+  "version": 7,
+  "features": 1022,
+  "hidden": 256,
+  "buckets": 4,
+  "dense": 32,
+  "qa": 255,
+  "qb": 64,
+  "eval_scale": 600.0,
+  "bytes": 544696,
+  "sha256": "c5b81cac2b031c335081e211dc614a4197ffe3308566b007cc02862e7facd70a",
+  "purpose": "format 7 fixture: random H256/B4 network with nonzero race rows, written by nnue.export"
+}

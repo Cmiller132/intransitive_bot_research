@@ -9,9 +9,9 @@ import pytest
 import torch
 
 from nnue import data, export, paths
-from nnue.features import ELAPSED_BASE, PAD, feature_ids, orbit_hash, piece_bucket
+from nnue.features import ELAPSED_BASE, FEATURES, FORMAT6_FEATURES, PAD, feature_ids, orbit_hash, piece_bucket
 from nnue.model import NNUE
-from nnue.train import Config, train
+from nnue.train import Config, initial_model, train
 
 from .test_features import random_boards
 
@@ -98,6 +98,24 @@ def test_loss_variants_and_bucketed_start(sets):
     out = train("one", sets, tiny(epochs=1))
     wide = train("four", sets, tiny(buckets=4, init=str(out / "best.nnue"), epochs=1))
     assert export.read(wide / "best.nnue")["buckets"] == 4
+
+
+def test_race_rows_train_only_with_the_flag_and_old_checkpoints_load(sets, tmp_path):
+    out = train("six", sets, tiny(epochs=1))
+    assert export.read(out / "best.nnue")["features"] == FORMAT6_FEATURES
+    seven = train("seven", sets, tiny(init=str(out / "best.nnue"), race=True, epochs=1, lr=3e-2))
+    net = export.read(seven / "best.nnue")
+    assert net["features"] == FEATURES and net["weights"][FORMAT6_FEATURES:].any()
+    with pytest.raises(ValueError):
+        initial_model(tiny(init=str(seven / "best.nnue")))
+    # A checkpoint from before the race rows has a 1,005-row table.
+    state = torch.load(out / "latest.pt", map_location="cpu", weights_only=False)["model"]
+    old = {**state, "embedding.weight": state["embedding.weight"][: FORMAT6_FEATURES + 1].clone()}
+    torch.save({"model": old}, tmp_path / "old.pt")
+    model = initial_model(tiny(init=str(tmp_path / "old.pt"), race=True))
+    assert model.features == FEATURES
+    assert torch.equal(model.embedding.weight[:FORMAT6_FEATURES], state["embedding.weight"][:FORMAT6_FEATURES])
+    assert not model.embedding.weight[FORMAT6_FEATURES:].any()
 
 
 def test_clock_ablation_leaves_the_clock_rows_zero_and_inert(sets):

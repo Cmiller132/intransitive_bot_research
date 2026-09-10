@@ -41,13 +41,13 @@ TRAIN, VALIDATION, TEST = range(3)
 SOURCE_CONV, SOURCE_PROTOTYPE_REPLAY, SOURCE_PROTOTYPE_SEARCHED, SOURCE_STUDENT, SOURCE_HUMAN = 1, 2, 3, 4, 5
 
 
-IDS_FILE = "ids.npy"  # optional cache: the feature ids of every row, (N, 2, 42) int16
+IDS_FILE = "ids.npy"  # optional cache: the feature ids of every row, (N, 2, SLOTS) int16
 
 
 def encode_ids(directory: Path, chunk: int = 1 << 18) -> Path:
     """Write the feature-id cache of a dataset (`python -m nnue.data encode <set>`):
     the trainer then gathers ids instead of encoding boards per batch."""
-    from .features import feature_ids
+    from .features import SLOTS, feature_ids
 
     directory = Path(directory)
     board = np.load(directory / "board.npy", mmap_mode="r")
@@ -55,7 +55,7 @@ def encode_ids(directory: Path, chunk: int = 1 << 18) -> Path:
     clock = np.load(directory / "capture_clock.npy", mmap_mode="r")
     n = len(board)
     tmp = directory / (IDS_FILE + ".tmp")
-    ids = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.int16, shape=(n, 2, 42))
+    ids = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.int16, shape=(n, 2, SLOTS))
     for start in range(0, n, chunk):
         end = min(start + chunk, n)
         ids[start:end] = feature_ids(
@@ -124,7 +124,14 @@ class Dataset:
         directory = Path(directory)
         rows = {name: np.load(directory / f"{name}.npy", mmap_mode="r") for name in FIELDS}
         if (directory / IDS_FILE).is_file():
-            rows["ids"] = np.load(directory / IDS_FILE, mmap_mode="r")
+            from .features import SLOTS
+
+            ids = np.load(directory / IDS_FILE, mmap_mode="r")
+            if ids.shape[1:] == (2, SLOTS):
+                rows["ids"] = ids
+            else:
+                # A cache from an older feature layout: the trainer encodes boards instead.
+                print(json.dumps({"event": "stale_ids", "dataset": str(directory), "slots": int(ids.shape[-1])}))
         provenance = json.loads((directory / "provenance.json").read_text(encoding="utf-8"))
         keep = rows["split"] == split
         if kinds is not None:

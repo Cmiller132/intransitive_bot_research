@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .features import BUCKETS, FEATURES, PAD, SLOTS
+from .features import BUCKETS, FEATURES, FORMAT6_FEATURES, PAD, SLOTS
 
 QA = 255  # scale of the feature table and the accumulator clamp
 QB = 64  # scale of the readout, dense and residual weights
@@ -41,16 +41,21 @@ class NNUE(nn.Module):
     squared clipped accumulators feed a per-bucket linear readout and a shared
     32-wide dense layer whose clipped output feeds a per-bucket residual row.
     `buckets` is 1 (one head) or `features.BUCKETS` (one head per piece-count
-    bucket, item 7)."""
+    bucket, item 7). `features` is the file format's feature count: 1,022
+    (format 7, with the race rows) or 1,004 (format 6, whose race rows stay
+    zero and whose race ids are masked to padding in the forward pass)."""
 
-    def __init__(self, hidden: int = 512, buckets: int = 1):
+    def __init__(self, hidden: int = 512, buckets: int = 1, features: int = FEATURES):
         super().__init__()
         if hidden % 32 or not 32 <= hidden <= 1024:
             raise ValueError("hidden must be a multiple of 32 from 32 to 1024")
         if buckets not in (1, BUCKETS):
             raise ValueError(f"buckets must be 1 or {BUCKETS}")
+        if features not in (FORMAT6_FEATURES, FEATURES):
+            raise ValueError(f"features must be {FORMAT6_FEATURES} or {FEATURES}")
         self.hidden = hidden
         self.buckets = buckets
+        self.features = features
         self.embedding = nn.EmbeddingBag(FEATURES + 1, hidden, mode="sum", padding_idx=PAD)
         self.bias = nn.Parameter(torch.full((hidden,), 0.15))
         self.output = nn.Linear(2 * hidden, buckets)
@@ -63,12 +68,14 @@ class NNUE(nn.Module):
         nn.init.constant_(self.dense.bias, 0.2)
         nn.init.zeros_(self.delta.weight)
         with torch.no_grad():
-            self.embedding.weight[PAD].zero_()
+            self.embedding.weight[features:].zero_()
 
     def forward(self, ids: torch.Tensor, bucket: torch.Tensor, qat: bool = False) -> torch.Tensor:
         """`ids` (N, 2, SLOTS) feature ids, `bucket` (N,) the head of every
         position (all zero with one head); returns the raw value (N,)."""
         n = ids.shape[0]
+        if self.features < FEATURES:
+            ids = torch.where(ids >= self.features, PAD, ids)
         weight = fake_quant(self.embedding.weight, QA) if qat else self.embedding.weight
         bias = fake_quant(self.bias, QA) if qat else self.bias
         acc = accumulate(ids.reshape(-1, SLOTS), weight) + bias
@@ -100,7 +107,7 @@ class NNUE(nn.Module):
     def constrain(self) -> None:
         """Keep every parameter inside its integer range."""
         self.embedding.weight.clamp_(-8, 8)
-        self.embedding.weight[PAD].zero_()
+        self.embedding.weight[self.features :].zero_()
         self.bias.clamp_(-8, 8)
         self.output.weight.clamp_(-64, 64)
         self.output.bias.clamp_(-64, 64)
@@ -116,7 +123,7 @@ class NNUE(nn.Module):
         the new head columns are zero (DESIGN item 33)."""
         if hidden <= self.hidden or hidden % 32:
             raise ValueError(f"hidden must be a larger multiple of 32 than {self.hidden}")
-        wide = NNUE(hidden, self.buckets)
+        wide = NNUE(hidden, self.buckets, self.features)
         old, new = self.hidden, hidden
         wide.embedding.weight.zero_()
         wide.embedding.weight[:, :old].copy_(self.embedding.weight)
@@ -137,7 +144,7 @@ class NNUE(nn.Module):
         to the single head, so the buckets start from the same evaluation."""
         if self.buckets != 1:
             raise ValueError("already bucketed")
-        wide = NNUE(self.hidden, BUCKETS)
+        wide = NNUE(self.hidden, BUCKETS, self.features)
         wide.embedding.weight.copy_(self.embedding.weight)
         wide.bias.copy_(self.bias)
         wide.dense.weight.copy_(self.dense.weight)
@@ -145,4 +152,16 @@ class NNUE(nn.Module):
         wide.output.weight.copy_(self.output.weight.expand(BUCKETS, -1))
         wide.output.bias.copy_(self.output.bias.expand(BUCKETS))
         wide.delta.weight.copy_(self.delta.weight.expand(BUCKETS, -1))
+        return wide
+
+    @torch.no_grad()
+    def widen_features(self) -> NNUE:
+        """A format 7 copy of a format 6 network: every parameter is kept and
+        the 18 race rows start at zero, so it evaluates identically until the
+        rows train (DESIGN item 36)."""
+        if self.features == FEATURES:
+            raise ValueError("already has the race rows")
+        wide = NNUE(self.hidden, self.buckets, FEATURES)
+        wide.load_state_dict(self.state_dict())
+        wide.embedding.weight[FORMAT6_FEATURES:].zero_()
         return wide

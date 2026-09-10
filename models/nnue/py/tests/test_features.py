@@ -12,6 +12,8 @@ from nnue.features import (
     FEATURES,
     MAX_PIECES,
     PAD,
+    RACE_BASE,
+    RACE_BUCKETS,
     REMAINING_BASE,
     SLOTS,
     SWAP,
@@ -19,6 +21,7 @@ from nnue.features import (
     feature_ids,
     orbit_hash,
     piece_bucket,
+    race_buckets,
     symmetry_table,
     transform_board,
 )
@@ -33,8 +36,9 @@ def random_boards(seed, count, low=0, high=21):
     return boards
 
 
-def slow_ids(board, since, clock):
-    """One perspective at a time by plain loops."""
+def slow_ids(board, since, clock, race):
+    """One perspective at a time by plain loops; `race` is the engine's
+    (mover, opponent) pair, swapped for the opponent's perspective."""
     perspectives = [list(map(int, board))]
     reverse = []
     for square in range(81):
@@ -43,7 +47,7 @@ def slow_ids(board, since, clock):
         reverse.append(0 if piece == 0 else piece + 3 if piece <= 3 else piece - 3)
     perspectives.append(reverse)
     out = []
-    for position in perspectives:
+    for own, position in enumerate(perspectives):
         pieces, hit = [], []
         for square, piece in enumerate(position):
             if not piece:
@@ -66,7 +70,9 @@ def slow_ids(board, since, clock):
         elapsed = int(np.searchsorted(CLOCK_BOUNDS, since, side="right") - 1)
         remaining = int(np.searchsorted(CLOCK_BOUNDS, clock - since, side="right") - 1)
         slots = pieces + [PAD] * (MAX_PIECES - len(pieces)) + hit + [PAD] * (MAX_PIECES - len(hit))
+        mine, theirs = (race[0], race[1]) if own == 0 else (race[1], race[0])
         out.append(slots + [ELAPSED_BASE + elapsed, REMAINING_BASE + remaining])
+        out[-1] += [RACE_BASE + int(mine), RACE_BASE + RACE_BUCKETS + int(theirs)]
     return np.array(out, dtype=np.int64)
 
 
@@ -76,15 +82,20 @@ def test_encoder_matches_the_slow_enumeration():
     clock = np.full(64, 200)
     got = feature_ids(boards, since, clock)
     assert got.shape == (64, 2, SLOTS)
-    want = np.stack([slow_ids(b, int(s), 200) for b, s in zip(boards, since, strict=True)])
+    race = race_buckets(boards)
+    assert race.shape == (64, 2) and race.max() <= 8
+    want = np.stack([slow_ids(b, int(s), 200, r) for b, s, r in zip(boards, since, race, strict=True)])
     assert np.array_equal(got, want)
 
 
 def test_perspectives_exchange_under_the_frame_flip():
     boards = random_boards(7, 32)
     since, clock = np.full(32, 17), np.full(32, 120)
-    ids = feature_ids(boards, since, clock)
-    flipped = feature_ids(SWAP[boards[:, ANTI]], since, clock)
+    race = race_buckets(boards)
+    ids = feature_ids(boards, since, clock, race)
+    # The race pair is queried once on the mover's board and swapped, never re-queried
+    # on the flipped board (that would change whose move it is).
+    flipped = feature_ids(SWAP[boards[:, ANTI]], since, clock, race[:, ::-1])
     assert np.array_equal(ids[:, 0], flipped[:, 1])
     assert np.array_equal(ids[:, 1], flipped[:, 0])
 
@@ -106,6 +117,21 @@ def test_invalid_positions_are_rejected():
         feature_ids(board, [0], [200])
     with pytest.raises(ValueError):
         feature_ids(np.zeros((1, 81), np.uint8), [0], [0])
+    with pytest.raises(ValueError):
+        feature_ids(np.zeros((1, 81), np.uint8), [0], [200], race=[[9, 0]])
+
+
+def test_race_rows_follow_the_engine_query():
+    board = np.zeros((1, 81), dtype=np.uint8)
+    empty = feature_ids(board, [0], [200])
+    assert empty[0, 0, 42:].tolist() == [RACE_BASE + 8, RACE_BASE + RACE_BUCKETS + 8]
+    # A lone rock one step from its goal: the mover's runner arrives in one move.
+    board[0, 8 * 9 - 9 + 4] = 1
+    ids = feature_ids(board, [0], [200])
+    mover, opponent = (int(v) for v in race_buckets(board)[0])
+    assert ids[0, 0, 42:].tolist() == [RACE_BASE + mover, RACE_BASE + RACE_BUCKETS + opponent]
+    assert ids[0, 1, 42:].tolist() == [RACE_BASE + opponent, RACE_BASE + RACE_BUCKETS + mover]
+    assert (mover, opponent) != (8, 8)
 
 
 def test_symmetry_table_matches_transformed_boards():

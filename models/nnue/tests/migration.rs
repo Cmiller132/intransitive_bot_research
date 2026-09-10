@@ -458,6 +458,20 @@ fn python_h768_export_matches_oracle_and_incremental_trajectory() {
     assert_thousand_move_trajectory(&model);
 }
 
+#[test]
+fn python_format7_export_matches_oracle_and_incremental_trajectory() {
+    // Written by nnue.export from a random H256/B4 network with nonzero race
+    // rows; the positions carry integer_eval's raw values, which the
+    // diagnostic checks against the Rust evaluation.
+    let model = Model::from_bytes(include_bytes!("fixtures/h256_race.nnue")).unwrap();
+    assert_eq!((model.features, model.hidden, model.buckets), (1022, 256, 4));
+    let fixture = include_str!("fixtures/h256_race_positions.jsonl");
+    let mut output = Vec::new();
+    nnue::diagnostic::run(&model, fixture.as_bytes(), &mut output, None, 1).unwrap();
+    assert_eq!(String::from_utf8(output).unwrap().lines().count(), 60);
+    assert_thousand_move_trajectory(&model);
+}
+
 fn width_fixture(hidden: usize, buckets: usize) -> Vec<u8> {
     let mut bytes = b"RPSNNUE1".to_vec();
     for value in [6, 1004, hidden as u32, 255, 64] {
