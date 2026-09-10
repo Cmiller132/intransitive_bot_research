@@ -45,6 +45,31 @@ from .paths import data_dir, workspace_root
 SEARCH_FIELDS = ("sims", "candidates", "cheap_sims", "cheap_candidates", "reuse_nodes")
 
 
+class _ConvActor:
+    """Conv's root evaluator and its expansion evaluator, which omits unused draw mass."""
+
+    def __init__(self, root, forward, kernels):
+        self.root, self.forward, self.kernels = root, forward, kernels
+
+    def __call__(self, board, since, ply, clock):
+        return self.root(board, since, ply, clock)
+
+    def leaf(self, board, since, ply, clock):
+        """The search consumes every field except the draw slot during expansion."""
+        planes, legal, count = self.kernels.derive_batch(board, since, ply, clock)
+        if planes.is_cuda:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = self.forward(planes)
+        else:
+            out = self.forward(planes.float())
+        # The unused draw slot aliases Q; it requires no allocation or reduction.
+        result = out.logits, out.q, out.v, out.q, legal, count
+        if out.regret is None:
+            return result
+        regret = out.regret.float()
+        return *result, regret[:, 0], regret[:, 1]
+
+
 def load_teacher(kind: str, ckpt: Path, device: torch.device):
     """`(kind, actor, config, kernels)`: the network of a conv or sq training
     checkpoint (EMA weights) as the package's own compiled actor."""
@@ -57,7 +82,8 @@ def load_teacher(kind: str, ckpt: Path, device: torch.device):
         checkpoint = load_checkpoint(str(ckpt), device)
         cfg = config_of(checkpoint)
         net = build(cfg, checkpoint, device, "ema").eval()
-        actor = student_evaluator(compile_net(net, cfg), cfg.play.draw_kernel_width)
+        forward = compile_net(net, cfg)
+        actor = _ConvActor(student_evaluator(forward, cfg.play.draw_kernel_width), forward, kernels)
     elif kind == "sq":
         from sq import kernels
         from sq.model import build, config_of, load_checkpoint
@@ -84,8 +110,19 @@ def searcher(loaded, device: torch.device, sims: int, batch: int, seed: int, reu
     if kind == "conv":
         from conv.search import GumbelSearch
 
+        class LabelSearch(GumbelSearch):
+            """Root draw mass drives contempt; expanded leaves only need Q and V."""
+
+            def _simulate(self):
+                root_actor = self.evaluate
+                self.evaluate = actor.leaf
+                try:
+                    return super()._simulate()
+                finally:
+                    self.evaluate = root_actor
+
         clock = torch.full((batch,), SITE_CLOCK, dtype=torch.int32, device=device)
-        search = GumbelSearch(
+        search = LabelSearch(
             search_cfg, batch, device, clock, cfg.rules.clock_penalty, cfg.rules.max_plies, seed, None
         )
 
