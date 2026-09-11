@@ -539,7 +539,7 @@ impl Searcher {
                 break;
             }
             // Start another depth only while a useful fraction of the budget remains.
-            if self.start.elapsed() >= limits.time.mul_f64(0.72) {
+            if limits.time != Duration::MAX && self.start.elapsed() >= limits.time.mul_f64(0.72) {
                 break;
             }
         }
@@ -1100,7 +1100,7 @@ impl Searcher {
         }
         if self.nodes >= self.limits.nodes
             || ((force || self.nodes & 63 == 0)
-                && (Instant::now() >= self.deadline
+                && ((self.limits.time != Duration::MAX && Instant::now() >= self.deadline)
                     || self
                         .stop_signal
                         .as_ref()
@@ -1429,6 +1429,65 @@ mod tests {
 #[cfg(test)]
 mod generation_tests {
     use super::*;
+    #[test]
+    fn unlimited_wall_time_still_obeys_node_and_interrupt_limits() {
+        let mut searcher = Searcher::new(1);
+        searcher.limits.time = Duration::MAX;
+        searcher.limits.nodes = 10;
+        searcher.deadline = Instant::now();
+        assert!(!searcher.should_stop(true));
+        searcher.nodes = 10;
+        assert!(searcher.should_stop(true));
+        searcher.nodes = 0;
+        searcher.stopped = false;
+        searcher.set_stop_signal(Arc::new(AtomicU64::new(1)), 0);
+        assert!(searcher.should_stop(true));
+    }
+
+    #[test]
+    fn decisive_root_scores_follow_the_mover_for_both_absolute_players() {
+        let model = Model::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/h768_dense.nnue"
+        ))
+        .unwrap();
+        for ply in [0, 1, 20, 21] {
+            let mut searcher = Searcher::new(1);
+            let mut state = State {
+                board: [Cell::Empty; 81],
+                since_capture: 0,
+                ply,
+            };
+            state.board[60] = Cell::Own(engine::Piece::Rock);
+            state.board[10] = Cell::Enemy(engine::Piece::Paper);
+            let result = searcher.search(
+                &model,
+                &state,
+                None,
+                Limits {
+                    nodes: 10_000,
+                    time: Duration::MAX,
+                    ..Limits::default()
+                },
+            );
+            let (action, score, _) = result.completed_root().unwrap();
+            assert_eq!(score, -MATE + 2);
+            let child = engine::apply(&Rules::SITE, &state, action).0;
+            assert!(child
+                .legal_actions()
+                .iter()
+                .any(|&a| engine::apply(&Rules::SITE, &child, a).1 == Outcome::Win));
+            state.board[60] = Cell::Empty;
+            state.board[79] = Cell::Own(engine::Piece::Rock);
+            let result = searcher.search(&model, &state, None, Limits::default());
+            assert_eq!(result.score, MATE - 1);
+            assert!(result.completed_root().is_none());
+            assert_eq!(
+                engine::apply(&Rules::SITE, &state, result.action.unwrap()).1,
+                Outcome::Win
+            );
+        }
+    }
     #[test]
     fn completed_label_does_not_follow_a_partial_playing_choice() {
         let mut result = SearchResult {
