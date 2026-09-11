@@ -170,3 +170,8 @@ un-synced events are not guaranteed across power loss.
 every game through the engine, including frames, root board fingerprints,
 legal actions, random guards, engine proofs and terminal/censored results.
 It does not re-search labels or audit unpublished active journals.
+
+The summary also reports `worker_game_seconds`,
+`worker_outside_search_seconds` and `publication_seconds`. These are summed
+wall durations, not CPU cycles: worker game time includes scheduling and
+journalling; publication runs on the coordinator and can overlap workers.

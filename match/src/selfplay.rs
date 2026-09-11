@@ -272,9 +272,14 @@ impl Record {
             let action = token
                 .map(|t| Frame::with_home(0, state.ply % 2 == 1).parse_move(t))
                 .transpose()?;
-            if let Some(action) = action {
+            if action.is_some() || roots.peek().is_some_and(|root| root.ply == state.ply) {
                 let random = self.game.random_plies.contains(&state.ply);
                 let skipped = self.random_skipped.contains(&state.ply);
+                ensure!(
+                    (state.ply < self.opening_plies || self.random_plan.contains(&state.ply))
+                        == (random || skipped),
+                    "missing random-slot provenance"
+                );
                 if random || skipped {
                     let legal = state.legal_actions();
                     let losses = engine::tactics::loses_in_two(&Rules::SITE, &state, &legal);
@@ -284,7 +289,7 @@ impl Record {
                                 && legal
                                     .iter()
                                     .zip(&losses)
-                                    .any(|(&a, &loss)| a == action && !loss)),
+                                    .any(|(&a, &loss)| Some(a) == action && !loss)),
                         "unsafe random action"
                     );
                     ensure!(

@@ -214,15 +214,18 @@ impl Journal {
 }
 
 /// Only complete journal lines are committed decisions; a torn final write is ignored.
-fn recover_journal(path: &Path) -> Result<Record> {
+fn recover_journal(path: &Path, initial: &Record) -> Result<Record> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line)?;
-    ensure!(
-        line.last() == Some(&b'\n'),
-        "incomplete game journal header"
-    );
+    if line.last() != Some(&b'\n') {
+        return Ok(initial.clone());
+    }
     let mut record: Record = serde_json::from_slice(&line)?;
+    ensure!(
+        serde_json::to_value(&record)? == serde_json::to_value(initial)?,
+        "journal header differs from seeded initial game"
+    );
     let mut state = record.initial.state()?;
     loop {
         line.clear();
@@ -439,7 +442,13 @@ fn recover(dir: &Path, manifest: &mut Manifest) -> Result<Vec<u64>> {
             "unexpected active record"
         );
         if id >= completed && !pending(dir, id).exists() {
-            let r = recover_journal(&path)?;
+            let initial = Record::new(
+                &manifest.identity.settings.game,
+                &manifest.identity.settings.player,
+                id,
+                selfplay::derive_seed(manifest.identity.settings.seed, id),
+            )?;
+            let r = recover_journal(&path, &initial)?;
             ensure!(
                 r.game_id == id
                     && r.seed == selfplay::derive_seed(manifest.identity.settings.seed, id),
@@ -569,12 +578,15 @@ pub fn run(args: Args) -> Result<()> {
     })?;
     let start = Instant::now();
     let mut new_counts = Counts::default();
+    let mut worker_time = Duration::ZERO;
+    let mut publication_time = Duration::ZERO;
     let worker_count = args.threads.min(jobs.len());
     let next = AtomicU64::new(0);
     let settings = &manifest.identity.settings.clone();
     let dir = &args.records;
     let outcome: Result<()> = std::thread::scope(|scope| {
-        let (sender, receiver) = mpsc::sync_channel::<Result<Counts>>(worker_count.max(1));
+        let (sender, receiver) =
+            mpsc::sync_channel::<Result<(Counts, Duration)>>(worker_count.max(1));
         for _ in 0..worker_count {
             let sender = sender.clone();
             let jobs = &jobs;
@@ -589,7 +601,8 @@ pub fn run(args: Args) -> Result<()> {
                     let Some(&id) = jobs.get(index) else {
                         break;
                     };
-                    let result = (|| -> Result<Counts> {
+                    let result = (|| -> Result<(Counts, Duration)> {
+                        let game_start = Instant::now();
                         searcher.clear();
                         let record = Record::new(
                             &settings.game,
@@ -624,7 +637,7 @@ pub fn run(args: Args) -> Result<()> {
                         fs::remove_file(active(dir, id))?;
                         let mut counts = Counts::default();
                         counts.add(&record);
-                        Ok(counts)
+                        Ok((counts, game_start.elapsed()))
                     })();
                     if result.is_err() {
                         stop.store(1, Ordering::Relaxed);
@@ -639,13 +652,16 @@ pub fn run(args: Args) -> Result<()> {
         let mut failure = None;
         for result in receiver {
             match result {
-                Ok(counts) => {
+                Ok((counts, elapsed)) => {
                     new_counts.merge(&counts);
+                    worker_time += elapsed;
                     if failure.is_none() {
+                        let publication_start = Instant::now();
                         if let Err(error) = publish(dir, &mut manifest) {
                             stop.store(1, Ordering::Relaxed);
                             failure = Some(error);
                         }
+                        publication_time += publication_start.elapsed();
                     }
                     if new_counts.games.is_multiple_of(16) {
                         eprintln!(
@@ -668,7 +684,9 @@ pub fn run(args: Args) -> Result<()> {
         }
     });
     outcome?;
+    let publication_start = Instant::now();
     publish(dir, &mut manifest)?;
+    publication_time += publication_start.elapsed();
     let seconds = start.elapsed().as_secs_f64();
     println!(
         "{}",
@@ -676,6 +694,9 @@ pub fn run(args: Args) -> Result<()> {
         "interrupted":stop.load(Ordering::Relaxed) != 0, "new":new_counts,
         "published_games":manifest.shards.iter().map(|s| s.counts.games).sum::<u64>(),
         "wall_seconds":seconds, "games_per_hour":new_counts.games as f64*3600./seconds,
+        "worker_game_seconds":worker_time.as_secs_f64(),
+        "worker_outside_search_seconds":worker_time.saturating_sub(Duration::from_nanos(new_counts.search_ns)).as_secs_f64(),
+        "publication_seconds":publication_time.as_secs_f64(),
         "eligible_roots_per_hour":new_counts.eligible_roots as f64*3600./seconds})
     );
     if stop.load(Ordering::Relaxed) != 0 {
@@ -831,7 +852,7 @@ mod tests {
             .write_all(b"{\"ply\":1")
             .unwrap();
         // The fixture header has no random opening: the replay catches the mismatch.
-        assert!(recover_journal(&path).is_err());
+        assert!(recover_journal(&path, &record).is_err());
         fs::remove_file(&path).unwrap();
         let mut config = settings.game.clone();
         config.opening_plies = 1;
@@ -842,6 +863,7 @@ mod tests {
             selfplay::derive_seed(settings.seed, 0),
         )
         .unwrap();
+        let header = record.clone();
         let mut journal = Journal::new(&path, &record).unwrap();
         let mut one_ply = config.clone();
         one_ply.max_plies = 1;
@@ -860,10 +882,14 @@ mod tests {
             .unwrap()
             .write_all(b"{\"ply\":1")
             .unwrap();
-        let recovered = recover_journal(&path).unwrap();
+        let recovered = recover_journal(&path, &header).unwrap();
         assert_eq!(recovered.game.moves, record.game.moves);
         assert_eq!(recovered.game.end, r#match::End::Interrupted);
         assert!(recovered.censored && recovered.outcome.is_none());
+        fs::write(&path, b"{\"schema\":").unwrap();
+        let empty = recover_journal(&path, &header).unwrap();
+        empty.verify().unwrap();
+        assert!(empty.game.moves.is_empty() && empty.censored && empty.outcome.is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 }
