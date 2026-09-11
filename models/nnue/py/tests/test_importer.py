@@ -157,3 +157,200 @@ def test_merge_contexts_averages_by_weight_and_caps():
     assert merged["target"][first] == pytest.approx(0.5)
     assert merged["weight"][first] == 4.0 and merged["outcome_ok"][first] and merged["outcome"][first] == 1
     assert merged["kind"][first] == 0 and merged["weight"][~first] == 4.0
+
+
+# --- self-play records (nnue.importer selfplay) ---------------------------------
+
+SELFPLAY_MOVES = [
+    "e3-f2",
+    "h6-i6",
+    "b5-a5",
+    "h5-h6",
+    "c5-d6",
+    "e8-f9",
+    "b4-a3",
+    "e7-e6",
+    "d6-c5",
+    "g6-f5",
+    "d4-e4",
+    "g7-g6",
+    "d2-e3",
+    "f8-e7",
+    "c5-b4",
+    "i6-h7",
+    "e2-f1",
+    "e6-d7",
+    "d3-d4",
+    "h7-i8",
+    "a5-a4",
+    "h6-i5",
+    "c4-c5",
+    "f9-e8",
+    "e4-d3",
+    "d7-c6",
+    "c5-c4",
+    "e8-d7",
+    "d4-e4",
+    "f5-e5",
+    "d3-d4",
+    "c6-b5",
+    "d4-e5",
+    "e7-d6",
+    "e3-f4",
+    "g5-h6",
+]  # a legal prefix of a generated game (turn-19 sample)
+SELFPLAY_MOVES_B = [
+    "e2-e1",
+    "h5-i4",
+    "c4-b3",
+    "h6-h5",
+    "b5-a4",
+    "i4-i3",
+    "b4-a3",
+    "f8-e9",
+    "b3-c4",
+    "e9-d8",
+    "c5-b4",
+    "g7-h8",
+    "e1-f2",
+    "h5-i4",
+    "d2-e2",
+    "i4-h5",
+    "e3-f3",
+    "g5-h4",
+    "f3-g2",
+    "i3-i4",
+    "d3-e4",
+    "g6-g5",
+    "a3-b3",
+    "g5-f4",
+    "d4-e3",
+    "f4-f5",
+    "e2-f3",
+    "f5-g4",
+    "f3-e2",
+    "g4-g5",
+    "c3-d4",
+    "f7-e6",
+    "e2-f3",
+    "g5-g4",
+    "f3-e2",
+    "g4-g5",
+]  # a second game's prefix
+
+
+def selfplay_record(game_id: int, censored: bool, moves: list[str]) -> dict:
+    """A game record in the generator's schema: searched roots from ply 8 with
+    scores from the mover's view (+300 for player 0, -120 for player 1), one
+    unlabelled root at ply 20, one engine proof at ply 30."""
+    from nnue.games import replay
+
+    roots_replay, _ = replay(moves)
+    roots = []
+    for _board, since, ply, _ in roots_replay[8:]:
+        mover = ply % 2
+        kind, score = "search", (300 if mover == 0 else -120)
+        if ply == 20:
+            kind, score = "unlabelled", None
+        if ply == 30:
+            kind, score = "engine_proof", 29999
+        roots.append(
+            {
+                "ply": ply,
+                "mover": mover,
+                "since_capture": since,
+                "capture_clock": 200,
+                "board_fingerprint": 0,
+                "searched_best": 0,
+                "played_action": 0,
+                "root_score": score,
+                "score_kind": kind,
+                "completed_depth": 6 if score is not None else 0,
+                "nodes": 250000,
+                "elapsed_ns": 1,
+            }
+        )
+    return {
+        "first": "nnue:a",
+        "second": "nnue:a",
+        "winner": None if censored else 0,
+        "schema": 1,
+        "seed": 1,
+        "end": "MaxPlies" if censored else "Goal",
+        "plies": len(moves),
+        "moves": moves,
+        "capture_clock": 200,
+        "random_plies": list(range(8)) + [22, 31],
+        "random_plan": [22, 31],
+        "random_skipped": [],
+        "game_id": game_id,
+        "roots": roots,
+        "opening_plies": 8,
+        "censored": censored,
+        "outcome": None if censored else 1,
+        "outcome_after_ply": 32,
+    }
+
+
+def write_selfplay_records(directory, records: list[dict]) -> None:
+    import gzip
+
+    directory.mkdir(parents=True)
+    with gzip.open(directory / "shard-000000.jsonl.gz", "wt", encoding="utf-8") as sink:
+        for record in records:
+            sink.write(json.dumps(record) + "\n")
+    manifest = {
+        "schema": 1,
+        "model_sha256": "m",
+        "binary_sha256": "b",
+        "rules_sha256": "r",
+        "capture_clock": 200,
+        "repetition_draw": False,
+        "score_scale": 600,
+        "settings": {"nodes": 250000, "threads": 16},
+        "shards": [{"file": "shard-000000.jsonl.gz", "first_game": 0}],
+    }
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_selfplay_roots_become_labelled_rows_from_the_movers_view(tmp_path, monkeypatch):
+    from nnue import data
+    from nnue.games import replay
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    write_selfplay_records(
+        tmp_path / "gen", [selfplay_record(0, False, SELFPLAY_MOVES), selfplay_record(1, True, SELFPLAY_MOVES_B)]
+    )
+    target = import_selfplay([tmp_path / "gen"], "sp", 16, 3)
+    rows = {name: np.load(target / f"{name}.npy") for name in data.FIELDS}
+    n = len(rows["board"])
+    # Plies 16..35 of two games, minus the unlabelled ply 20 of each: 38 rows, all distinct positions.
+    assert n == 38 and rows["ply"].min() == 16 and rows["ply"].max() == 35 and 20 not in set(rows["ply"].tolist())
+    by_game = {}
+    for game, moves in ((0, SELFPLAY_MOVES), (1, SELFPLAY_MOVES_B)):
+        boards, _ = replay(moves)
+        by_game[game] = {ply: board for board, _, ply, _ in boards}
+    for board, ply, game in zip(rows["board"], rows["ply"], rows["game"], strict=True):
+        assert np.array_equal(board, by_game[int(game)][int(ply)])
+    even, odd = rows["ply"] % 2 == 0, rows["ply"] % 2 == 1
+    proof = rows["kind"] == data.KIND_PROOF
+    assert np.allclose(rows["target"][even & ~proof], np.tanh(300 / 600))
+    assert np.allclose(rows["target"][odd], np.tanh(-120 / 600))
+    assert proof.sum() == 2 and np.all(rows["ply"][proof] == 30) and np.all(rows["target"][proof] > 0.999)
+    assert np.all(rows["kind"][~proof] == data.KIND_TEACHER) and np.all(rows["source"] == data.SOURCE_SELFPLAY)
+    real = rows["game"] == 0
+    assert np.all(rows["outcome"][real & even] == 1) and np.all(rows["outcome"][real & odd] == -1)
+    assert np.array_equal(rows["outcome_ok"][real], rows["ply"][real] >= 32)
+    assert not rows["outcome_ok"][~real].any() and np.all(rows["outcome"][~real] == 0)
+    assert set(rows["game"].tolist()) == {0, 1} and rows["capture_clock"].tolist() == [200] * n
+    provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["counts"] == {
+        "games": 2,
+        "censored": 1,
+        "roots": 56,
+        "labelled": 54,
+        "eligible": 38,
+        "mismatched": 0,
+        "unique": 38,
+    }

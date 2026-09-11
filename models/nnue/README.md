@@ -78,6 +78,7 @@ The two halves share only the feature definition and the file format:
 python -m nnue.importer conv --run runs/<run> --out <set> [--iterations A-B] [--children 8]
 python -m nnue.importer prototype --root runs/nnue_data/prototype
 python -m nnue.importer human --file runs/nnue_data/human/games_export.txt --out human_games
+python -m nnue.importer selfplay --records runs/nnue_selfplay/<generation> [--records ...] --out <set> [--min-ply 16]
 python -m nnue.data encode <set> [<set> ...]
 python -m nnue.train --run <name> --data <set>:<share> [--data <set>:<share> ...] [--init <file.nnue>] [--<field> value ...]
 python -m nnue.train --run <name> --data ... --resume runs/<name>/latest.pt
@@ -158,6 +159,29 @@ zero rows, and the Rust search's outputs on it are identical (checked with
 `bot nnue diagnose`). The query must be in the installed `engine` extension
 (`cargo xtask wheel`; a running process that holds the old `engine.pyd` blocks
 the overwrite, so rename the old file and copy the new one in).
+
+## Self-play (the volume loop)
+
+`bot selfplay --player nnue:<frozen.nnue>?hash=64 --nodes 250000 --games G
+--threads 16 --seed S --opening-plies 8 --random-moves 2 --random-from 8
+--random-to 40 --records <dir>` plays the frozen network against itself,
+sixteen one-thread games in flight, and the search that plays each move is
+the label: every searched root is written with the last completed
+iteration's score and best action, the played action, depth, nodes and
+time, into gzip JSONL shards under a manifest (model, binary and rule
+hashes, effective settings; `--resume` continues a generation exactly,
+`--verify` replays it through the engine). Games end under the site rules
+only (capture clock 200, no repetition draw, no score adjudication); a ply
+cap is a censored game. `nnue.importer selfplay` turns the published shards
+into a dataset: `target = tanh(root_score / 600)` from the mover's view
+(kind TEACHER; engine proofs as PROOF), the outcome from the mover's view
+with `outcome_ok` only for real results at or after the last random
+deviation, rows from ply 16, duplicates by board and clock state dropped,
+splits by game and orbit. Measured on eight cores (logical CPUs 16-31 of
+the 7950X, below normal): about 400 games and 100k eligible roots per hour
+at 250k nodes (median completed depth 7), 210k at 100k nodes, 18k at 1M.
+The plan, the record contract and the depth A/B are in
+runs/nnue_plan/selfplay_plan_final.md and astra_status19.md.
 
 ## Retraining on a stronger teacher
 

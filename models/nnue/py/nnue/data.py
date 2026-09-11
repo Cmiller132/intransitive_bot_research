@@ -36,9 +36,10 @@ FIELDS: dict[str, np.dtype] = {
 KIND_RETURN, KIND_CHILD, KIND_PROOF, KIND_TEACHER, KIND_RAW, KIND_AVERAGED = range(6)
 TRAIN, VALIDATION, TEST = range(3)
 # Producers: conv windows, the prototype's replay and searched arrays, the
-# student's own games (nnue.collect) and the site's human games; labels keep
-# the producer.
+# student's own games (nnue.collect), the site's human games and the
+# self-play generator's searched roots; labels keep the producer.
 SOURCE_CONV, SOURCE_PROTOTYPE_REPLAY, SOURCE_PROTOTYPE_SEARCHED, SOURCE_STUDENT, SOURCE_HUMAN = 1, 2, 3, 4, 5
+SOURCE_SELFPLAY = 6  # searched roots of `bot selfplay` games (nnue.importer selfplay)
 
 
 IDS_FILE = "ids.npy"  # optional cache: the feature ids of every row, (N, 2, SLOTS) int16

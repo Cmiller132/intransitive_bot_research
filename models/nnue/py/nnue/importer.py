@@ -23,6 +23,7 @@ the broad coverage of human play that a teacher can relabel later.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -399,6 +400,135 @@ def import_human(file: Path, out: str, seed: int) -> Path:
     return target
 
 
+SELFPLAY_KINDS = {"search": data.KIND_TEACHER, "engine_proof": data.KIND_PROOF}
+
+
+def import_selfplay(records: list[Path], out: str, min_ply: int, seed: int) -> Path:
+    """The searched roots of `bot selfplay` games (the published shards listed
+    in each directory's manifest) as labelled rows: target = tanh(root_score /
+    score_scale) from the mover's view, the score of the last completed
+    iteration (kind TEACHER) or an engine proof (kind PROOF); the outcome from
+    the mover's view where the game's result is real (not censored) and the
+    root lies after the last random deviation; rows from ply >= min_ply;
+    duplicate (board, clock state) rows dropped, the first kept. Game ids are
+    unique across directories (directory index in the high byte)."""
+    boards: list[np.ndarray] = []
+    since_all: list[int] = []
+    plies: list[int] = []
+    games: list[int] = []
+    outcomes: list[int] = []
+    outcome_ok: list[bool] = []
+    targets: list[float] = []
+    kinds: list[int] = []
+    clocks: list[int] = []
+    counts = {"games": 0, "censored": 0, "roots": 0, "labelled": 0, "eligible": 0, "mismatched": 0}
+    ends: dict[str, int] = {}
+    manifests = []
+    for index, directory in enumerate(records):
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        scale = float(manifest.get("score_scale", 600))
+        manifests.append(
+            {
+                "directory": str(directory),
+                "settings": manifest.get("settings"),
+                "model_sha256": manifest.get("model_sha256"),
+                "binary_sha256": manifest.get("binary_sha256"),
+                "rules_sha256": manifest.get("rules_sha256"),
+                "score_scale": scale,
+                "shards": len(manifest.get("shards", [])),
+            }
+        )
+        for shard in manifest.get("shards", []):
+            with gzip.open(directory / shard["file"], "rt", encoding="utf-8") as lines:
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if "moves" not in record or "roots" not in record:
+                        continue
+                    counts["games"] += 1
+                    end = record.get("end") or "none"
+                    ends[end] = ends.get(end, 0) + 1
+                    censored = bool(record.get("censored")) or record.get("outcome") is None
+                    counts["censored"] += censored
+                    clock = int(record.get("capture_clock", SITE_CLOCK))
+                    roots, _ = replay(record["moves"], clock)
+                    game = (index << 24) | int(record["game_id"])
+                    after = int(record.get("outcome_after_ply", 0))
+                    for root in record["roots"]:
+                        counts["roots"] += 1
+                        kind = SELFPLAY_KINDS.get(root.get("score_kind"))
+                        if kind is None or root.get("root_score") is None:
+                            continue
+                        counts["labelled"] += 1
+                        ply = int(root["ply"])
+                        if ply < min_ply:
+                            continue
+                        if ply >= len(roots) or roots[ply][1] != int(root["since_capture"]) or roots[ply][2] != ply:
+                            counts["mismatched"] += 1
+                            continue
+                        counts["eligible"] += 1
+                        board, since, _, _ = roots[ply]
+                        mover = int(root["mover"])
+                        boards.append(board)
+                        since_all.append(since)
+                        plies.append(ply)
+                        games.append(game)
+                        clocks.append(clock)
+                        targets.append(float(np.tanh(float(root["root_score"]) / scale)))
+                        kinds.append(kind)
+                        if censored:
+                            outcomes.append(0)
+                            outcome_ok.append(False)
+                        else:
+                            result = int(record["outcome"])
+                            outcomes.append(result if mover == 0 else -result)
+                            outcome_ok.append(ply >= after)
+    if not boards:
+        raise SystemExit("no labelled roots at or after the minimum ply")
+    rows = {
+        "board": np.stack(boards).astype(np.uint8),
+        "since_capture": np.array(since_all, dtype=np.uint16),
+        "ply": np.array(plies, dtype=np.uint16),
+        "capture_clock": np.array(clocks, dtype=np.uint16),
+        "target": np.clip(np.array(targets, dtype=np.float32), -1, 1),
+        "kind": np.array(kinds, dtype=np.uint8),
+        "game": np.array(games, dtype=np.uint32),
+        "outcome": np.array(outcomes, dtype=np.int8),
+        "outcome_ok": np.array(outcome_ok, dtype=np.bool_),
+    }
+    _, first = np.unique(context_hash(rows["board"], rows["since_capture"], rows["capture_clock"]), return_index=True)
+    first.sort()
+    rows = {k: v[first] for k, v in rows.items()}
+    n = len(first)
+    rows.update(
+        weight=np.ones(n, dtype=np.float32),
+        source=np.full(n, data.SOURCE_SELFPLAY, dtype=np.uint8),
+        orbit=orbit_hash(rows["board"]),
+    )
+    rows["split"] = assign_splits(rows["game"], rows["orbit"], seed)
+    counts["unique"] = n
+    target = data_dir(out)
+    data.write(
+        target,
+        rows,
+        {
+            "producer": "selfplay",
+            "sources": {data.SOURCE_SELFPLAY: "searched roots of bot selfplay games"},
+            "records": manifests,
+            "label": "tanh(root_score / score_scale) of the last completed iteration, mover's view; proofs as PROOF",
+            "outcome": "mover's view; outcome_ok only for real results at or after the last random deviation",
+            "min_ply": min_ply,
+            "rules": {"capture_clock": int(rows["capture_clock"][0]), "repetition_draw": False},
+            "counts": counts,
+            "ends": ends,
+            "seed": seed,
+        },
+    )
+    print(json.dumps({"event": "written", "dataset": str(target), "rows": n, "counts": counts, "ends": ends}))
+    return target
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -415,12 +545,19 @@ def main(argv: list[str] | None = None) -> None:
     human.add_argument("--file", type=Path, required=True)
     human.add_argument("--out", required=True, help="dataset name under runs/nnue_data")
     human.add_argument("--seed", type=int, default=20260909)
+    selfplay = sub.add_parser("selfplay", help="import the searched roots of bot selfplay records")
+    selfplay.add_argument("--records", type=Path, action="append", required=True, help="records directory; repeatable")
+    selfplay.add_argument("--out", required=True, help="dataset name under runs/nnue_data")
+    selfplay.add_argument("--min-ply", type=int, default=16, help="first ply whose roots become training rows")
+    selfplay.add_argument("--seed", type=int, default=20260909)
     args = parser.parse_args(argv)
     if args.command == "conv":
         span = tuple(int(x) for x in args.iterations.split("-")) if args.iterations else None
         import_conv(args.run, args.out, span, args.children, args.seed)
     elif args.command == "human":
         import_human(args.file, args.out, args.seed)
+    elif args.command == "selfplay":
+        import_selfplay(args.records, args.out, args.min_ply, args.seed)
     else:
         import_prototype(args.root, args.out_prefix)
 
