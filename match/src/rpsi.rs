@@ -224,6 +224,11 @@ pub struct Session<P: Player> {
     /// gives no time (`go sims N` or a bare `go`): the arena's seats play
     /// under a clock this way. An explicit host movetime or clock still wins.
     pub movetime: Option<i64>,
+    /// Simulation count in place of the host's when the host gives no time
+    /// (`go sims N` or a bare `go`): a fixed node budget for an arena seat
+    /// (an NNUE player searches 2,500 nodes per simulation). An explicit host
+    /// movetime or clock still wins; `movetime` takes precedence over this.
+    pub fixed_sims: Option<u32>,
     state: Option<State>,
     frame: Option<Frame>,
     history: History,
@@ -249,6 +254,7 @@ impl<P: Player> Session<P> {
             max_move_ms: max_move_ms.max(1),
             sims: sims.max(1),
             movetime: None,
+            fixed_sims: None,
             state: None,
             frame: None,
             history: History::new(),
@@ -442,9 +448,10 @@ impl<P: Player> Session<P> {
             (None, Some(ms)) => Clock::Time(Duration::from_millis(
                 move_budget_ms(ms, inc_ms, self.move_ms, self.max_move_ms).max(1) as u64,
             )),
-            (None, None) => match self.movetime {
-                Some(ms) => Clock::Time(Duration::from_millis(ms.max(1) as u64)),
-                None => Clock::Sims(
+            (None, None) => match (self.movetime, self.fixed_sims) {
+                (Some(ms), _) => Clock::Time(Duration::from_millis(ms.max(1) as u64)),
+                (None, Some(sims)) => Clock::Sims(sims.max(1)),
+                (None, None) => Clock::Sims(
                     params
                         .get("sims")
                         .map_or(self.sims, |&n| n.clamp(1, u32::MAX as i64) as u32),
@@ -679,6 +686,57 @@ mod tests {
         assert!(matches!(seen[3], (Clock::Time(d), false) if d.as_millis() == 50));
         assert!(matches!(seen[4], (Clock::Time(_), false)));
         assert!(matches!(seen[5], (Clock::Sims(1), false)));
+    }
+
+    #[test]
+    fn a_seat_fixed_simulation_count_replaces_the_hosts_but_not_a_host_time() {
+        use std::sync::{Arc, Mutex};
+        struct Budgets(Arc<Mutex<Vec<(Clock, bool)>>>);
+        impl Player for Budgets {
+            fn new_game(&mut self) {}
+            fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+                self.0.lock().unwrap().push((clock, false));
+                state.legal_actions()[0]
+            }
+            fn choose_self_timed(&mut self, state: &State, _: &History, time: Duration) -> Action {
+                self.0.lock().unwrap().push((Clock::Time(time), true));
+                state.legal_actions()[0]
+            }
+            fn name(&self) -> &str {
+                "budgets"
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut s = Session::new(
+            Budgets(Arc::clone(&seen)),
+            Rules::SITE,
+            "budgets",
+            250,
+            250,
+            32,
+        );
+        let mut out = Vec::new();
+        s.handle(
+            &format!("position fen {SITE_START_FEN} b {TERRITORY}"),
+            &mut out,
+        )
+        .unwrap();
+        s.fixed_sims = Some(80);
+        s.handle("go sims 32", &mut out).unwrap();
+        s.handle("go", &mut out).unwrap();
+        s.handle("go movetime 50", &mut out).unwrap();
+        s.handle("go btime 10000 rtime 10000", &mut out).unwrap();
+        s.handle("go btime 10 rtime 10", &mut out).unwrap();
+        s.movetime = Some(100);
+        s.handle("go sims 32", &mut out).unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(matches!(seen[0], (Clock::Sims(80), false)));
+        assert!(matches!(seen[1], (Clock::Sims(80), false)));
+        assert!(matches!(seen[2], (Clock::Time(d), false) if d.as_millis() == 50));
+        assert!(matches!(seen[3], (Clock::Time(_), false)));
+        assert!(matches!(seen[4], (Clock::Sims(1), false)));
+        assert!(matches!(seen[5], (Clock::Time(d), true) if d.as_millis() == 100));
+        assert_eq!(seen.len(), 6);
     }
 
     #[test]

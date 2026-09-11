@@ -118,6 +118,11 @@ enum Command {
         /// host gives no time (`go sims N`): a clock budget for an arena seat.
         #[arg(long)]
         movetime: Option<i64>,
+        /// Simulation count in place of the host's when the host gives no
+        /// time (`go sims N`): a fixed node budget for an arena seat (an NNUE
+        /// player searches 2,500 nodes per simulation, so 80 = 200k nodes).
+        #[arg(long, conflicts_with = "movetime")]
+        fixed_sims: Option<u32>,
         #[arg(long, default_value_t = 4)]
         threads: usize,
         #[arg(long, default_value = "intransitive_bot")]
@@ -350,12 +355,14 @@ fn main() -> Result<()> {
             max_move_ms,
             sims,
             movetime,
+            fixed_sims,
             threads,
             name,
         } => {
             let player = player_from_spec(&player, threads)?;
             let mut session = Session::new(player, Rules::SITE, &name, move_ms, max_move_ms, sims);
             session.movetime = movetime;
+            session.fixed_sims = fixed_sims;
             let stdin = io::stdin();
             let mut input = BufReader::new(stdin.lock());
             let stdout = io::stdout();
