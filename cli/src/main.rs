@@ -124,6 +124,10 @@ enum Command {
         /// player searches 2,500 nodes per simulation, so 80 = 200k nodes).
         #[arg(long, conflicts_with = "movetime")]
         fixed_sims: Option<u32>,
+        /// Play exactly --sims simulations on every move whatever time the
+        /// host gives (a fixed-strength site bot).
+        #[arg(long, default_value_t = false)]
+        lock_sims: bool,
         #[arg(long, default_value_t = 4)]
         threads: usize,
         #[arg(long, default_value = "intransitive_bot")]
@@ -343,6 +347,7 @@ fn main() -> Result<()> {
             sims,
             movetime,
             fixed_sims,
+            lock_sims,
             threads,
             name,
         } => {
@@ -350,6 +355,7 @@ fn main() -> Result<()> {
             let mut session = Session::new(player, Rules::SITE, &name, move_ms, max_move_ms, sims);
             session.movetime = movetime;
             session.fixed_sims = fixed_sims;
+            session.lock_sims = lock_sims;
             let stdin = io::stdin();
             let mut input = BufReader::new(stdin.lock());
             let stdout = io::stdout();

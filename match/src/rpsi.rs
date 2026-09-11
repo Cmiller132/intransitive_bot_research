@@ -229,6 +229,11 @@ pub struct Session<P: Player> {
     /// (an NNUE player searches 2,500 nodes per simulation). An explicit host
     /// movetime or clock still wins; `movetime` takes precedence over this.
     pub fixed_sims: Option<u32>,
+    /// Play exactly `sims` simulations on every move whatever time the host
+    /// gives (a fixed-strength site bot), over every clock, movetime and
+    /// seat budget; only the panic guard for a clock under `PANIC_CLOCK_MS`
+    /// still cuts a move to one simulation.
+    pub lock_sims: bool,
     state: Option<State>,
     frame: Option<Frame>,
     history: History,
@@ -255,6 +260,7 @@ impl<P: Player> Session<P> {
             sims: sims.max(1),
             movetime: None,
             fixed_sims: None,
+            lock_sims: false,
             state: None,
             frame: None,
             history: History::new(),
@@ -443,6 +449,8 @@ impl<P: Player> Session<P> {
         let inc_ms = params.get(&format!("{side}inc")).copied().unwrap_or(0);
         let movetime = params.get("movetime").copied();
         let clock = match (movetime, clock_ms) {
+            (_, Some(ms)) if self.lock_sims && ms < PANIC_CLOCK_MS => Clock::Sims(1),
+            _ if self.lock_sims => Clock::Sims(self.sims),
             (Some(ms), _) => Clock::Time(Duration::from_millis(ms.max(1) as u64)),
             (_, Some(ms)) if ms < PANIC_CLOCK_MS => Clock::Sims(1),
             (None, Some(ms)) => Clock::Time(Duration::from_millis(
@@ -459,7 +467,11 @@ impl<P: Player> Session<P> {
             },
         };
         let started = Instant::now();
-        let action = if let (None, None, Some(ms)) = (movetime, clock_ms, self.movetime) {
+        let seat_ms = match (self.lock_sims, movetime, clock_ms, self.movetime) {
+            (false, None, None, Some(ms)) => Some(ms),
+            _ => None,
+        };
+        let action = if let Some(ms) = seat_ms {
             self.player.choose_self_timed(
                 &state,
                 &self.history,
@@ -737,6 +749,58 @@ mod tests {
         assert!(matches!(seen[4], (Clock::Sims(1), false)));
         assert!(matches!(seen[5], (Clock::Time(d), true) if d.as_millis() == 100));
         assert_eq!(seen.len(), 6);
+    }
+
+    #[test]
+    fn locked_simulations_ignore_every_host_and_seat_time() {
+        use std::sync::{Arc, Mutex};
+        struct Budgets(Arc<Mutex<Vec<(Clock, bool)>>>);
+        impl Player for Budgets {
+            fn new_game(&mut self) {}
+            fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
+                self.0.lock().unwrap().push((clock, false));
+                state.legal_actions()[0]
+            }
+            fn choose_self_timed(&mut self, state: &State, _: &History, time: Duration) -> Action {
+                self.0.lock().unwrap().push((Clock::Time(time), true));
+                state.legal_actions()[0]
+            }
+            fn name(&self) -> &str {
+                "budgets"
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut s = Session::new(
+            Budgets(Arc::clone(&seen)),
+            Rules::SITE,
+            "budgets",
+            250,
+            250,
+            128,
+        );
+        s.lock_sims = true;
+        let mut out = Vec::new();
+        s.handle(
+            &format!("position fen {SITE_START_FEN} b {TERRITORY}"),
+            &mut out,
+        )
+        .unwrap();
+        s.handle("go", &mut out).unwrap();
+        s.handle("go sims 32", &mut out).unwrap();
+        s.handle("go movetime 50", &mut out).unwrap();
+        s.handle("go btime 60000 rtime 60000 binc 1000 rinc 1000", &mut out)
+            .unwrap();
+        s.movetime = Some(100);
+        s.handle("go", &mut out).unwrap();
+        s.fixed_sims = Some(7);
+        s.handle("go", &mut out).unwrap();
+        s.handle("go btime 10 rtime 10", &mut out).unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7);
+        for entry in &seen[..6] {
+            assert!(matches!(entry, (Clock::Sims(128), false)), "{entry:?}");
+        }
+        assert!(matches!(seen[6], (Clock::Sims(1), false)));
     }
 
     #[test]
