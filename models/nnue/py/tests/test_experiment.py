@@ -6,6 +6,7 @@ timings, the audit and the verdict."""
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -747,3 +748,43 @@ def test_lock_refuses_a_second_owner_and_a_wrong_release(workspace):
         experiment.lock_release("one", pid=1)
     assert experiment.lock_release("one")["phase"] == "phase"
     assert experiment.lock_read() is None
+
+
+def test_the_real_c1_fixture_parses_and_reconciles(tmp_path):
+    """The journal and report that match::eval::eval wrote with scripted players (Astra, b5b6a47): the
+    header, the pair records, the flattened sequential state and the audit's reconciliation."""
+    fixtures = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    shutil.copy(fixtures / "c1_journal.jsonl", directory / "c1.jsonl")
+    report = json.loads((fixtures / "c1_report.json").read_text(encoding="utf-8"))
+    header, pairs = experiment.journal_pairs(directory / "c1.jsonl")
+    assert len(pairs) == 128 and header["protocol_digest"] == report["sequential"]["protocol_digest"]
+    assert header["protocol"]["test"]["batch"] == 16 and header["protocol"]["settings"]["workers"] == 1
+    match = {
+        "tag": "c1",
+        "candidate": "candidate.exe",
+        "reference": "reference.exe",
+        "move_ms": 50,
+        "sprt": True,
+        "seed": 2026091225,
+        "opening_plies": 2,
+        "concurrent": 1,
+        "player_threads": 1,
+    }
+    assert experiment.audit(match, report, directory) == {
+        "games": 256,
+        "consistent": True,
+        "problems": [],
+        "ends": {"CaptureClock": 243, "Goal": 13},
+        "first_mover_score": pytest.approx(0.474609375),
+        "distinct_openings": 125,
+        "mean_plies": pytest.approx(195.9765625),
+    }
+    assert experiment.finished(match, report) and experiment.pair_points(pairs[0]) == 2
+    summary = experiment.summarise(match, report, directory)  # both seats carry the engine's id name
+    assert summary["valid"] and summary["stop_reason"] == "accept" and summary["counts"] == [0, 0, 115, 13, 0]
+    assert summary["games"] == 256 and summary["error"] is None and summary["protocol"]["schema"] == 1
+    assert experiment.audit(match | {"seed": 1}, report, directory)["problems"] == [
+        "protocol seed is 2026091225, the match says 1"
+    ]
