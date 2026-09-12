@@ -14,8 +14,6 @@ from nnue.export import HEADER, MAGIC, file_size, integer_eval
 from nnue.features import CONTEXTS, FORMAT6, FORMAT8, PIECE_ROWS, context, feature_ids
 from nnue.model import DENSE, QA, QB
 
-from .test_features import random_boards
-
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 HIDDEN = 32
 COUNT = 512
@@ -47,8 +45,25 @@ def h32_bytes(version: int) -> bytes:
 
 
 def positions() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    boards = random_boards(20260912, COUNT, 2, 21)
-    rng = np.random.default_rng(20260913)
+    """512 positions with legal material (each side keeps at most its 3 rocks,
+    4 papers and 3 scissors, at least one piece, nobody on a goal square)."""
+    rng = np.random.default_rng(20260912)
+    boards = np.zeros((COUNT, 81), dtype=np.uint8)
+    for board in boards:
+        while True:
+            counts = [
+                rng.integers(0, 4),
+                rng.integers(0, 5),
+                rng.integers(0, 4),
+                rng.integers(0, 4),
+                rng.integers(0, 5),
+                rng.integers(0, 4),
+            ]
+            if sum(counts[:3]) and sum(counts[3:]):
+                break
+        codes = np.repeat(np.arange(1, 7), counts)
+        squares = rng.choice(np.arange(1, 80), len(codes), replace=False)  # squares 0 and 80 are the goals
+        board[squares] = codes
     clock = rng.integers(50, 201, COUNT)
     since = (rng.random(COUNT) * clock).astype(np.int64)
     return boards, since, clock
@@ -81,7 +96,8 @@ def test_fixture_networks_and_positions_match_the_python_side():
     lines = [json.loads(line) for line in (FIXTURES / "format8_positions.jsonl").read_text("utf-8").splitlines()]
     assert lines == records(eight, six)
     seen = {c for line in lines for c in line["context"]}
-    assert len(seen) == CONTEXTS and any(line["raw"] != line["raw6"] for line in lines)
+    # Context 0 (an opponent without pieces) is a finished game and never occurs in a legal position.
+    assert seen == set(range(1, CONTEXTS)) and any(line["raw"] != line["raw6"] for line in lines)
     for line in lines:
         for perspective in (0, 1):
             active = [i for i in line["ids"][perspective] if i != FORMAT8.pad]
