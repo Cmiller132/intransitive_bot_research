@@ -98,8 +98,14 @@ fn oracle(model: &Model, avx2: &Model, acc: &Accumulator, frame: &Frame) {
 fn shared_trajectories_replay_lazy_chains_and_every_legal_count_transition() {
     let frames = frames();
     assert_eq!(frames.len(), 2996);
-    for bytes in [V6, V8] {
-        let model = Model::from_bytes(bytes).unwrap();
+    for (bytes, scalar) in [V6, V8]
+        .into_iter()
+        .flat_map(|bytes| [(bytes, false), (bytes, true)])
+    {
+        let mut model = Model::from_bytes(bytes).unwrap();
+        if scalar {
+            model = model.scalar_clone();
+        }
         let mut avx2 = model.clone();
         avx2.disable_vnni();
         let mut transitions = [[[0u32; 5]; 3]; 2];

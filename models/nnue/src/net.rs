@@ -220,6 +220,14 @@ impl Model {
         self.vnni = false;
     }
 
+    #[cfg(test)]
+    pub(crate) fn scalar_clone(&self) -> Self {
+        let mut scalar = self.clone();
+        scalar.avx2 = false;
+        scalar.vnni = false;
+        scalar
+    }
+
     #[inline]
     fn feature(&self, piece: u8, square: usize, context: usize) -> &[i16] {
         let row = context * FEATURES + (piece as usize - 1) * N_SQ + square;
@@ -895,8 +903,27 @@ unsafe fn sum_avx2(acc: &[i32], weights: &[i16], qa: i32) -> i64 {
 }
 
 #[cfg(test)]
-mod width_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_accumulation_matches_both_shared_position_oracles() {
+        for bytes in [
+            include_bytes!("../tests/fixtures/format6_h32.nnue").as_slice(),
+            include_bytes!("../tests/fixtures/format8_h32.nnue").as_slice(),
+        ] {
+            let model = Model::from_bytes(bytes).unwrap().scalar_clone();
+            assert_eq!(model.backend(), "scalar");
+            crate::diagnostic::run(
+                &model,
+                include_bytes!("../tests/fixtures/format8_positions.jsonl").as_slice(),
+                std::io::sink(),
+                None,
+                1,
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn dense_dots_do_not_overflow_i32_at_large_widths() {

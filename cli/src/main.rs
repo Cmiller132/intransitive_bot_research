@@ -29,7 +29,7 @@ struct Cli {
 enum Command {
     /// Generate resumable, CPU-only NNUE self-play datasets, or audit their replay.
     Selfplay(selfplay::Args),
-    /// NNUE migration conversion, parity validation and fixed-node diagnostics.
+    /// NNUE file validation and fixed-node diagnostics.
     Nnue {
         #[command(subcommand)]
         command: NnueCommand,
