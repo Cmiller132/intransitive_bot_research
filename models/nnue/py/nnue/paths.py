@@ -4,8 +4,17 @@ working directory is."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def workspace_root() -> Path:

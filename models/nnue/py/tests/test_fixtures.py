@@ -1,8 +1,9 @@
 """The format 8 fixtures shared with the Rust crate (`tests/fixtures/format8_*`
 and `format6_h32.nnue`): two deterministic H32 networks and 512 positions
-with their contexts, ids and integer raw values under both. The test rebuilds
-them in memory and compares, so the files can never drift from the Python
-side (runs/nnue_plan/format8_contract.md)."""
+(with a ply, so the file is direct input to the Rust diagnostic) with their
+contexts, ids and integer raw values under both. The test rebuilds them in
+memory and compares, so the files can never drift from the Python side
+(runs/nnue_plan/format8_contract.md)."""
 
 import json
 import struct
@@ -40,13 +41,14 @@ def h32_bytes(version: int) -> bytes:
     raw = HEADER.pack(MAGIC, version, f, h, QA, QB, 600.0, 1)
     raw += bias.tobytes() + weights.tobytes() + readout.tobytes() + struct.pack("<i", 0)
     raw += struct.pack("<I", DENSE) + dense.tobytes() + dense_bias.tobytes() + residual.tobytes()
-    assert len(raw) == file_size(h, 1, version)
+    assert len(raw) == file_size(h, version)
     return raw
 
 
-def positions() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def positions() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """512 positions with legal material (each side keeps at most its 3 rocks,
-    4 papers and 3 scissors, at least one piece, nobody on a goal square)."""
+    4 papers and 3 scissors, at least one piece, nobody on a goal square):
+    boards, since_capture, clock and a ply at least since_capture."""
     rng = np.random.default_rng(20260912)
     boards = np.zeros((COUNT, 81), dtype=np.uint8)
     for board in boards:
@@ -66,11 +68,12 @@ def positions() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         board[squares] = codes
     clock = rng.integers(50, 201, COUNT)
     since = (rng.random(COUNT) * clock).astype(np.int64)
-    return boards, since, clock
+    ply = since + rng.integers(0, 40, COUNT)
+    return boards, since, clock, ply
 
 
 def records(eight: Path, six: Path) -> list[dict]:
-    boards, since, clock = positions()
+    boards, since, clock, ply = positions()
     ids = feature_ids(boards, since, clock)
     contexts = context(boards)
     raw8 = integer_eval(eight, boards, since, clock)
@@ -79,6 +82,7 @@ def records(eight: Path, six: Path) -> list[dict]:
         {
             "board": boards[n].tolist(),
             "since_capture": int(since[n]),
+            "ply": int(ply[n]),
             "clock": int(clock[n]),
             "context": contexts[n].tolist(),
             "ids": ids[n].tolist(),

@@ -4,17 +4,18 @@ file to version 8 (DESIGN items 4 and 10; runs/nnue_plan/format8_contract.md).
 
 Layout, little endian: magic `RPSNNUE1`; u32 version (6 or 8); u32 features F
 (1,004 or 13,640); u32 hidden H; u32 QA 255; u32 QB 64; f32 eval scale 600;
-u32 buckets B; then bias H i16; feature weights F x H i16 feature-major;
-readouts B x 2H i16 bucket-major (mover then opponent); readout biases B i32;
-u32 dense width 32; dense weights 32 x 2H i8 row-major; dense biases 32 i32;
-residual outputs B x 32 i16 bucket-major.
+u32 buckets 1; then bias H i16; feature weights F x H i16 feature-major;
+readout 2H i16 (mover then opponent); readout bias i32; u32 dense width 32;
+dense weights 32 x 2H i8 row-major; dense biases 32 i32; residual outputs
+32 i16. Every integer is validated on read: magic, a known version with its
+feature count, H a multiple of 32 in 32..1024, the scales, one head, the
+dense width and the exact file size.
 
     python -m nnue.export convert <version 6 file> <version 8 file>
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import struct
 import sys
@@ -23,32 +24,25 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .features import BUCKETS, CONTEXTS, FORMAT6, FORMAT8, LAYOUTS, PIECE_ROWS, SLOTS, feature_ids, piece_bucket
+from .features import CONTEXTS, FORMAT6, FORMAT8, LAYOUTS, PIECE_ROWS, SLOTS, feature_ids
 from .model import DENSE, EVAL_SCALE, NNUE, QA, QB
+from .paths import sha256
 
 MAGIC = b"RPSNNUE1"
 HEADER = struct.Struct("<8sIIIIIfI")
 
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def file_size(hidden: int, buckets: int, version: int = 8) -> int:
+def file_size(hidden: int, version: int = 8) -> int:
     features = LAYOUTS[version].features
     return (
         HEADER.size
         + 2 * hidden
         + 2 * features * hidden
-        + buckets * (2 * 2 * hidden + 4)
+        + (4 * hidden + 4)
         + 4
         + DENSE * 2 * hidden
         + 4 * DENSE
-        + buckets * 2 * DENSE
+        + 2 * DENSE
     )
 
 
@@ -76,7 +70,7 @@ def export(model: NNUE, path: Path, metadata: dict | None = None) -> dict:
         return values.astype(dtype).tobytes()
 
     h, layout = model.hidden, model.layout
-    raw = HEADER.pack(MAGIC, layout.version, layout.features, h, QA, QB, EVAL_SCALE, model.buckets)
+    raw = HEADER.pack(MAGIC, layout.version, layout.features, h, QA, QB, EVAL_SCALE, 1)
     raw += quant(model.bias, QA, "<i2")
     raw += quant(model.rows(), QA, "<i2")
     raw += quant(model.output.weight, QB, "<i2")
@@ -85,12 +79,12 @@ def export(model: NNUE, path: Path, metadata: dict | None = None) -> dict:
     raw += quant(model.dense.weight, QB, "i1")
     raw += quant(model.dense.bias, QA * QB, "<i4")
     raw += quant(model.delta.weight, QB, "<i2")
-    assert len(raw) == file_size(h, model.buckets, layout.version)
+    assert len(raw) == file_size(h, layout.version)
     info = {
         "version": layout.version,
         "features": layout.features,
         "hidden": h,
-        "buckets": model.buckets,
+        "buckets": 1,
         "dense": DENSE,
         "qa": QA,
         "qb": QB,
@@ -102,15 +96,24 @@ def export(model: NNUE, path: Path, metadata: dict | None = None) -> dict:
 
 def read(path: Path) -> dict:
     """The file's integer arrays: bias (H), weights (F, H), dense (32, 2H),
-    dense_bias (32), output (B, 2H), output_bias (B), residual (B, 32), with
+    dense_bias (32), output (2H), output_bias (1), residual (32), with
     `version` (6 or 8) and `features` F."""
     data = Path(path).read_bytes()
+    if len(data) < HEADER.size:
+        raise ValueError("not an RPSNNUE1 file")
     magic, version, features, hidden, qa, qb, scale, buckets = HEADER.unpack_from(data, 0)
     layout = LAYOUTS.get(version)
-    if magic != MAGIC or layout is None or layout.features != features or (qa, qb) != (QA, QB):
+    if (
+        magic != MAGIC
+        or layout is None
+        or layout.features != features
+        or (qa, qb, scale) != (QA, QB, EVAL_SCALE)
+        or hidden % 32
+        or not 32 <= hidden <= 1024
+    ):
         raise ValueError("not an RPSNNUE1 version 6 or 8 file with the expected constants")
-    if buckets not in (1, BUCKETS) or len(data) != file_size(hidden, buckets, version):
-        raise ValueError("unexpected bucket count or file size")
+    if buckets != 1 or len(data) != file_size(hidden, version):
+        raise ValueError("one output head and the exact file size are required")
     at = HEADER.size
 
     def take(dtype, count, shape):
@@ -123,18 +126,17 @@ def read(path: Path) -> dict:
         "version": version,
         "features": features,
         "hidden": hidden,
-        "buckets": buckets,
         "eval_scale": scale,
         "bias": take("<i2", hidden, (hidden,)),
         "weights": take("<i2", features * hidden, (features, hidden)),
-        "output": take("<i2", buckets * 2 * hidden, (buckets, 2 * hidden)),
-        "output_bias": take("<i4", buckets, (buckets,)),
+        "output": take("<i2", 2 * hidden, (2 * hidden,)),
+        "output_bias": take("<i4", 1, (1,)),
     }
     if take("<u4", 1, (1,))[0] != DENSE:
         raise ValueError("unexpected dense width")
     out["dense"] = take("i1", DENSE * 2 * hidden, (DENSE, 2 * hidden))
     out["dense_bias"] = take("<i4", DENSE, (DENSE,))
-    out["residual"] = take("<i2", buckets * DENSE, (buckets, DENSE))
+    out["residual"] = take("<i2", DENSE, (DENSE,))
     return out
 
 
@@ -155,12 +157,10 @@ def integer_eval(
         ids = layout.rows(feature_ids(part, since[start : start + chunk], clock[start : start + chunk]))
         acc = weights[ids.reshape(-1, SLOTS)].sum(axis=1) + net["bias"]
         act = np.clip(acc, 0, QA).reshape(-1, 2 * hidden)
-        bucket = piece_bucket(part) if net["buckets"] > 1 else np.zeros(len(act), dtype=np.int64)
-        readout = net["output"][bucket]
-        raw = (act * act * readout).sum(axis=1) / (QA * QA * QB) + net["output_bias"][bucket] / QB
+        raw = (act * act * net["output"]).sum(axis=1) / (QA * QA * QB) + net["output_bias"][0] / QB
         dense_in = np.rint(act * act / QA).astype(np.int64)
         h = np.clip(np.rint((dense_in @ net["dense"].T + net["dense_bias"]) / QB), 0, QA).astype(np.int64)
-        out.append(raw + (h * net["residual"][bucket]).sum(axis=1) / (QA * QB))
+        out.append(raw + (h * net["residual"]).sum(axis=1) / (QA * QB))
     return np.concatenate(out) if out else np.zeros(0)
 
 
@@ -170,7 +170,7 @@ def load(path: Path) -> NNUE:
     contexts) and the residuals, so the served sum is the file's row."""
     net = read(path)
     layout = LAYOUTS[net["version"]]
-    model = NNUE(net["hidden"], net["buckets"], net["version"])
+    model = NNUE(net["hidden"], net["version"])
     rows = net["weights"] / QA
     piece = rows[: layout.attack_base]
     with torch.no_grad():
@@ -186,9 +186,9 @@ def load(path: Path) -> NNUE:
         model.bias.copy_(torch.from_numpy(net["bias"] / QA).float())
         model.dense.weight.copy_(torch.from_numpy(net["dense"] / QB).float())
         model.dense.bias.copy_(torch.from_numpy(net["dense_bias"] / (QA * QB)).float())
-        model.output.weight.copy_(torch.from_numpy(net["output"] / QB).float())
+        model.output.weight.copy_(torch.from_numpy(net["output"] / QB).float().reshape(1, -1))
         model.output.bias.copy_(torch.from_numpy(net["output_bias"] / QB).float())
-        model.delta.weight.copy_(torch.from_numpy(net["residual"] / QB).float())
+        model.delta.weight.copy_(torch.from_numpy(net["residual"] / QB).float().reshape(1, -1))
     return model
 
 
@@ -204,7 +204,7 @@ def convert(source: Path, target: Path, metadata: dict | None = None) -> dict:
         or features != FORMAT6.features
         or (qa, qb) != (QA, QB)
         or buckets != 1
-        or len(data) != file_size(hidden, buckets, FORMAT6.version)
+        or len(data) != file_size(hidden, FORMAT6.version)
     ):
         raise ValueError("not a one-head RPSNNUE1 version 6 file")
     at = HEADER.size + 2 * hidden
@@ -213,12 +213,12 @@ def convert(source: Path, target: Path, metadata: dict | None = None) -> dict:
     raw += data[HEADER.size : at]
     raw += np.tile(weights[:PIECE_ROWS], (CONTEXTS, 1)).tobytes() + weights[PIECE_ROWS:].tobytes()
     raw += data[at + 2 * features * hidden :]
-    assert len(raw) == file_size(hidden, buckets, FORMAT8.version)
+    assert len(raw) == file_size(hidden, FORMAT8.version)
     info = {
         "version": FORMAT8.version,
         "features": FORMAT8.features,
         "hidden": hidden,
-        "buckets": buckets,
+        "buckets": 1,
         "dense": DENSE,
         "qa": QA,
         "qb": QB,

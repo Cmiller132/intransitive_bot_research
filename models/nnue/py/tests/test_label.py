@@ -50,8 +50,14 @@ def test_proofs_mark_wins_at_once_and_forced_losses():
     assert values[2] == 0
 
 
+def fake_bot(tmp_path, monkeypatch) -> None:
+    (tmp_path / "bot.exe").write_bytes(b"fake bot")
+    monkeypatch.setenv("NNUE_BOT", str(tmp_path / "bot.exe"))
+
+
 def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    fake_bot(tmp_path, monkeypatch)
     rng = np.random.default_rng(2)
     n = 12
     boards = np.stack([np.frombuffer(engine.initial_board(), dtype=np.uint8)] * n)
@@ -79,12 +85,15 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["sims"] == 64 and provenance["errors"] == 2
     assert provenance["rows"] == n - 2 and provenance["input"]["rows"] == n
-    assert provenance["select"] is None
+    assert provenance["select"] is None and provenance["engine"]["network_sha256"] is None
+    assert provenance["engine"]["binary_sha256"] == paths.sha256(tmp_path / "bot.exe")
+    assert provenance["input"]["provenance_sha256"] == paths.sha256(paths.data_dir("raw") / "provenance.json")
     assert sum(count for _, _, count in seen) == n and all(s == 64 for _, s, _ in seen)
 
 
 def test_selection_takes_the_rows_the_shallow_labels_misjudge_most(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    fake_bot(tmp_path, monkeypatch)
     rng = np.random.default_rng(3)
     n = 40
     boards = np.stack([np.frombuffer(engine.initial_board(), dtype=np.uint8)] * n)
@@ -111,12 +120,20 @@ def test_selection_takes_the_rows_the_shallow_labels_misjudge_most(tmp_path, mon
     assert np.array_equal(np.load(target / "ply.npy"), source["ply"][chosen])
     duplicated = {name: np.concatenate([value, value[:1]]) for name, value in source.items()}
     data.write(paths.data_dir("dup"), duplicated, {"producer": "test"})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="duplicate"):
         label.disagreement(paths.data_dir("dup"), paths.data_dir("shallow"), 4)
+    foreign = {name: value.copy() for name, value in shallow.items()}
+    foreign["since_capture"][0] = 199  # a clock state the source never had
+    data.write(paths.data_dir("foreign"), foreign, {"producer": "test"})
+    with pytest.raises(ValueError, match="not in"):
+        label.disagreement(paths.data_dir("pool"), paths.data_dir("foreign"), 4)
+    with pytest.raises(ValueError, match="requested"):
+        label.disagreement(paths.data_dir("pool"), paths.data_dir("shallow"), 11)
 
 
 def test_quiet_best_drops_rows_whose_best_move_captures(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    fake_bot(tmp_path, monkeypatch)
     # Own rock at 40 (e5) beside an enemy scissors at 41 (f5): e5-f5 captures; e5-e6 does not.
     board = board_with({40: 1, 41: 6, 0: 4, 80: 1})
     boards = np.stack([board, board])

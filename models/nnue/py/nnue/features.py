@@ -26,6 +26,8 @@ the perspective exchange.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -78,10 +80,6 @@ FORMAT6 = Layout(6, 1)
 FORMAT8 = Layout(8, CONTEXTS)
 LAYOUTS = {6: FORMAT6, 8: FORMAT8}
 
-# Bucket boundaries of the output heads by total pieces (DESIGN item 7).
-BUCKET_BOUNDS = np.array([0, 5, 9, 13], dtype=np.int64)
-BUCKETS = len(BUCKET_BOUNDS)
-
 # Anti-diagonal reflection (the opponent's frame), the diagonal reflection
 # (a board symmetry) and the colour swap of cell codes.
 ANTI = np.array([(8 - s % 9) * 9 + 8 - s // 9 for s in range(81)])
@@ -101,12 +99,6 @@ NEIGHBOURS = np.array(
 def clock_bucket(plies: np.ndarray) -> np.ndarray:
     """Index of the clock bucket holding `plies` (clipped at zero)."""
     return np.searchsorted(CLOCK_BOUNDS, np.maximum(np.asarray(plies, dtype=np.int64), 0), side="right") - 1
-
-
-def piece_bucket(board: np.ndarray) -> np.ndarray:
-    """Output bucket of every board by its total piece count."""
-    pieces = np.count_nonzero(np.asarray(board).reshape(-1, 81), axis=1)
-    return np.searchsorted(BUCKET_BOUNDS, pieces, side="right") - 1
 
 
 def attacked(board: np.ndarray) -> np.ndarray:
@@ -215,3 +207,17 @@ def orbit_hash(board: np.ndarray, seed: int = 20260909) -> np.ndarray:
     z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
     z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
     return z ^ (z >> np.uint64(31))
+
+
+@functools.cache
+def signature() -> str:
+    """A hash of the encoder's ids on a fixed set of boards; an id cache
+    carries it, so a changed encoder invalidates every cache."""
+    rng = np.random.default_rng(20260912)
+    boards = np.zeros((64, 81), dtype=np.uint8)
+    for board in boards:
+        pieces = int(rng.integers(1, MAX_PIECES + 1))
+        board[rng.choice(81, pieces, replace=False)] = rng.integers(1, 7, pieces)
+    clock = rng.integers(1, 201, len(boards))
+    since = (rng.random(len(boards)) * clock).astype(np.int64)
+    return hashlib.sha256(feature_ids(boards, since, clock).tobytes()).hexdigest()[:16]

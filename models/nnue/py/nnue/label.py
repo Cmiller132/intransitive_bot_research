@@ -33,7 +33,7 @@ import numpy as np
 
 from . import data
 from .games import parse_action
-from .paths import bot_binary, data_dir, workspace_root
+from .paths import bot_binary, data_dir, sha256, workspace_root
 
 SITE_CLOCK = 200
 
@@ -118,24 +118,36 @@ def disagreement(source: Path, shallow: Path, count: int) -> tuple[np.ndarray, d
         )
 
     source_key, shallow_key = keys(source), keys(shallow)
-    if len(np.unique(source_key)) != len(source_key):
-        raise ValueError(f"{source} holds duplicate positions; selection needs one row per board and clock state")
+    for name, key in ((source, source_key), (shallow, shallow_key)):
+        if len(np.unique(key)) != len(key):
+            raise ValueError(f"{name} holds duplicate positions; selection needs one row per board and clock state")
     order = np.argsort(source_key, kind="stable")
-    position = np.searchsorted(source_key, shallow_key, sorter=order)
-    found = position < len(order)
-    index = order[position[found]]
-    found[found] = source_key[index] == shallow_key[found]
-    index = order[position[found]]
-    gap = np.abs(np.load(source / "target.npy")[index] - np.load(shallow / "target.npy")[found])
+    index = order[np.minimum(np.searchsorted(source_key, shallow_key, sorter=order), len(order) - 1)]
+    if not np.array_equal(source_key[index], shallow_key):
+        raise ValueError(f"{shallow} holds positions that are not in {source}; it must be a labelling of the source")
+    gap = np.abs(np.load(source / "target.npy")[index] - np.load(shallow / "target.npy"))
+    if not np.isfinite(gap).all():
+        raise ValueError("non-finite label gap")
+    if len(gap) < count:
+        raise ValueError(f"{len(gap)} eligible rows in {shallow}, {count} requested")
     top = np.argsort(-gap, kind="stable")[:count]
     stats = {
-        "pool": int(found.sum()),
+        "pool": int(len(gap)),
         "selected": int(len(top)),
         "gap_min": float(gap[top].min()) if len(top) else None,
         "gap_mean": float(gap[top].mean()) if len(top) else None,
         "pool_gap_mean": float(gap.mean()) if len(gap) else None,
     }
     return np.sort(index[top]), stats
+
+
+def network_hash(engine_spec: str) -> str | None:
+    """The hash of the network an `nnue:<file>[?...]` spec names; None for other engines."""
+    kind, _, rest = engine_spec.partition(":")
+    if kind != "nnue":
+        return None
+    file = Path(rest.partition("?")[0])
+    return sha256(file if file.is_absolute() else workspace_root() / file)
 
 
 def label(
@@ -205,7 +217,6 @@ def label(
         kind=kind[keep],
         capture_clock=np.full(int(keep.sum()), SITE_CLOCK, dtype=np.uint16),
     )
-    provenance = json.loads((source / "provenance.json").read_text(encoding="utf-8"))
     chosen = np.array(chosen_q, dtype=np.float64)
     root = np.array(root_value, dtype=np.float64)
     target_dir = data_dir(out)
@@ -214,11 +225,28 @@ def label(
         labelled,
         {
             "producer": "teacher",
-            "engine": engine_spec,
+            "engine": {
+                "spec": engine_spec,
+                "binary": str(bot_binary()),
+                "binary_sha256": sha256(bot_binary()),
+                "network_sha256": network_hash(engine_spec),
+            },
             "sims": sims,
             "rules": {"capture_clock": SITE_CLOCK, "repetition_draw": False},
-            "input": {"dataset": str(source), "provenance": provenance, "rows": n, "sample": sample, "seed": seed},
-            "select": {"dataset": select, **selection} if selection else None,
+            "input": {
+                "dataset": input_set,
+                "provenance_sha256": sha256(source / "provenance.json"),
+                "rows": n,
+                "sample": sample,
+                "seed": seed,
+            },
+            "select": {
+                "dataset": select,
+                "provenance_sha256": sha256(data_dir(select) / "provenance.json"),
+                **selection,
+            }
+            if selection
+            else None,
             "proofs": int((kind == data.KIND_PROOF).sum()),
             "errors": errors,
             "quiet_best": quiet_best,

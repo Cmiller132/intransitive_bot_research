@@ -26,9 +26,8 @@ The two halves share only the feature definition and the file format:
   deadline less a 20 ms overhead; a seat's own `--movetime` budget, given
   through `choose_self_timed`, is searched in full) or `Clock::Sims(n)` (n x
   2,500 nodes, one thread, DESIGN item 2). The spec is `nnue:<file>[?hash=<MiB>]` (table
-  budget, default 64). Files carry learned clock rows, one or four output
-  buckets by piece count (DESIGN items 5 and 7) and any hidden width that
-  is a multiple of 32 (768 costs about 12 % more per node than 512). When the deadline
+  budget, default 64). Files carry learned clock rows, one output head
+  (DESIGN item 5) and any hidden width that is a multiple of 32 (768 costs about 12 % more per node than 512). When the deadline
   interrupts an iteration, a completed root child inside the aspiration
   window may replace the previous choice (`partial` in the search record).
   Search records include `root_moves` and `iterations`: depth, nodes,
@@ -82,6 +81,7 @@ python -m nnue.train --run <name> --data <set>:<share> [--data <set>:<share> ...
 python -m nnue.train --run <name> --data ... --resume runs/<name>/latest.pt
 python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx | nnue:<file>] [--sims 256] [--workers 8] [--rows N] [--quiet-best]
 python -m nnue.gpu_label --input <set> --out <set> [--input <set> --out <set> ...] --ckpt runs/conv_g128/ckpt_000150.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N] [--reuse-nodes K] [--repetition-draw false]
+python -m nnue.experiment pin runs/nnue_gauntlets/<name>/experiment.json    # hash every fixed input
 python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json [--only train|match]
 python -m nnue.experiment verdict runs/nnue_gauntlets/<name>/experiment.json
 ```
@@ -114,10 +114,9 @@ outcome_ok, source, game, orbit, split), `provenance.json` and, after
 format-6 run maps them onto its table) that lets the trainer gather ids
 instead of encoding boards (on the GPU, `--device cuda`, about 300k rows per
 second; a batch encodes on the fly when any of its sets lacks the cache;
-a cache of another shape is rejected); `nnue.data`
-defines the fields and the `Mixture` sampler, `nnue.importer` writes sets
-from conv windows, from the prototype's arrays and from the site's export of
-human games (every played root labelled with the outcome at weight 0.25;
+a cache not bound to its dataset and the current encoder is rejected);
+`nnue.data` defines the fields and the `Mixture` sampler, `nnue.importer`
+writes sets from conv windows and from the site's export of human games (every played root labelled with the outcome at weight 0.25;
 `nnue.games` decodes the export and replays absolute move tokens through
 the engine).
 
@@ -126,7 +125,7 @@ losses, the selection objective, which scores only rows that are not bare
 game outcomes, validation error overall and by stratum under all six
 symmetries for every dataset), `latest.pt`, `best.pt` and
 `best.nnue` with its JSON sidecar (hashes, shape, the run's settings). Every
-config field is a flag (`--batch 2048`, `--buckets 4`,
+config field is a flag (`--batch 2048`,
 `--hidden 768` with a 512-wide `--init` widens it with seeded new columns
 (DESIGN item 33), `--version 6` trains the incumbent's layout where the
 default 8 turns a format 6 `--init` into the factorised format 8 network,

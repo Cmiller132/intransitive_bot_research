@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .paths import sha256
+
 FIELDS: dict[str, np.dtype] = {
     "board": np.dtype(np.uint8),  # (N, 81) cell codes, mover's frame
     "since_capture": np.dtype(np.uint16),
@@ -43,6 +45,16 @@ SOURCE_SELFPLAY = 6  # searched roots of `bot selfplay` games (nnue.importer sel
 
 
 IDS_FILE = "ids8.npy"  # optional cache: the format-8 feature ids of every row, (N, 2, SLOTS) int16
+IDS_META = "ids8.json"  # what the cache is bound to (`cache_identity`)
+
+
+def cache_identity(directory: Path) -> dict:
+    """What an id cache is bound to: the encoder's signature, the row count
+    and the dataset's provenance file."""
+    from .features import signature
+
+    rows = int(np.load(directory / "board.npy", mmap_mode="r").shape[0])
+    return {"encoder": signature(), "rows": rows, "provenance_sha256": sha256(directory / "provenance.json")}
 
 
 def encode_ids(directory: Path, chunk: int = 1 << 18) -> Path:
@@ -66,6 +78,7 @@ def encode_ids(directory: Path, chunk: int = 1 << 18) -> Path:
     ids.flush()
     del ids
     tmp.replace(directory / IDS_FILE)
+    (directory / IDS_META).write_text(json.dumps(cache_identity(directory)), encoding="utf-8")
     (directory / "ids.npy").unlink(missing_ok=True)
     return directory / IDS_FILE
 
@@ -114,8 +127,13 @@ class Dataset:
             from .features import SLOTS
 
             ids = np.load(directory / IDS_FILE, mmap_mode="r")
-            if ids.shape != (len(rows["board"]), 2, SLOTS):
-                raise ValueError(f"{directory / IDS_FILE} is not the (N, 2, {SLOTS}) cache of this dataset")
+            meta = directory / IDS_META
+            bound = json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else None
+            if bound != cache_identity(directory) or ids.dtype != np.int16 or ids.shape != (bound["rows"], 2, SLOTS):
+                raise ValueError(
+                    f"{directory / IDS_FILE} is not this dataset's cache under the current encoder "
+                    "(python -m nnue.data encode <set>)"
+                )
             rows["ids"] = ids
         provenance = json.loads((directory / "provenance.json").read_text(encoding="utf-8"))
         keep = rows["split"] == split

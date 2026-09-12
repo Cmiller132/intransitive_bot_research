@@ -2,13 +2,14 @@
 variants and the bucketed start from a one-head file."""
 
 import csv
+import shutil
 
 import numpy as np
 import pytest
 import torch
 
 from nnue import data, export, paths
-from nnue.features import FORMAT8, feature_ids, orbit_hash, piece_bucket
+from nnue.features import FORMAT8, feature_ids, orbit_hash
 from nnue.model import NNUE
 from nnue.train import Config, initial_model, train
 
@@ -67,7 +68,7 @@ def test_run_writes_artifacts_and_the_export_matches(sets, tmp_path):
     val = data.Dataset.open(paths.data_dir("a"), data.VALIDATION).all(50)
     ids = torch.from_numpy(feature_ids(val["board"], val["since_capture"], val["capture_clock"]))
     with torch.no_grad():
-        expected = model(ids, torch.from_numpy(piece_bucket(val["board"])), qat=True).numpy()
+        expected = model(ids, qat=True).numpy()
     got = export.integer_eval(out / "best.nnue", val["board"], val["since_capture"], val["capture_clock"])
     assert np.max(np.abs(got - expected)) < 2e-6
 
@@ -92,12 +93,6 @@ def test_resume_rejects_changed_settings(sets):
         train("guard", sets, tiny(lr=1e-3, resume=str(first / "latest.pt")))
 
 
-def test_bucketed_start_from_a_one_head_file(sets):
-    out = train("one", sets, tiny(epochs=1))
-    wide = train("four", sets, tiny(buckets=4, init=str(out / "best.nnue"), epochs=1))
-    assert export.read(wide / "best.nnue")["buckets"] == 4
-
-
 def test_format8_from_a_format6_init_trains_the_context_rows(sets, tmp_path):
     out = train("six", sets, tiny(epochs=1, version=6))
     assert export.read(out / "best.nnue")["version"] == 6
@@ -120,10 +115,20 @@ def test_id_cache_reproduces_the_encoder(sets, tmp_path):
     encode_ids(directory)
     cached = Dataset.open(directory, data.TRAIN)
     assert "ids" in cached.rows
+    # A cache is bound to its dataset and the encoder: a copy under another set or without its binding is refused.
+    other = paths.data_dir("b")
+    for name in ("ids8.npy", "ids8.json"):
+        shutil.copy2(directory / name, other / name)
+    with pytest.raises(ValueError, match="not this dataset"):
+        Dataset.open(other, data.TRAIN)
+    (other / "ids8.json").unlink()
+    with pytest.raises(ValueError, match="not this dataset"):
+        Dataset.open(other, data.TRAIN)
+    (other / "ids8.npy").unlink()
     rows = cached.all(64)
-    with_cache, _ = encode(rows, FORMAT8)
+    with_cache = encode(rows, FORMAT8)
     del rows["ids"]
-    fresh, _ = encode(rows, FORMAT8)
+    fresh = encode(rows, FORMAT8)
     assert torch.equal(with_cache, fresh)
     out = train("cached", sets, tiny(epochs=1))
     assert (out / "best.nnue").exists()

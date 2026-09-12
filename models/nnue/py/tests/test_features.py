@@ -19,7 +19,6 @@ from nnue.features import (
     context,
     feature_ids,
     orbit_hash,
-    piece_bucket,
     symmetry_table,
     transform_board,
 )
@@ -166,11 +165,8 @@ def test_symmetry_table_matches_transformed_boards(layout):
     assert CONTEXTS == 27
 
 
-def test_orbit_hash_and_piece_bucket():
+def test_orbit_hash_is_constant_on_an_orbit():
     boards = random_boards(11, 16, 2, 21)
     keys = orbit_hash(boards)
     for k in range(6):
         assert np.array_equal(orbit_hash(transform_board(boards, k)), keys)
-    counts = np.count_nonzero(boards, axis=1)
-    want = np.where(counts <= 4, 0, np.where(counts <= 8, 1, np.where(counts <= 12, 2, 3)))
-    assert np.array_equal(piece_bucket(boards), want)

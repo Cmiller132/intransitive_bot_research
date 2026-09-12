@@ -32,15 +32,14 @@ from torch.nn import functional as F  # noqa: E402
 
 from . import export as export_module  # noqa: E402
 from .data import KIND_RETURN, TRAIN, VALIDATION, Dataset, Mixture  # noqa: E402
-from .features import Layout, feature_ids, piece_bucket, symmetry_table  # noqa: E402
+from .features import LAYOUTS, Layout, feature_ids, symmetry_table  # noqa: E402
 from .model import NNUE  # noqa: E402
-from .paths import data_dir, run_dir  # noqa: E402
+from .paths import data_dir, run_dir, sha256  # noqa: E402
 
 
 @dataclass
 class Config:
     hidden: int = 512
-    buckets: int = 1
     batch: int = 2048
     steps_per_epoch: int = 500
     epochs: int = 20
@@ -93,18 +92,14 @@ def value_loss(raw: torch.Tensor, target: torch.Tensor, config: Config) -> torch
     return (raw.tanh() - target).square() + config.raw_weight * F.smooth_l1_loss(raw, logit, reduction="none")
 
 
-def encode(rows: dict[str, np.ndarray], layout: Layout) -> tuple[torch.Tensor, torch.Tensor]:
-    """Feature ids in `layout` and output buckets of a batch, from the dataset's
-    id cache when it has one (`python -m nnue.data encode <set>`), else from
-    the boards."""
+def encode(rows: dict[str, np.ndarray], layout: Layout) -> torch.Tensor:
+    """Feature ids in `layout` of a batch, from the dataset's id cache when it
+    has one (`python -m nnue.data encode <set>`), else from the boards."""
     if "ids" in rows:
         ids = rows["ids"].astype(np.int64)
     else:
         ids = feature_ids(rows["board"], rows["since_capture"], rows["capture_clock"])
-    ids = layout.rows(ids)
-    # A batch without boards comes from the lean mixture of a one-bucket model, whose head ignores the bucket.
-    bucket = piece_bucket(rows["board"]) if "board" in rows else np.zeros(len(ids), dtype=np.int64)
-    return torch.from_numpy(ids), torch.from_numpy(bucket)
+    return torch.from_numpy(layout.rows(ids))
 
 
 def step_loss(
@@ -113,12 +108,11 @@ def step_loss(
     """The batch under two different random symmetries: the mean of both
     value losses and the paired consistency term."""
     device = table.device
-    ids, bucket = encode(rows, model.layout)
-    ids, bucket = ids.to(device), bucket.to(device)
+    ids = encode(rows, model.layout).to(device)
     n = len(ids)
     first = torch.randint(6, (n, 1, 1), generator=rng).to(device)
     second = (first + torch.randint(1, 6, (n, 1, 1), generator=rng).to(device)) % 6
-    raw = model(torch.cat([table[first, ids], table[second, ids]]), torch.cat([bucket, bucket]), qat=qat)
+    raw = model(torch.cat([table[first, ids], table[second, ids]]), qat=qat)
     a, b = raw.chunk(2)
     target = torch.from_numpy(rows["target"]).float().to(device)
     weight = torch.from_numpy(rows["weight"]).float().to(device)
@@ -137,9 +131,8 @@ def evaluate(model: NNUE, dataset: Dataset, table: torch.Tensor, limit: int, bat
     values = []
     for start in range(0, len(rows["board"]), batch):
         part = {k: v[start : start + batch] for k, v in rows.items()}
-        ids, bucket = encode(part, model.layout)
-        ids, bucket = ids.to(table.device), bucket.to(table.device)
-        views = [model(table[k, ids], bucket, qat=True).tanh() for k in range(6)]
+        ids = encode(part, model.layout).to(table.device)
+        views = [model(table[k, ids], qat=True).tanh() for k in range(6)]
         values.append(torch.stack(views, 1).cpu().numpy())
     values = np.concatenate(values) if values else np.zeros((0, 6))
     target, weight = rows["target"][:, None], rows["weight"][:, None]
@@ -192,31 +185,38 @@ def initial_model(config: Config) -> NNUE:
             model = model.widen_hidden(config.hidden, config.seed)
         elif model.hidden != config.hidden:
             raise ValueError(f"{config.init} has hidden {model.hidden}, config says {config.hidden}")
-        if model.buckets == 1 and config.buckets > 1:
-            model = model.widen_buckets()
-        elif model.buckets != config.buckets:
-            raise ValueError(f"{config.init} has {model.buckets} buckets, config says {config.buckets}")
         if model.version < config.version:
             model = model.widen_contexts()
         elif model.version != config.version:
             raise ValueError(f"{config.init} is format {model.version}, config says {config.version}")
     else:
-        model = NNUE(config.hidden, config.buckets, config.version)
+        model = NNUE(config.hidden, config.version)
         if config.init:
             model.load_state_dict(torch.load(config.init, map_location="cpu", weights_only=False)["model"])
     return model
 
 
+def truncate_log(path: Path, epochs: int) -> None:
+    """Keeps the header and the first `epochs` rows: a row written before a
+    crash that lost its checkpoint goes, the checkpoint stays the authority."""
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if len(lines) > epochs + 1:
+            path.write_text("".join(lines[: epochs + 1]), encoding="utf-8")
+
+
 def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
+    if config.version not in LAYOUTS:
+        raise ValueError(f"version must be one of {sorted(LAYOUTS)}")
     torch.set_num_threads(config.threads)
     torch.manual_seed(config.seed)
     out = run_dir(run)
     out.mkdir(parents=True, exist_ok=True)
     datasets = [(Dataset.open(data_dir(name), TRAIN), share) for name, share in parts]
     validation = [(name, Dataset.open(data_dir(name), VALIDATION), share) for name, share in parts]
-    # With id caches everywhere and one head, a step needs two small columns and the ids; gathering every
-    # column (the 81-byte board above all) from the memory maps made the trainer page instead of compute.
-    lean = config.buckets == 1 and all("ids" in dataset.rows for dataset, _ in datasets)
+    # With id caches everywhere a step needs two small columns and the ids; gathering every column (the
+    # 81-byte board above all) from the memory maps made the trainer page instead of compute.
+    lean = all("ids" in dataset.rows for dataset, _ in datasets)
     mixture = Mixture(datasets, config.batch, config.seed, ("target", "weight") if lean else None)
     device = torch.device(config.device)
     rng = torch.Generator().manual_seed(config.seed + 1)
@@ -225,20 +225,24 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     total_steps = config.epochs * config.steps_per_epoch
     step, first_epoch, best, stale = 0, 0, float("inf"), 0
+    provenance = {name: sha256(data_dir(name) / "provenance.json") for name, _ in parts}
+    # A run is bound to its datasets' provenance and its init file; a resume must present the same.
+    inputs = {"data": parts, "datasets": provenance, "init_sha256": sha256(Path(config.init)) if config.init else None}
     if config.resume:
         saved = torch.load(config.resume, map_location="cpu", weights_only=False)
         volatile = {"resume": "", "stop_epoch": 0}
-        if {**saved["config"], **volatile} != {**asdict(config), **volatile} or saved["data"] != parts:
-            raise ValueError("resume with the settings and datasets the run was started with")
+        same = {**saved["config"], **volatile} == {**asdict(config), **volatile}
+        if not same or any(saved.get(k) != v for k, v in inputs.items()):
+            raise ValueError("resume with the settings, init and datasets the run was started with")
         model.load_state_dict(saved["model"])
         optimizer.load_state_dict(saved["optimizer"])
         step, first_epoch, best, stale = saved["step"], saved["epoch"] + 1, saved["best"], saved["stale"]
         torch.set_rng_state(saved["torch_rng"])
         rng.set_state(saved["aug_rng"])
         mixture.restore(saved["sampler"])
+        truncate_log(out / "log.csv", first_epoch)
     else:
-        (out / "config.json").write_text(json.dumps({"config": asdict(config), "data": parts}, indent=2))
-    provenance = {name: export_module.sha256(data_dir(name) / "provenance.json") for name, _ in parts}
+        (out / "config.json").write_text(json.dumps({"config": asdict(config), **inputs}, indent=2))
     print(json.dumps({"event": "start", "run": run, "first_epoch": first_epoch, "rows": [len(d) for d, _ in datasets]}))
     for epoch in range(first_epoch, config.epochs):
         started = time.perf_counter()
@@ -293,7 +297,7 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
             "aug_rng": rng.get_state(),
             "sampler": mixture.state(),
             "config": asdict(config),
-            "data": parts,
+            **inputs,
         }
         save(out / "latest.pt", payload)
         if improved:

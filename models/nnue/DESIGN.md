@@ -73,7 +73,8 @@ unchanged, everything around them is rebuilt.
    transformer and the dense transform shared. Built as an ablation beside
    item 5; kept if it passes the gauntlet. Measured: neither the clock rows
    (82.5 % without them against the same control's 83.8 %) nor the buckets
-   (50.6 %) changed strength; the format keeps both, trained or zeroed.
+   (50.6 %) changed strength; the clock rows stay, the buckets were removed
+   from the trainer and the files on 2026-09-12 (one head, item 38).
 8. Deferred, each a separate design change when the data supports it: full
    per-bucket residual heads, a deeper residual (1024 to 32 to 16 to 1),
    width 768 or 1024, richer local features.
@@ -452,7 +453,9 @@ unchanged, everything around them is rebuilt.
     piece-square rows already read races as well as 40-simulation labels
     can teach them (the optimism the loss study saw is twelve plies out,
     beyond the labels' horizon). Format 7 was removed with format 8
-    (item 38); a race term would return only with deeper labels.
+    (item 38); a race term returns only through the C3 proof of
+    runs/nnue_plan/step_plan_final.md (a measured race error that stays
+    with deeper labels), never as a feature added on its own.
     Also: teacher disagreement rounds at 512 simulations on the rows
     where student and teacher differ most.
 36. Not worth repeating (measured null or negative): clock rows, output
@@ -468,8 +471,9 @@ unchanged, everything around them is rebuilt.
     The direct match measures the new data's benefit; promotion separately
     requires beating mb_b at both budgets. The schedule and decision rules
     are in runs/nnue_plan/selfplay_plan_final.md, exact arguments and seeds
-    in runs/nnue_gauntlets/gen3_controlled/experiment.json. Measured: null
-    (53.3 % at 50 ms, 50.3 % at 100 ms against the control, one seed); the
+    in runs/nnue_gauntlets/gen3_controlled/experiment.json. Measured on
+    one seed: no gain (53.3 % at 50 ms, 50.3 % at 100 ms against the
+    control), a bounded finding, unresolved across seeds; the
     self-play loop was paused and the step-change programme of
     runs/nnue_plan/step_plan_final.md agreed with Astra on 2026-09-12.
 38. Format 8, the agreed contract (runs/nnue_plan/format8_contract.md): the

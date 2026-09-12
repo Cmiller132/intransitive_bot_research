@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .features import BUCKETS, CLOCK_BUCKETS, CONTEXTS, LAYOUTS, PIECE_ROWS, SLOTS
+from .features import CLOCK_BUCKETS, CONTEXTS, LAYOUTS, PIECE_ROWS, SLOTS
 
 QA = 255  # scale of the feature table and the accumulator clamp
 QB = 64  # scale of the readout, dense and residual weights
@@ -43,24 +43,19 @@ def accumulate(ids: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 class NNUE(nn.Module):
     """Two perspectives share the feature table and `bias`; the concatenated
-    squared clipped accumulators feed a per-bucket linear readout and a shared
-    32-wide dense layer whose clipped output feeds a per-bucket residual row.
-    The table is `piece` (486 x H, the shared piece-square factor) plus, in
-    format 8, `context` (27 x 486 x H residuals, zero at the start), then
-    `attack` (486 x H) and `clock` (32 x H). `buckets` is 1 (one head) or
-    `features.BUCKETS` (one head per piece-count bucket, item 7); `version`
-    is the file format, 6 or 8."""
+    squared clipped accumulators feed a linear readout and a shared 32-wide
+    dense layer whose clipped output feeds a residual row. The table is
+    `piece` (486 x H, the shared piece-square factor) plus, in format 8,
+    `context` (27 x 486 x H residuals, zero at the start), then `attack`
+    (486 x H) and `clock` (32 x H). `version` is the file format, 6 or 8."""
 
-    def __init__(self, hidden: int = 512, buckets: int = 1, version: int = 8):
+    def __init__(self, hidden: int = 512, version: int = 8):
         super().__init__()
         if hidden % 32 or not 32 <= hidden <= 1024:
             raise ValueError("hidden must be a multiple of 32 from 32 to 1024")
-        if buckets not in (1, BUCKETS):
-            raise ValueError(f"buckets must be 1 or {BUCKETS}")
         if version not in LAYOUTS:
             raise ValueError(f"version must be one of {sorted(LAYOUTS)}")
         self.hidden = hidden
-        self.buckets = buckets
         self.layout = LAYOUTS[version]
         self.piece = nn.Parameter(torch.empty(PIECE_ROWS, hidden).normal_(std=ROW_STD))
         self.context = (
@@ -69,9 +64,9 @@ class NNUE(nn.Module):
         self.attack = nn.Parameter(torch.empty(PIECE_ROWS, hidden).normal_(std=ROW_STD))
         self.clock = nn.Parameter(torch.empty(2 * CLOCK_BUCKETS, hidden).normal_(std=ROW_STD))
         self.bias = nn.Parameter(torch.full((hidden,), 0.15))
-        self.output = nn.Linear(2 * hidden, buckets)
+        self.output = nn.Linear(2 * hidden, 1)
         self.dense = nn.Linear(2 * hidden, DENSE)
-        self.delta = nn.Linear(DENSE, buckets, bias=False)
+        self.delta = nn.Linear(DENSE, 1, bias=False)
         nn.init.normal_(self.output.weight, std=0.025)
         nn.init.zeros_(self.output.bias)
         nn.init.normal_(self.dense.weight, std=0.03)
@@ -88,10 +83,8 @@ class NNUE(nn.Module):
         table = torch.cat([piece, self.attack, self.clock])
         return fake_quant(table, QA) if qat else table
 
-    def forward(self, ids: torch.Tensor, bucket: torch.Tensor, qat: bool = False) -> torch.Tensor:
-        """`ids` (N, 2, SLOTS) feature ids in the model's layout, `bucket` (N,)
-        the head of every position (all zero with one head); returns the raw
-        value (N,)."""
+    def forward(self, ids: torch.Tensor, qat: bool = False) -> torch.Tensor:
+        """`ids` (N, 2, SLOTS) feature ids in the model's layout; returns the raw value (N,)."""
         n = ids.shape[0]
         rows = self.rows(qat)
         weight = torch.cat([rows, rows.new_zeros(1, self.hidden)])
@@ -116,10 +109,7 @@ class NNUE(nn.Module):
                 exact = torch.round(total / QB).clamp(0, QA).to(hidden.dtype) / QA
             hidden = hidden + (exact - hidden).detach()
         delta_w = fake_quant(self.delta.weight, QB) if qat else self.delta.weight
-        raw = raw + F.linear(hidden, delta_w)
-        if self.buckets == 1:
-            return raw.squeeze(-1)
-        return raw.gather(1, bucket.reshape(-1, 1).long()).squeeze(-1)
+        return (raw + F.linear(hidden, delta_w)).squeeze(-1)
 
     @torch.no_grad()
     def constrain(self) -> None:
@@ -145,7 +135,7 @@ class NNUE(nn.Module):
         and zero readout and dense columns (DESIGN item 33)."""
         if hidden <= self.hidden or hidden % 32:
             raise ValueError(f"hidden must be a larger multiple of 32 than {self.hidden}")
-        wide = NNUE(hidden, self.buckets, self.version)
+        wide = NNUE(hidden, self.version)
         old, new = self.hidden, hidden
         generator = torch.Generator().manual_seed(seed)
         for name in ("piece", "attack", "clock"):
@@ -177,26 +167,13 @@ class NNUE(nn.Module):
         target.dense.load_state_dict(self.dense.state_dict())
 
     @torch.no_grad()
-    def widen_buckets(self) -> NNUE:
-        """A `BUCKETS`-head copy of a one-head network with every head equal
-        to the single head, so the buckets start from the same evaluation."""
-        if self.buckets != 1:
-            raise ValueError("already bucketed")
-        wide = NNUE(self.hidden, BUCKETS, self.version)
-        self.copy_tables(wide)
-        wide.output.weight.copy_(self.output.weight.expand(BUCKETS, -1))
-        wide.output.bias.copy_(self.output.bias.expand(BUCKETS))
-        wide.delta.weight.copy_(self.delta.weight.expand(BUCKETS, -1))
-        return wide
-
-    @torch.no_grad()
     def widen_contexts(self) -> NNUE:
         """The format 8 copy of a format 6 network: the piece rows become the
         shared factor, the 27 context residuals start at zero, everything
         else is kept, so it evaluates identically until the residuals train."""
         if self.context is not None:
             raise ValueError("already has the context rows")
-        wide = NNUE(self.hidden, self.buckets, 8)
+        wide = NNUE(self.hidden, 8)
         self.copy_tables(wide)
         wide.context.zero_()
         wide.output.load_state_dict(self.output.state_dict())
