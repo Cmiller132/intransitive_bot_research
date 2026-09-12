@@ -1,10 +1,12 @@
-"""The teacher labeller: exact proofs from the engine, and the search values
-of a fake `bot analyse` written back with the rows' provenance kept."""
+"""The teacher labeller: exact proofs from the engine, the search values of a
+fake `bot analyse` written back with the rows' provenance kept, and the
+selection of the rows a shallow labelling misjudges most."""
 
 import json
 
 import engine
 import numpy as np
+import pytest
 
 from nnue import data, features, label, paths
 
@@ -14,6 +16,25 @@ def board_with(cells: dict[int, int]) -> np.ndarray:
     for square, code in cells.items():
         board[square] = code
     return board
+
+
+def rows_of(boards: np.ndarray, rng: np.random.Generator, target: np.ndarray | None = None) -> dict:
+    n = len(boards)
+    return {
+        "board": boards,
+        "since_capture": rng.permutation(150)[:n].astype(np.uint16),  # distinct clock states
+        "ply": np.arange(n, dtype=np.uint16),
+        "capture_clock": np.full(n, 200, dtype=np.uint16),
+        "target": np.zeros(n, dtype=np.float32) if target is None else target.astype(np.float32),
+        "weight": np.ones(n, dtype=np.float32),
+        "kind": np.full(n, data.KIND_RAW, dtype=np.uint8),
+        "outcome": np.zeros(n, dtype=np.int8),
+        "outcome_ok": np.zeros(n, dtype=bool),
+        "source": np.full(n, data.SOURCE_STUDENT, dtype=np.uint8),
+        "game": np.arange(n, dtype=np.uint32) // 3,
+        "orbit": features.orbit_hash(boards),
+        "split": np.zeros(n, dtype=np.uint8),
+    }
 
 
 def test_proofs_mark_wins_at_once_and_forced_losses():
@@ -34,22 +55,7 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     rng = np.random.default_rng(2)
     n = 12
     boards = np.stack([np.frombuffer(engine.initial_board(), dtype=np.uint8)] * n)
-    rows = {
-        "board": boards,
-        "since_capture": rng.integers(0, 30, n).astype(np.uint16),
-        "ply": np.arange(n, dtype=np.uint16),
-        "capture_clock": np.full(n, 200, dtype=np.uint16),
-        "target": np.zeros(n, dtype=np.float32),
-        "weight": np.ones(n, dtype=np.float32),
-        "kind": np.full(n, data.KIND_RAW, dtype=np.uint8),
-        "outcome": np.zeros(n, dtype=np.int8),
-        "outcome_ok": np.zeros(n, dtype=bool),
-        "source": np.full(n, data.SOURCE_STUDENT, dtype=np.uint8),
-        "game": np.arange(n, dtype=np.uint32) // 3,
-        "orbit": features.orbit_hash(boards),
-        "split": np.zeros(n, dtype=np.uint8),
-    }
-    data.write(paths.data_dir("raw"), rows, {"producer": "test"})
+    data.write(paths.data_dir("raw"), rows_of(boards, rng), {"producer": "test"})
     seen = []
 
     def analyse(engine_spec, requests, sims):
@@ -73,7 +79,40 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["sims"] == 64 and provenance["errors"] == 2
     assert provenance["rows"] == n - 2 and provenance["input"]["rows"] == n
+    assert provenance["select"] is None
     assert sum(count for _, _, count in seen) == n and all(s == 64 for _, s, _ in seen)
+
+
+def test_selection_takes_the_rows_the_shallow_labels_misjudge_most(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    rng = np.random.default_rng(3)
+    n = 40
+    boards = np.stack([np.frombuffer(engine.initial_board(), dtype=np.uint8)] * n)
+    deep = rng.uniform(-1, 1, n)
+    source = rows_of(boards, rng, deep)
+    data.write(paths.data_dir("pool"), source, {"producer": "test"})
+    # The shallow pass covers a subset in another order, with its own labels.
+    subset = np.array([30, 5, 17, 2, 21, 9, 33, 12, 27, 0])
+    shallow = {name: value[subset] for name, value in source.items()}
+    shallow["target"] = (deep[subset] + np.array([0.05, 0.9, -0.02, 0.6, 0.01, -0.7, 0.03, 0.4, 0.0, -0.5])).clip(-1, 1)
+    shallow["target"] = shallow["target"].astype(np.float32)
+    data.write(paths.data_dir("shallow"), shallow, {"producer": "test"})
+    chosen, stats = label.disagreement(paths.data_dir("pool"), paths.data_dir("shallow"), 4)
+    gap = np.abs(deep[subset] - shallow["target"])
+    want = np.sort(subset[np.argsort(-gap, kind="stable")[:4]])
+    assert chosen.tolist() == want.tolist()
+    assert stats["pool"] == len(subset) and stats["selected"] == 4 and stats["gap_min"] <= stats["gap_mean"]
+    monkeypatch.setattr(
+        label, "analyse", lambda spec, requests, sims: [{"search": {"root_value": 0.1, "lines": []}} for _ in requests]
+    )
+    target = label.label("pool", "deep", "fake:engine", 400, 1, sample=4, select="shallow")
+    provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["rows"] == 4 and provenance["select"]["dataset"] == "shallow"
+    assert np.array_equal(np.load(target / "ply.npy"), source["ply"][chosen])
+    duplicated = {name: np.concatenate([value, value[:1]]) for name, value in source.items()}
+    data.write(paths.data_dir("dup"), duplicated, {"producer": "test"})
+    with pytest.raises(ValueError):
+        label.disagreement(paths.data_dir("dup"), paths.data_dir("shallow"), 4)
 
 
 def test_quiet_best_drops_rows_whose_best_move_captures(tmp_path, monkeypatch):
@@ -81,22 +120,10 @@ def test_quiet_best_drops_rows_whose_best_move_captures(tmp_path, monkeypatch):
     # Own rock at 40 (e5) beside an enemy scissors at 41 (f5): e5-f5 captures; e5-e6 does not.
     board = board_with({40: 1, 41: 6, 0: 4, 80: 1})
     boards = np.stack([board, board])
-    n = 2
-    rows = {
-        "board": boards,
-        "since_capture": np.full(n, 5, dtype=np.uint16),
-        "ply": np.full(n, 20, dtype=np.uint16),
-        "capture_clock": np.full(n, 200, dtype=np.uint16),
-        "target": np.zeros(n, dtype=np.float32),
-        "weight": np.ones(n, dtype=np.float32),
-        "kind": np.full(n, data.KIND_RAW, dtype=np.uint8),
-        "outcome": np.zeros(n, dtype=np.int8),
-        "outcome_ok": np.zeros(n, dtype=bool),
-        "source": np.full(n, data.SOURCE_STUDENT, dtype=np.uint8),
-        "game": np.arange(n, dtype=np.uint32),
-        "orbit": features.orbit_hash(boards),
-        "split": np.zeros(n, dtype=np.uint8),
-    }
+    rows = rows_of(boards, np.random.default_rng(4))
+    rows["since_capture"] = np.full(2, 5, dtype=np.uint16)
+    rows["ply"] = np.full(2, 20, dtype=np.uint16)
+    rows["game"] = np.arange(2, dtype=np.uint32)
     data.write(paths.data_dir("raw2"), rows, {"producer": "test"})
     moves = iter(["e5-f5", "e5-e6"])
 

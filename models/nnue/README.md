@@ -195,6 +195,7 @@ python -m nnue.importer conv --run runs/conv_g128 --out conv_<from>_<to> ...
 python -m nnue.gpu_label --input human_games --out human_gpu<n> --ckpt runs/conv_g128/ckpt_<n>.pt   # GPU free
 python -m nnue.collect --round student_<k> --student <incumbent.nnue> --previous <parent.nnue> --workers 8
 python -m nnue.label --input student_<k> --out student_<k>_self --engine nnue:<incumbent.nnue> --sims 40 --workers 8
+python -m nnue.label --input <pool> --rows 20000 --select <pool_shallow> --sims 400 --out <pool>_selected_1m --engine nnue:<incumbent.nnue>   # the rows a 1-sim pass misjudges most (plan item D)
 python -m nnue.data encode <every new set>
 python -m nnue.train --run <name> --init <incumbent.nnue> --device cuda --batch 8192 --steps_per_epoch 1000 --epochs 20 --lr 0.0003 --data ...
 python -m nnue.gauntlet --name <name>_sims8 --candidate runs/<name>/best.nnue --incumbent <incumbent.nnue> --stage all --sims 8

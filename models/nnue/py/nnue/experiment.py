@@ -22,19 +22,29 @@ and `verdict.json` are written:
                "endpoints": {"epoch20": "latest@20", "epoch60": "latest", "best": "best"}}],
      "matches": [{"tag": "s2_60_vs_20_50", "candidate": "long60_s2:epoch60",
                   "reference": "long60_s2:epoch20", "move_ms": 50, "pairs": 200,
-                  "seed": 2026091521, "player_threads": 1, "concurrent": 8}],
+                  "seed": 2026091521, "player_threads": 1, "concurrent": 8},
+                 {"tag": "qtt_50", "candidate": "runs/nnue_bins/qtt.exe",
+                  "reference": "runs/nnue_candidates/mb_b.nnue", "move_ms": 50,
+                  "sprt": true, "seed": 2026091601}],
      "rules": [{"name": "promotion", "type": "lower_bound_above", "threshold": 0.5,
-                "matches": ["s2_60_vs_mb_b_50", "s2_60_vs_mb_b_100"]}]}
+                "matches": ["s2_60_vs_mb_b_50", "s2_60_vs_mb_b_100"]},
+               {"name": "patch", "type": "sprt_accept", "matches": ["qtt_50"]}]}
 
 An arm without `train` names an existing run. `stops` are epoch counts at
 which training pauses (`--stop_epoch`), the checkpoint is retained as
 `<run>/epoch<N>.pt` and resumed exactly; an endpoint `latest@N` is that
 checkpoint's export, `latest` the final checkpoint's, `best` the trainer's
-`best.nnue`. A match side is `<run>:<endpoint>` or a `.nnue` path. Rule
-types: `lower_bound_above` (every named match's paired lower bound above
-the threshold) and `score_at_least` (every named match's score at least the
-threshold). Intervals are the eval tool's opening-pair bootstrap on the
-score scale; the verdict records numbers and rule outcomes, nothing else.
+`best.nnue`. A match side is `<run>:<endpoint>` or a `.nnue` path, played by
+the preregistered `bot`; a side that is an `.exe` path is a search build
+(`rpsi:` seat) playing the experiment's `network` (a search patch against
+the same weights). A match with `"sprt": true` is the sequential test of
+`bot eval --sprt` (journal `<tag>.jsonl`, resumed when it exists, no pair
+count: it stops by its own rule); every other match plays `pairs` openings.
+Rule types: `lower_bound_above` (every named match's paired lower bound
+above the threshold), `score_at_least` (every named match's score at least
+the threshold) and `sprt_accept` (every named sequential test accepted).
+Intervals are the eval tool's opening-pair bootstrap on the score scale;
+the verdict records numbers and rule outcomes, nothing else.
 """
 
 from __future__ import annotations
@@ -216,10 +226,26 @@ def run_arm(arm: dict) -> None:
 
 
 def side(spec: str) -> Path:
-    if spec.endswith(".nnue"):
+    if spec.endswith((".nnue", ".exe")):
         return (workspace_root() / spec).resolve()
     run, _, endpoint = spec.partition(":")
     return endpoint_file(run, endpoint).resolve()
+
+
+def seat(experiment: dict, spec: str, role: str) -> list[str]:
+    """The `bot eval` arguments of one side: a network under the preregistered
+    search, or a search build (`.exe`) under the experiment's network."""
+    file = side(spec)
+    if file.suffix != ".exe":
+        return [f"--{role}", f"nnue:{file}"]
+    network = (workspace_root() / experiment["network"]).resolve()
+    return [f"--{role}", f"rpsi:{file} rpsi --engine nnue:{network}", f"--{role}-network", str(network)]
+
+
+def finished(match: dict, report: dict) -> bool:
+    if match.get("sprt"):
+        return report.get("sequential", {}).get("stop_reason") not in (None, "running")
+    return report.get("complete_pairs") == match["pairs"]
 
 
 def play(experiment: dict, directory: Path, match: dict) -> dict:
@@ -227,7 +253,7 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
     if report.is_file():
         try:
             loaded = json.loads(report.read_text(encoding="utf-8"))
-            if loaded.get("complete_pairs") == match["pairs"]:
+            if finished(match, loaded):
                 return loaded
         except json.JSONDecodeError:
             pass
@@ -237,14 +263,10 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
     command = [
         str(bot),
         "eval",
-        "--candidate",
-        f"nnue:{side(match['candidate'])}",
-        "--reference",
-        f"nnue:{side(match['reference'])}",
+        *seat(experiment, match["candidate"], "candidate"),
+        *seat(experiment, match["reference"], "reference"),
         "--move-ms",
         str(match["move_ms"]),
-        "--pairs",
-        str(match["pairs"]),
         "--threads",
         str(match.get("concurrent", 8)),
         "--player-threads",
@@ -253,9 +275,12 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
         str(match["seed"]),
         "--opening-plies",
         str(match.get("opening_plies", 8)),
-        "--records",
-        str(directory / f"{match['tag']}.games.jsonl"),
     ]
+    if match.get("sprt"):
+        journal = directory / f"{match['tag']}.jsonl"
+        command += ["--sprt", str(journal), *(["--resume"] if journal.is_file() else [])]
+    else:
+        command += ["--pairs", str(match["pairs"]), "--records", str(directory / f"{match['tag']}.games.jsonl")]
     with (directory / f"{match['tag']}.err").open("w", encoding="utf-8") as err:
         result = subprocess.run(command, cwd=workspace_root(), stdout=subprocess.PIPE, stderr=err, check=False)
     if result.returncode != 0:
@@ -273,7 +298,7 @@ def summarise(match: dict, report: dict | None) -> dict:
         return {"tag": match["tag"], "played": False}
     games = report["wins"] + report["draws"] + report["losses"]
     lo, hi = report["bootstrap_interval"]
-    return {
+    out = {
         "tag": match["tag"],
         "played": True,
         "candidate": match["candidate"],
@@ -285,8 +310,18 @@ def summarise(match: dict, report: dict | None) -> dict:
         "losses": report["losses"],
         "score": (report["wins"] + report["draws"] / 2) / games if games else None,
         "interval": [(1 + lo) / 2, (1 + hi) / 2],
-        "valid": report.get("complete_pairs") == match["pairs"] and report.get("forfeits", 0) == 0,
+        "valid": report.get("complete_pairs") == match.get("pairs") and report.get("forfeits", 0) == 0,
     }
+    if match.get("sprt"):
+        sequential = report.get("sequential", {})
+        out.update(
+            pairs=report.get("pairs"),
+            stop_reason=sequential.get("stop_reason"),
+            llr=sequential.get("llr"),
+            counts=sequential.get("counts"),
+            valid=sequential.get("stop_reason") in ("accept", "reject", "inconclusive"),
+        )
+    return out
 
 
 def verdict(experiment: dict, directory: Path) -> dict:
@@ -318,6 +353,8 @@ def verdict(experiment: dict, directory: Path) -> dict:
             outcome = all(m["interval"][0] > rule["threshold"] for m in named)
         elif rule["type"] == "score_at_least":
             outcome = all(m["score"] >= rule["threshold"] for m in named)
+        elif rule["type"] == "sprt_accept":
+            outcome = all(m.get("stop_reason") == "accept" for m in named)
         else:
             raise ValueError(f"unknown rule type {rule['type']!r}")
         rules.append({**rule, "complete": complete, "met": outcome})

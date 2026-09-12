@@ -40,9 +40,20 @@ def scripted(calls: list, outcomes: dict):
         if command[1] != "eval":
             return real(command, *args, **kwargs)
         calls.append(command)
-        tag = command[command.index("--records") + 1].split("/")[-1].split("\\")[-1].removesuffix(".games.jsonl")
-        pairs = int(command[command.index("--pairs") + 1])
-        wins, draws, losses = outcomes[tag]
+        if "--sprt" in command:
+            journal = command[command.index("--sprt") + 1]
+            tag = journal.split("/")[-1].split("\\")[-1].removesuffix(".jsonl")
+            counts, stop = outcomes[tag]
+            wins, losses = 2 * counts[4] + counts[3], 2 * counts[0] + counts[1]
+            draws = 2 * counts[2] + counts[1] + counts[3]
+            pairs = sum(counts)
+            open(journal, "a", encoding="utf-8").close()
+            sequential = {"counts": counts, "llr": 3.0 if stop == "accept" else -3.0, "stop_reason": stop}
+        else:
+            tag = command[command.index("--records") + 1].split("/")[-1].split("\\")[-1].removesuffix(".games.jsonl")
+            pairs = int(command[command.index("--pairs") + 1])
+            wins, draws, losses = outcomes[tag]
+            sequential = None
         report = {
             "wins": wins,
             "draws": draws,
@@ -51,6 +62,7 @@ def scripted(calls: list, outcomes: dict):
             "complete_pairs": pairs,
             "forfeits": 0,
             "bootstrap_interval": [-0.05, 0.25],
+            **({"sequential": sequential} if sequential else {}),
         }
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(report).encode())
 
@@ -87,19 +99,25 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
                 "endpoints": {"epoch2": "latest@2", "epoch4": "latest", "best": "best"},
             }
         ],
+        "network": "net.nnue",
         "matches": [
             {"tag": "m50", "candidate": "arm:epoch4", "reference": "arm:epoch2", "move_ms": 50, "pairs": 3, "seed": 1},
             {"tag": "m100", "candidate": "arm:epoch4", "reference": "arm:best", "move_ms": 100, "pairs": 2, "seed": 2},
+            {"tag": "q", "candidate": "patch.exe", "reference": "arm:best", "move_ms": 50, "sprt": True, "seed": 3},
         ],
         "rules": [
             {"name": "gain", "type": "lower_bound_above", "threshold": 0.5, "matches": ["m50", "m100"]},
             {"name": "bar", "type": "score_at_least", "threshold": 0.6, "matches": ["m50"]},
+            {"name": "patch", "type": "sprt_accept", "matches": ["q"]},
         ],
     }
+    (root / "net.nnue").write_bytes(b"weights")
+    (root / "patch.exe").write_bytes(b"search build")
     file = directory / "experiment.json"
     file.write_text(json.dumps(spec), encoding="utf-8")
     calls: list = []
-    monkeypatch.setattr(experiment.subprocess, "run", scripted(calls, {"m50": (4, 1, 1), "m100": (1, 2, 1)}))
+    outcomes = {"m50": (4, 1, 1), "m100": (1, 2, 1), "q": ([10, 30, 60, 40, 20], "accept")}
+    monkeypatch.setattr(experiment.subprocess, "run", scripted(calls, outcomes))
     monkeypatch.setattr(experiment, "pin", lambda mask: None)
     monkeypatch.setattr(sys, "argv", ["nnue.experiment"])
     assert experiment.main(["run", str(file)]) == 0
@@ -125,6 +143,15 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     rules = {r["name"]: r for r in verdict["rules"]}
     assert rules["gain"]["complete"] and rules["gain"]["met"] is False
     assert rules["bar"]["met"] is True
+    assert rules["patch"]["complete"] and rules["patch"]["met"] is True
+    assert by_tag["q"]["stop_reason"] == "accept" and by_tag["q"]["pairs"] == 160 and by_tag["q"]["valid"]
+    sprt = next(c for c in calls if "--sprt" in c)
+    assert "--pairs" not in sprt and "--records" not in sprt and "--resume" not in sprt
+    assert sprt[sprt.index("--candidate") + 1].startswith("rpsi:") and sprt[sprt.index("--candidate") + 1].endswith(
+        "net.nnue"
+    )
+    assert sprt[sprt.index("--candidate-network") + 1].endswith("net.nnue")
+    assert sprt[sprt.index("--reference") + 1].startswith("nnue:") and "--reference-network" not in sprt
     assert verdict["arms"][0]["endpoints"]["best"]["sha256"]
     assert not experiment.lock_path().exists()
 
@@ -132,6 +159,14 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     calls.clear()
     assert experiment.main(["run", str(file)]) == 0
     assert calls == []
+
+    # A sequential test that has not stopped is resumed from its journal.
+    report = directory / "q.json"
+    unfinished = json.loads(report.read_text(encoding="utf-8"))
+    unfinished["sequential"]["stop_reason"] = "running"
+    report.write_text(json.dumps(unfinished), encoding="utf-8")
+    assert experiment.main(["run", str(file), "--only", "match"]) == 0
+    assert len(calls) == 1 and "--resume" in calls[0]
 
 
 def test_lock_refuses_a_second_owner_and_a_wrong_release(workspace):
