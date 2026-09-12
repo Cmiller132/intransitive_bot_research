@@ -905,6 +905,14 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
     return out
 
 
+def visible_devices(experiment: dict) -> str:
+    """The GPU the trainers may see unless the environment says otherwise: none,
+    or device 0 when an arm's config names cuda (the trainer itself hides CUDA
+    by default, so a preregistered cuda arm must be given it here)."""
+    devices = [str(arm.get("train", {}).get("config", {}).get("device", "cpu")) for arm in experiment.get("arms", [])]
+    return "0" if any(device.startswith("cuda") for device in devices) else "-1"
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[0] == "lock":
         if argv[1] == "status":
@@ -937,9 +945,7 @@ def main(argv: list[str]) -> int:
     for path in fixed_inputs(experiment):
         verify(experiment, path)
     nice(experiment.get("affinity", "16-31"))
-    devices = [str(arm.get("train", {}).get("config", {}).get("device", "cpu")) for arm in experiment.get("arms", [])]
-    if not any(device.startswith("cuda") for device in devices):
-        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", visible_devices(experiment))
     lock_acquire("experiment", f"{experiment['name']} ({only or 'all'})", experiment.get("affinity", "16-31"))
     try:
         if only in (None, "train"):

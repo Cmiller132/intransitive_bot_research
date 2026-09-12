@@ -364,6 +364,12 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
         experiment.main(["run", str(file), "--only", "match"])
 
 
+def test_a_cuda_arm_is_given_the_gpu_and_a_cpu_run_is_not():
+    cpu = {"arms": [{"run": "a", "train": {"config": {"device": "cpu"}}}, {"run": "b"}]}
+    assert experiment.visible_devices(cpu) == "-1" and experiment.visible_devices({}) == "-1"
+    assert experiment.visible_devices({"arms": [{"run": "a", "train": {"config": {"device": "cuda"}}}]}) == "0"
+
+
 def test_manifest_validation(workspace):
     spec = manifest(workspace)
     experiment.validate(spec)
