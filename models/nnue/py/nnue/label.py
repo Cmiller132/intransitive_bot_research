@@ -33,8 +33,7 @@ import numpy as np
 
 from . import data
 from .games import parse_action
-from .gauntlet import bot_binary
-from .paths import data_dir, workspace_root
+from .paths import bot_binary, data_dir, workspace_root
 
 SITE_CLOCK = 200
 

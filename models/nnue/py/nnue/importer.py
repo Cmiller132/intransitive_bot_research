@@ -1,8 +1,8 @@
 """Datasets from other producers (DESIGN items 19 and 20): the replay windows
-of a self-play run (`conv` schema 2 today) and the prototype's arrays.
+of a self-play run (`conv` schema 2 today), the site's human games and the
+searched roots of `bot selfplay`.
 
     python -m nnue.importer conv --run runs/conv_g128 --out <set> [--iterations 13-25] [--children 16]
-    python -m nnue.importer prototype --root runs/nnue_data/prototype --out-prefix proto
     python -m nnue.importer human --file <games_export.txt> --out <set>
 
 A conv window holds, per row, the position, the played action's lambda return
@@ -283,61 +283,6 @@ def import_conv(run: Path, out: str, iterations: tuple[int, int] | None, cap: in
     return target
 
 
-def import_prototype(root: Path, prefix: str) -> list[Path]:
-    """The prototype's three arrays sets as datasets: the averaged replay
-    (kind 5, the source-rule domain at its recorded clock) and the two
-    searched sets (kind 3, site rules) with their own splits."""
-    written = []
-    sets = [
-        ("prepared", data.SOURCE_PROTOTYPE_REPLAY, data.KIND_AVERAGED, None),
-        ("searched_v2", data.SOURCE_PROTOTYPE_SEARCHED, data.KIND_TEACHER, 200),
-        ("searched_v3_partial", data.SOURCE_PROTOTYPE_SEARCHED, data.KIND_TEACHER, 200),
-    ]
-    for name, source, kind, clock in sets:
-        src = root / name
-        if not src.is_dir():
-            continue
-        board = np.load(src / "board.npy").astype(np.uint8)
-        n = len(board)
-        meta = json.loads((src / "metadata.json").read_text(encoding="utf-8"))
-        psc = np.load(src / "psc.npy")
-        if clock is None:
-            clocks = [w["capture_clock"] for w in meta.get("windows", [])]
-            clock = int(round(float(np.mean(clocks)))) if clocks else 68
-        since = np.minimum(np.rint(psc).astype(np.int64), clock - 1)
-        ply = np.load(src / "ply.npy") if (src / "ply.npy").is_file() else np.zeros(n)
-        rows = {
-            "board": board,
-            "since_capture": since,
-            "ply": np.rint(ply).astype(np.int64),
-            "capture_clock": np.full(n, clock),
-            "target": np.clip(np.load(src / "target.npy"), -1, 1).astype(np.float32),
-            "weight": np.load(src / "weight.npy").astype(np.float32),
-            "kind": np.full(n, kind, dtype=np.uint8),
-            "outcome": np.zeros(n, dtype=np.int8),
-            "outcome_ok": np.zeros(n, dtype=bool),
-            "source": np.full(n, source, dtype=np.uint8),
-            "game": np.load(src / "family.npy").astype(np.int64) if (src / "family.npy").is_file() else np.arange(n),
-            "orbit": np.load(src / "orbit_hash.npy").astype(np.uint64),
-            "split": np.load(src / "split.npy").astype(np.uint8),
-        }
-        if (src / "result_mask.npy").is_file():
-            rows["outcome_ok"] = np.load(src / "result_mask.npy").astype(bool)
-            rows["outcome"] = np.rint(np.load(src / "result.npy")).astype(np.int8) * rows["outcome_ok"]
-        provenance = {
-            "producer": "prototype",
-            "source_directory": str(src.resolve()),
-            "metadata": meta,
-            "clock": clock,
-            "note": "replay counters are weighted means over contexts (kind 5)" if kind == data.KIND_AVERAGED else None,
-        }
-        target = data_dir(f"{prefix}_{name}")
-        data.write(target, rows, provenance)
-        written.append(target)
-        print(json.dumps({"event": "written", "dataset": str(target), "rows": n}))
-    return written
-
-
 def import_human(file: Path, out: str, seed: int) -> Path:
     """Every played root of the finished games in the site's export."""
     raw = file.read_bytes()
@@ -538,9 +483,6 @@ def main(argv: list[str] | None = None) -> None:
     conv.add_argument("--iterations", help="first-last, inclusive")
     conv.add_argument("--children", type=int, default=16, help="candidates per root at most, best Q first")
     conv.add_argument("--seed", type=int, default=20260909)
-    proto = sub.add_parser("prototype", help="import the prototype's array sets")
-    proto.add_argument("--root", type=Path, required=True)
-    proto.add_argument("--out-prefix", default="proto")
     human = sub.add_parser("human", help="import the site's export of human games")
     human.add_argument("--file", type=Path, required=True)
     human.add_argument("--out", required=True, help="dataset name under runs/nnue_data")
@@ -556,10 +498,8 @@ def main(argv: list[str] | None = None) -> None:
         import_conv(args.run, args.out, span, args.children, args.seed)
     elif args.command == "human":
         import_human(args.file, args.out, args.seed)
-    elif args.command == "selfplay":
-        import_selfplay(args.records, args.out, args.min_ply, args.seed)
     else:
-        import_prototype(args.root, args.out_prefix)
+        import_selfplay(args.records, args.out, args.min_ply, args.seed)
 
 
 if __name__ == "__main__":

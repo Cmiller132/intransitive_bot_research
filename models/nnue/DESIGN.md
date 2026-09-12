@@ -19,8 +19,8 @@ unchanged, everything around them is rebuilt.
 
 1. Package: the workspace crate `nnue` (evaluator, alpha-beta search,
    `NnuePlayer: match::Player`) and the Python package `nnue` (features,
-   network, quantisation-aware training, export, dataset import, student
-   collection, teacher labelling, training). Rules and exact tactics come
+   network, quantisation-aware training, export, dataset import, teacher
+   labelling, training, the experiment runner). Rules and exact tactics come
    only from `engine`; the crate keeps no second implementation of moves,
    apply or terminal checks. `nnue:<path.nnue>` builds the player in the
    `bot` CLI. No native Python extension: features are NumPy over the same

@@ -8,8 +8,7 @@ principal-variation search (partial-root selection, cached static
 evaluation, history-aware reductions, reverse and late quiet futility)
 that visits millions of positions per second. DESIGN.md holds the numbered design items. The line
 continues the prototype in the read-only workspace D:/Research/NNUE (its
-release network is the migration control, converted once by
-`nnue.export.convert_v3`).
+release network was the migration control, DESIGN item 4).
 
 The two halves share only the feature definition and the file format:
 
@@ -68,8 +67,6 @@ The two halves share only the feature definition and the file format:
 - `bot analyse --engine nnue:<file>`: the analyser interface (static
   evaluation as the head, child static values as Q, a `sims` x 2,500-node
   search); `nnue.label --engine nnue:<file>` rescores positions with it.
-- `bot play ... --leaves <path>` writes every position the search evaluated
-  as JSON lines (the student-collection input of DESIGN item 21).
 
 ## Python interface
 
@@ -78,24 +75,19 @@ The two halves share only the feature definition and the file format:
 
 ```
 python -m nnue.importer conv --run runs/<run> --out <set> [--iterations A-B] [--children 8]
-python -m nnue.importer prototype --root runs/nnue_data/prototype
 python -m nnue.importer human --file runs/nnue_data/human/games_export.txt --out human_games
 python -m nnue.importer selfplay --records runs/nnue_selfplay/<generation> [--records ...] --out <set> [--min-ply 16]
 python -m nnue.data encode <set> [<set> ...]
 python -m nnue.train --run <name> --data <set>:<share> [--data <set>:<share> ...] [--init <file.nnue>] [--<field> value ...]
 python -m nnue.train --run <name> --data ... --resume runs/<name>/latest.pt
-python -m nnue.collect --round <name> --student <a.nnue> [--previous <b.nnue> | --opponent <spec> --move-ms N] [--families 64] [--states 10000] [--random-moves K]
 python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx | nnue:<file>] [--sims 256] [--workers 8] [--rows N] [--quiet-best]
 python -m nnue.gpu_label --input <set> --out <set> [--input <set> --out <set> ...] --ckpt runs/conv_g128/ckpt_000150.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N] [--reuse-nodes K] [--repetition-draw false]
-python -m nnue.gauntlet --name <name> --candidate <a.nnue> --incumbent <b.nnue> [--stage screen|accept|confirm|all] [--sims N] [--incumbent-bin <bot.exe>]
+python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json [--only train|match]
+python -m nnue.experiment verdict runs/nnue_gauntlets/<name>/experiment.json
 ```
 
-The data loop is import, train, collect, label, train again: `nnue.collect`
-plays the student through `bot play` (two seats per seeded opening family at
-2.5k, 7.5k and 20k nodes, leaves traced on the cheapest games; or against
-any player spec such as the teacher under a wall clock) and samples
-roots, leaves, alternatives at value drops and targeted positions into a raw
-set; `nnue.label` gives every row an exact proof from the engine or the
+The data loop is generate (self-play, below), import, train, label, train
+again: `nnue.label` gives every row an exact proof from the engine or the
 teacher's root value from `bot analyse`, and `nnue.gpu_label` does the same
 in bulk when the GPU is free, through conv's or sq's batched search from a
 training checkpoint (`--teacher`; about 250 positions per second at 128
@@ -106,13 +98,14 @@ are computed on the CPU while the GPU searches; the teacher's search scores a
 repetition along its own path as a draw when the checkpoint says so, which the
 provenance records and `--repetition-draw false` turns off to match the site's
 rules; it is not part of the test
-suite); `nnue.gauntlet` plays a candidate
-against the incumbent in three predeclared stages through `bot eval
---move-ms`, or under a fixed node budget (`--sims`) for evaluator-only
-changes, seating a different build of `bot` through `rpsi:` when a search
-change is under test. All three run the release `bot`, or the frozen copy
-named by `NNUE_BOT`, so a long match never holds the file the next build
-replaces.
+suite). `nnue.experiment run <experiment.json>` runs one preregistered
+experiment (schema 2, see the module's docstring): it trains the arms with
+retained checkpoints, exports their endpoints, plays the matches through
+the preregistered frozen `bot` (fixed pair counts with the eval tool's
+bootstrap interval, or the sequential test `bot eval --sprt`; search builds
+seated through `rpsi:` on a shared network) and writes `verdict.json` under
+the declared rules, one heavy phase at a time under the compute lock.
+`nnue.label` runs the release `bot` or the frozen copy named by `NNUE_BOT`.
 
 A dataset is `runs/nnue_data/<set>/`: columnar NumPy arrays (board,
 since_capture, ply, capture_clock, target, weight, kind, outcome,
@@ -139,8 +132,8 @@ config field is a flag (`--batch 2048`, `--loss bce`, `--buckets 4`,
 default 8 turns a format 6 `--init` into the factorised format 8 network,
 which evaluates identically at first (item 38),
 `--clock false` for the clock-row ablation, `--quiet true` to train only on
-rows where the mover has no capture). Games and verdicts go to
-`runs/nnue_collect/<round>/` and `runs/nnue_gauntlets/<name>/`.
+rows where the mover has no capture). Experiments and their verdicts go to
+`runs/nnue_gauntlets/<name>/`.
 
 `nnue.export` writes and reads formats 6 and 8 (`export`, `read`, `load`),
 evaluates a file with NumPy alone (`integer_eval`) and converts a format 6
@@ -193,13 +186,10 @@ scratch (DESIGN items 26-31):
 ```
 python -m nnue.importer conv --run runs/conv_g128 --out conv_<from>_<to> ...
 python -m nnue.gpu_label --input human_games --out human_gpu<n> --ckpt runs/conv_g128/ckpt_<n>.pt   # GPU free
-python -m nnue.collect --round student_<k> --student <incumbent.nnue> --previous <parent.nnue> --workers 8
-python -m nnue.label --input student_<k> --out student_<k>_self --engine nnue:<incumbent.nnue> --sims 40 --workers 8
 python -m nnue.label --input <pool> --rows 20000 --select <pool_shallow> --sims 400 --out <pool>_selected_1m --engine nnue:<incumbent.nnue>   # the rows a 1-sim pass misjudges most (plan item D)
 python -m nnue.data encode <every new set>
 python -m nnue.train --run <name> --init <incumbent.nnue> --device cuda --batch 8192 --steps_per_epoch 1000 --epochs 20 --lr 0.0003 --data ...
-python -m nnue.gauntlet --name <name>_sims8 --candidate runs/<name>/best.nnue --incumbent <incumbent.nnue> --stage all --sims 8
-python -m nnue.gauntlet --name <name>_timed --candidate ... --incumbent ... --stage accept      # NNUE_BOT=<deployed search build>
+python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json     # arms, endpoints, matches, verdict
 sh arena/upload.sh http://<arena> nnue_1 rpsi:./run.sh --replace <seat.tar.gz>; ssh <arena> systemctl restart arena
 ```
 
@@ -213,5 +203,5 @@ the contexts and the perspective exchange, the symmetry tables, export
 parity with the fake-quantised forward, the sizes of the contract, the
 format 6 to 8 conversion, the format 8 fixtures, the importer on
 synthetic windows through the engine, a tiny training run with exact
-resume, the collector and the labeller on a scripted `bot`). `cargo xtask
-check` runs them on the CPU.
+resume, the labeller and the experiment runner on a scripted `bot`). `cargo
+xtask check` runs them on the CPU.
