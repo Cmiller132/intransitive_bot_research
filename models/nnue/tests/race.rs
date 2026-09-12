@@ -185,7 +185,7 @@ fn zero_race_rows_preserve_format6_evaluations() {
 }
 
 #[test]
-fn deferred_search_matches_eager_snapshot_at_twenty_thousand_nodes() {
+fn deferred_search_matches_refresh_snapshot_at_twenty_thousand_nodes() {
     let mut bytes = random_file(512, 1004, 1);
     let random = random_file(512, 1022, 1);
     let at = 36 + 2 * 512 * 1005;
@@ -193,7 +193,7 @@ fn deferred_search_matches_eager_snapshot_at_twenty_thousand_nodes() {
     bytes[12..16].copy_from_slice(&1022u32.to_le_bytes());
     bytes.splice(at..at, random[at..at + 18 * 512 * 2].iter().copied());
     let model = Model::from_bytes(&bytes).unwrap();
-    // Positions and full search outputs from the eager format-7 binary.
+    // Full-refresh oracle for the current search on 100 site-clock positions.
     let fixture: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("fixtures/race_search.json")).unwrap();
     assert_eq!(fixture.len(), 100);

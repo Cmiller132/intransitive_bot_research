@@ -3,8 +3,9 @@
 A CPU engine: a sparse, incrementally updated integer network (two
 perspectives sharing a table of int16 rows over 1,004 features, 512 wide by
 default and any multiple of 32) scores positions inside a
-principal-variation search (partial-root selection, cached static
-evaluation, history-aware reductions, reverse and late quiet futility)
+principal-variation search (partial-root selection, horizon-matched quiescence
+TT bounds, cached static evaluation, history-aware reductions, reverse and
+late quiet futility)
 that visits millions of positions per second. DESIGN.md holds the numbered design items. The line
 continues the prototype in the read-only workspace D:/Research/NNUE (its
 release network is the migration control, converted once by

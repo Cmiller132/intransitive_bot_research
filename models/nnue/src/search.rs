@@ -18,6 +18,9 @@ pub const INF: i32 = 32_000;
 pub const MAX_PLY: usize = 120;
 const NO_MOVE: u16 = u16::MAX;
 
+#[cfg(test)]
+mod qtt_tests;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub time: Duration,
@@ -140,18 +143,18 @@ impl Table {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Table);
         let replace = |slot: &mut Entry, shared: bool| {
-            if shared
-                && slot.key == entry.key
+            if slot.key == entry.key
                 && slot.generation == entry.generation
-                && slot.depth > entry.depth
+                && slot.depth.max(0) > entry.depth.max(0)
                 && slot.bound != 0
+                && (shared || entry.depth < 0)
             {
                 return;
             }
             if slot.bound == 0
                 || slot.key == entry.key
                 || slot.generation != entry.generation
-                || entry.depth >= slot.depth - 2
+                || entry.depth.max(0) >= slot.depth.max(0) - 2
             {
                 *slot = entry;
             }
@@ -888,16 +891,31 @@ impl Searcher {
             return self.frontier(model, state, ply);
         }
         let threatened = enemy_goal_threat(&state.board);
+        let alpha_orig = alpha;
+        let key = position_key(self.hashes[ply][0], state.since_capture);
+        let depth = quiescence_depth(ply, remaining);
+        let entry = self.tt.get(key);
+        let matched = entry.key == key && entry.bound != 0;
+        if matched && entry.depth == depth {
+            let score = from_tt(entry.score, ply);
+            if entry.bound == 1
+                || (entry.bound == 2 && score >= beta)
+                || (entry.bound == 3 && score <= alpha)
+            {
+                return score;
+            }
+        }
         let stand = self.static_eval(model, state, ply);
+        if self.stopped {
+            return 0;
+        }
         let mut best = if threatened { -INF } else { stand };
         if !threatened {
-            if stand >= beta {
+            if stand >= beta || remaining <= 0 {
+                self.store_quiescence(key, depth, ply, stand, stand, NO_MOVE, alpha_orig, beta);
                 return stand;
             }
             alpha = alpha.max(stand);
-            if remaining <= 0 {
-                return stand;
-            }
         }
         let mut all = std::mem::take(&mut self.move_buffers[ply]);
         all.clear();
@@ -916,7 +934,13 @@ impl Searcher {
                         || (state.board[80].is_enemy()
                             && engine::tactics::can_capture(state.board[from], state.board[80]))))
         });
-        self.order(state, &mut all, NO_MOVE, ply);
+        self.order(
+            state,
+            &mut all,
+            if matched { entry.action } else { NO_MOVE },
+            ply,
+        );
+        let mut best_action = NO_MOVE;
         for &action in &all {
             let (child, terminal) = apply_position(state, action);
             let score = if terminal != Outcome::Ongoing {
@@ -932,15 +956,48 @@ impl Searcher {
                 self.move_buffers[ply] = all;
                 return 0;
             }
-            best = best.max(score);
+            if score > best {
+                best = score;
+                best_action = action;
+            }
             alpha = alpha.max(score);
             if alpha >= beta {
-                self.move_buffers[ply] = all;
-                return best;
+                break;
             }
         }
         self.move_buffers[ply] = all;
+        self.store_quiescence(key, depth, ply, best, stand, best_action, alpha_orig, beta);
         best
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn store_quiescence(
+        &mut self,
+        key: u64,
+        depth: i16,
+        ply: usize,
+        score: i32,
+        stand: i32,
+        action: u16,
+        alpha: i32,
+        beta: i32,
+    ) {
+        self.tt.store(Entry {
+            key,
+            depth,
+            score: to_tt(score, ply),
+            static_eval: stand,
+            static_valid: true,
+            action,
+            bound: if score >= beta {
+                2
+            } else if score <= alpha {
+                3
+            } else {
+                1
+            },
+            generation: self.generation,
+        });
     }
 
     // At the recursion safety limit, still prove immediate wins and forced losses;
@@ -1114,6 +1171,12 @@ impl Searcher {
 
 fn history_update(value: &mut i32, bonus: i32) {
     *value += bonus - *value * bonus.abs() / 16384;
+}
+
+/// Negative TT tags identify both the tactical horizon and the safety frontier.
+fn quiescence_depth(ply: usize, remaining: i32) -> i16 {
+    debug_assert!(ply < MAX_PLY && (-(MAX_PLY as i32)..=6).contains(&remaining));
+    -1 - ((6 - remaining) * (MAX_PLY as i32 + 1) + ply as i32) as i16
 }
 #[inline]
 fn to_tt(score: i32, ply: usize) -> i32 {

@@ -102,6 +102,22 @@ unchanged, everything around them is rebuilt.
     quiescence over captures and goal approaches with goal-threat evasions,
     and lazy SMP over a shared table (four threads at the site). Iteration
     stops when 72 % of the budget is spent.
+
+    Quiescence TT probe/store uses the existing board/capture-clock key and
+    table. Negative depth tags match the exact tactical budget and root ply
+    (the safety frontier); positive depths remain full-search bounds. Quiet
+    goal approaches require budget >=5, while goal evasions extend beyond
+    zero, so different horizons cannot share cutoffs. Stop, immediate wins
+    and the frontier precede probing; interrupted ancestors never store a
+    bound. Fail-soft bounds use the original window and normalised mate
+    distance. Hash moves only order the existing legal tactical subset.
+    Current-generation full-search entries survive quiescence stores; all
+    negative tags have equal replacement priority. No entry-size increase.
+    Unit tests cover bounds, horizons, clocks, evasions, interruption,
+    replacement and fixed-node signatures on the dense/race fixture nets.
+    Strength remains unmeasured; runs/nnue_gauntlets/c2_qtt/experiment.json
+    preregisters the 50-ms paired sequential test after the A1 compute lock
+    is released and the frozen-build/runner gates pass.
 12. Exact tactics from `engine::tactics`: wins at once and loses in two in
     every move loop, wins in three at the root; mate scores are separate
     from evaluation scores and a win precedes a clock draw; quiescence never
