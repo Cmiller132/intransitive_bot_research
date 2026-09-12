@@ -266,15 +266,17 @@ def endpoint_file(run: str, name: str) -> Path:
 
 def endpoint_problem(arm: dict, name: str) -> str | None:
     """Why an existing endpoint file cannot stand for this arm (None when it
-    can): its sidecar must hash the file and carry the arm's config, data
-    shares, dataset hashes, init hash and the checkpoint epoch its source
-    names. An endpoint without that binding is refused; there is no fallback."""
+    can): its sidecar must hash the file and carry the checkpoint epoch its
+    source names and, for an arm the runner trains, the arm's config, data
+    shares, dataset hashes and init hash. An endpoint without that binding is
+    refused; there is no fallback."""
     file = endpoint_file(arm["run"], name)
     sidecar = file.with_suffix(".nnue.json")
     if not sidecar.is_file():
         return "no sidecar"
     info = json.loads(sidecar.read_text(encoding="utf-8"))
-    for key in ("sha256", "epoch", "config", "data", "datasets", "init_sha256"):
+    bound = ("data", "datasets", "init_sha256") if "train" in arm else ()  # an existing run has no spec to bind to
+    for key in ("sha256", "epoch", "config", *bound):
         if key not in info:
             return f"the sidecar lacks {key}"
     if info["sha256"] != sha256(file):

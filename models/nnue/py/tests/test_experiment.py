@@ -590,6 +590,12 @@ def test_endpoint_reuse_is_validated_against_the_arm(workspace):
     assert experiment.endpoint_problem(arm, "epoch2") == "the file differs from its sidecar's hash"
     sidecar.write_text(json.dumps({k: v for k, v in good.items() if k != "data"}), encoding="utf-8")
     assert experiment.endpoint_problem(arm, "epoch2") == "the sidecar lacks data"
+    # An arm that names an existing run binds to nothing but the file, its epoch and its config.
+    file.write_bytes(b"weights")
+    existing = {"run": "arm2", "endpoints": {"epoch2": "latest@2"}}
+    assert experiment.endpoint_problem(existing, "epoch2") is None
+    sidecar.write_text(json.dumps({k: v for k, v in good.items() if k != "epoch"}), encoding="utf-8")
+    assert experiment.endpoint_problem(existing, "epoch2") == "the sidecar lacks epoch"
 
 
 def test_the_verdict_never_replays_a_missing_or_truncated_journal(workspace, monkeypatch):
