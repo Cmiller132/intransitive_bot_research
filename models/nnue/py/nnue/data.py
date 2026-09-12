@@ -42,12 +42,13 @@ SOURCE_CONV, SOURCE_PROTOTYPE_REPLAY, SOURCE_PROTOTYPE_SEARCHED, SOURCE_STUDENT,
 SOURCE_SELFPLAY = 6  # searched roots of `bot selfplay` games (nnue.importer selfplay)
 
 
-IDS_FILE = "ids.npy"  # optional cache: the feature ids of every row, (N, 2, SLOTS) int16
+IDS_FILE = "ids8.npy"  # optional cache: the format-8 feature ids of every row, (N, 2, SLOTS) int16
 
 
 def encode_ids(directory: Path, chunk: int = 1 << 18) -> Path:
     """Write the feature-id cache of a dataset (`python -m nnue.data encode <set>`):
-    the trainer then gathers ids instead of encoding boards per batch."""
+    the trainer then gathers ids instead of encoding boards per batch. The cache
+    of an earlier layout (`ids.npy`) is deleted."""
     from .features import SLOTS, feature_ids
 
     directory = Path(directory)
@@ -65,6 +66,7 @@ def encode_ids(directory: Path, chunk: int = 1 << 18) -> Path:
     ids.flush()
     del ids
     tmp.replace(directory / IDS_FILE)
+    (directory / "ids.npy").unlink(missing_ok=True)
     return directory / IDS_FILE
 
 
@@ -128,11 +130,9 @@ class Dataset:
             from .features import SLOTS
 
             ids = np.load(directory / IDS_FILE, mmap_mode="r")
-            if ids.shape[1:] == (2, SLOTS):
-                rows["ids"] = ids
-            else:
-                # A cache from an older feature layout: the trainer encodes boards instead.
-                print(json.dumps({"event": "stale_ids", "dataset": str(directory), "slots": int(ids.shape[-1])}))
+            if ids.shape != (len(rows["board"]), 2, SLOTS):
+                raise ValueError(f"{directory / IDS_FILE} is not the (N, 2, {SLOTS}) cache of this dataset")
+            rows["ids"] = ids
         provenance = json.loads((directory / "provenance.json").read_text(encoding="utf-8"))
         keep = rows["split"] == split
         if kinds is not None:

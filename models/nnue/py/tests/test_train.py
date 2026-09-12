@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from nnue import data, export, paths
-from nnue.features import ELAPSED_BASE, FEATURES, FORMAT6_FEATURES, PAD, feature_ids, orbit_hash, piece_bucket
+from nnue.features import FORMAT8, feature_ids, orbit_hash, piece_bucket
 from nnue.model import NNUE
 from nnue.train import Config, initial_model, train
 
@@ -100,28 +100,24 @@ def test_loss_variants_and_bucketed_start(sets):
     assert export.read(wide / "best.nnue")["buckets"] == 4
 
 
-def test_race_rows_train_only_with_the_flag_and_old_checkpoints_load(sets, tmp_path):
-    out = train("six", sets, tiny(epochs=1))
-    assert export.read(out / "best.nnue")["features"] == FORMAT6_FEATURES
-    seven = train("seven", sets, tiny(init=str(out / "best.nnue"), race=True, epochs=1, lr=3e-2))
-    net = export.read(seven / "best.nnue")
-    assert net["features"] == FEATURES and net["weights"][FORMAT6_FEATURES:].any()
+def test_format8_from_a_format6_init_trains_the_context_rows(sets, tmp_path):
+    out = train("six", sets, tiny(epochs=1, version=6))
+    assert export.read(out / "best.nnue")["version"] == 6
+    eight = train("eight", sets, tiny(init=str(out / "best.nnue"), epochs=1, lr=3e-2))
+    net = export.read(eight / "best.nnue")
+    rows = net["weights"][: FORMAT8.attack_base].reshape(27, 486, 32)
+    assert net["version"] == 8 and (rows != rows[0]).any()
     with pytest.raises(ValueError):
-        initial_model(tiny(init=str(seven / "best.nnue")))
-    # A checkpoint from before the race rows has a 1,005-row table.
-    state = torch.load(out / "latest.pt", map_location="cpu", weights_only=False)["model"]
-    old = {**state, "embedding.weight": state["embedding.weight"][: FORMAT6_FEATURES + 1].clone()}
-    torch.save({"model": old}, tmp_path / "old.pt")
-    model = initial_model(tiny(init=str(tmp_path / "old.pt"), race=True))
-    assert model.features == FEATURES
-    assert torch.equal(model.embedding.weight[:FORMAT6_FEATURES], state["embedding.weight"][:FORMAT6_FEATURES])
-    assert not model.embedding.weight[FORMAT6_FEATURES:].any()
+        initial_model(tiny(init=str(eight / "best.nnue"), version=6))
+    # A checkpoint of the other format does not load: the parameters differ.
+    with pytest.raises(RuntimeError):
+        initial_model(tiny(init=str(out / "latest.pt")))
 
 
 def test_clock_ablation_leaves_the_clock_rows_zero_and_inert(sets):
     out = train("noclock", sets, tiny(clock=False))
     weights = export.read(out / "best.nnue")["weights"]
-    assert not weights[ELAPSED_BASE:PAD].any() and weights[:ELAPSED_BASE].any()
+    assert not weights[FORMAT8.elapsed_base :].any() and weights[: FORMAT8.elapsed_base].any()
     board = np.frombuffer(engine.initial_board(), dtype=np.uint8)[None]
     early = export.integer_eval(out / "best.nnue", board, np.array([0]), np.array([200]))
     late = export.integer_eval(out / "best.nnue", board, np.array([150]), np.array([200]))
@@ -137,9 +133,9 @@ def test_id_cache_reproduces_the_encoder(sets, tmp_path):
     cached = Dataset.open(directory, data.TRAIN)
     assert "ids" in cached.rows
     rows = cached.all(64)
-    with_cache, _ = encode(rows)
+    with_cache, _ = encode(rows, FORMAT8)
     del rows["ids"]
-    fresh, _ = encode(rows)
+    fresh, _ = encode(rows, FORMAT8)
     assert torch.equal(with_cache, fresh)
     out = train("cached", sets, tiny(epochs=1))
     assert (out / "best.nnue").exists()

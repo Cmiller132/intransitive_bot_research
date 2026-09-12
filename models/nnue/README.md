@@ -1,8 +1,9 @@
 # nnue: sparse integer evaluator with alpha-beta search
 
 A CPU engine: a sparse, incrementally updated integer network (two
-perspectives sharing a table of int16 rows over 1,004 features, 512 wide by
-default and any multiple of 32) scores positions inside a
+perspectives sharing a table of int16 rows over 13,640 features in format 8,
+piece-square rows conditioned on the opponent's material, or the incumbent's
+1,004 in format 6; 512 wide by default and any multiple of 32) scores positions inside a
 principal-variation search (partial-root selection, cached static
 evaluation, history-aware reductions, reverse and late quiet futility)
 that visits millions of positions per second. DESIGN.md holds the numbered design items. The line
@@ -12,7 +13,8 @@ release network is the migration control, converted once by
 
 The two halves share only the feature definition and the file format:
 
-- `src/` (Rust crate `nnue`): the format 6 reader, the accumulators and the
+- `src/` (Rust crate `nnue`): the file reader (format 6; format 8 is DESIGN
+  item 38's Rust side), the accumulators and the
   scalar, AVX2 and VNNI kernels, the search, and `NnuePlayer`, which
   implements `match::Player`. `bot` builds it from `nnue:<file.nnue>`.
 - `py/` (Python package `nnue`): features, the trainable network with
@@ -115,10 +117,11 @@ replaces.
 A dataset is `runs/nnue_data/<set>/`: columnar NumPy arrays (board,
 since_capture, ply, capture_clock, target, weight, kind, outcome,
 outcome_ok, source, game, orbit, split), `provenance.json` and, after
-`nnue.data encode`, the feature-id cache `ids.npy` that lets the trainer
-gather ids instead of encoding boards (on the GPU, `--device cuda`, about
-300k rows per second; a batch encodes on the fly when any of its sets lacks
-the cache); `nnue.data`
+`nnue.data encode`, the feature-id cache `ids8.npy` (format-8 ids; a
+format-6 run maps them onto its table) that lets the trainer gather ids
+instead of encoding boards (on the GPU, `--device cuda`, about 300k rows per
+second; a batch encodes on the fly when any of its sets lacks the cache;
+a cache of another shape is rejected); `nnue.data`
 defines the fields and the `Mixture` sampler, `nnue.importer` writes sets
 from conv windows, from the prototype's arrays and from the site's export of
 human games (every played root labelled with the outcome at weight 0.25;
@@ -131,34 +134,30 @@ game outcomes, validation error overall and by stratum under all six
 symmetries for every dataset), `latest.pt`, `best.pt` and
 `best.nnue` with its JSON sidecar (hashes, shape, the run's settings). Every
 config field is a flag (`--batch 2048`, `--loss bce`, `--buckets 4`,
-`--hidden 768` with a 512-wide `--init` widens it by padding (DESIGN item 33),
-`--race true` trains the 18 race rows of format 7 (a format 6 `--init` is
-widened with zero rows and evaluates identically at first, item 35),
+`--hidden 768` with a 512-wide `--init` widens it with seeded new columns
+(DESIGN item 33), `--version 6` trains the incumbent's layout where the
+default 8 turns a format 6 `--init` into the factorised format 8 network,
+which evaluates identically at first (item 38),
 `--clock false` for the clock-row ablation, `--quiet true` to train only on
 rows where the mover has no capture). Games and verdicts go to
 `runs/nnue_collect/<round>/` and `runs/nnue_gauntlets/<name>/`.
 
-`nnue.export` writes and reads formats 6 and 7 (`export`, `read`, `load`),
-evaluates a file with NumPy alone (`integer_eval`) and converts the
-prototype's format 3 (`convert_v3`). Format 7 keeps the 36-byte header with
-version 7 and 1,022 features, adding the race rows 1004..1021 after the clock
-rows; width, heads, scales and payload order are unchanged. The race buckets
-come from the engine's shared query `engine.race_buckets(board) = (m, o)` on
-the actual mover's board (0..7 encode 1..8 of that side's own moves to its
-goal for its fastest runner that passes the piece-type and tempo interception
-filter, 8 means none): the mover perspective activates 1004+m and 1013+o, the
-other perspective 1004+o and 1013+m, so the pair is queried once and swapped,
-never re-queried on the flipped board (that would change whose move it is).
-`nnue.features` always encodes 44 slots per perspective (the two race slots
-last); a format 6 model masks the race ids to padding, so both formats train
-from the same id cache, and caches written with the old 42-slot layout are
-ignored (`nnue.data encode` rewrites them). `NNUE.widen_features()` turns a
-format 6 model into format 7 with zero race rows; the exported file of a
-widened network differs from its source only in the header and the inserted
-zero rows, and the Rust search's outputs on it are identical (checked with
-`bot nnue diagnose`). The query must be in the installed `engine` extension
-(`cargo xtask wheel`; a running process that holds the old `engine.pyd` blocks
-the overwrite, so rename the old file and copy the new one in).
+`nnue.export` writes and reads formats 6 and 8 (`export`, `read`, `load`),
+evaluates a file with NumPy alone (`integer_eval`) and converts a format 6
+file to format 8 (`python -m nnue.export convert <in> <out>`: every
+piece-square row copied into all 27 contexts, identical raw values on every
+position). Format 8 keeps the 36-byte header with version 8 and 13,640
+features: rows `486 c + 81 (code - 1) + square` for the perspective's
+opponent-material context `c = min(r, 2) + 3 min(p, 2) + 9 min(s, 2)`, then
+the 486 attacked-piece rows and the 32 clock rows; width, the single head,
+scales and payload order are unchanged (H512: 14,003,436 bytes). The
+trainer holds the piece rows factorised, a shared 486-row factor plus 27
+zero-started residual tables, and quantises their sum; `NNUE.widen_contexts()`
+is the byte-identical model-side conversion. `nnue.features` encodes 42 slots
+per perspective (20 pieces, 20 attacked pieces, two clock rows) in the
+format 8 layout; `Layout.rows` maps them onto a format 6 table. The exact
+shared contract, with the fixtures the Rust side is checked against
+(`tests/fixtures/format8_*`), is runs/nnue_plan/format8_contract.md.
 
 ## Self-play (the volume loop)
 
@@ -180,8 +179,10 @@ deviation, rows from ply 16, duplicates by board and clock state dropped,
 splits by game and orbit. Measured on eight cores (logical CPUs 16-31 of
 the 7950X, below normal): about 400 games and 100k eligible roots per hour
 at 250k nodes (median completed depth 7), 210k at 100k nodes, 18k at 1M.
-The plan, the record contract and the depth A/B are in
-runs/nnue_plan/selfplay_plan_final.md and astra_status19.md.
+The controlled training study on this data (DESIGN item 37, a null) is in
+runs/nnue_plan/selfplay_plan_final.md; the generator measurements are in
+runs/nnue_plan/astra_status19.md; the step-change programme that followed
+is runs/nnue_plan/step_plan_final.md.
 
 ## Retraining on a stronger teacher
 
@@ -206,9 +207,10 @@ gauntlet win here.
 
 ## Tests
 
-From `py/`: `python -m pytest -q` (the encoder against a slow enumeration and
-the perspective exchange, the symmetry table, export parity with the
-fake-quantised forward and the file size of the contract, the importer on
+From `py/`: `python -m pytest -q` (the encoder against a slow enumeration,
+the contexts and the perspective exchange, the symmetry tables, export
+parity with the fake-quantised forward, the sizes of the contract, the
+format 6 to 8 conversion, the format 8 fixtures, the importer on
 synthetic windows through the engine, a tiny training run with exact
 resume, the collector and the labeller on a scripted `bot`). `cargo xtask
 check` runs them on the CPU.

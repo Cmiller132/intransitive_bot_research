@@ -52,10 +52,8 @@ import psutil
 import torch
 
 from . import export, paths
-from .features import FEATURES, FORMAT6_FEATURES
 from .model import NNUE
 from .paths import run_dir
-from .train import load_state
 
 LOCK = "runs/nnue_plan/compute_lock"
 
@@ -170,8 +168,8 @@ def snapshot(checkpoint: Path, target: Path) -> dict:
     """Export a checkpoint exactly as the trainer would export it at that epoch."""
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
     config = saved["config"]
-    model = NNUE(config["hidden"], config["buckets"], FEATURES if config.get("race") else FORMAT6_FEATURES)
-    load_state(model, saved["model"])
+    model = NNUE(config["hidden"], config["buckets"], config["version"])
+    model.load_state_dict(saved["model"])
     return export.export(
         model, target, {"checkpoint": str(checkpoint), "epoch": saved["epoch"], "step": saved["step"], "config": config}
     )

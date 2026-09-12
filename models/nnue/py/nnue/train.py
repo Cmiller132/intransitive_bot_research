@@ -32,16 +32,7 @@ from torch.nn import functional as F  # noqa: E402
 
 from . import export as export_module  # noqa: E402
 from .data import KIND_RETURN, TRAIN, VALIDATION, Dataset, Mixture  # noqa: E402
-from .features import (  # noqa: E402
-    ELAPSED_BASE,
-    FEATURES,
-    FORMAT6_FEATURES,
-    PAD,
-    RACE_BASE,
-    feature_ids,
-    piece_bucket,
-    symmetry_table,
-)
+from .features import Layout, feature_ids, piece_bucket, symmetry_table  # noqa: E402
 from .model import NNUE  # noqa: E402
 from .paths import data_dir, run_dir  # noqa: E402
 
@@ -63,7 +54,7 @@ class Config:
     outcome_weight: float = 0.0
     symmetry_weight: float = 0.2
     clock: bool = True  # false: the 32 clock rows stay zero and never fire (the ablation of item 5)
-    race: bool = False  # true: the 18 race rows of format 7 train (a format 6 init is widened with zero rows)
+    version: int = 8  # the file format: 8 (27 opponent-material contexts) or 6 (the incumbent's layout)
     quiet: bool = False  # true: train and validate only on rows where the mover has no capture
     threads: int = 4
     device: str = "cpu"  # or cuda when the GPU is free; the file and the checkpoints are device-free
@@ -110,15 +101,17 @@ def value_loss(raw: torch.Tensor, target: torch.Tensor, config: Config) -> torch
     return (raw.tanh() - target).square() + config.raw_weight * F.smooth_l1_loss(raw, logit, reduction="none")
 
 
-def encode(rows: dict[str, np.ndarray], clock: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
-    """Feature ids and output buckets of a batch, from the dataset's id cache
-    when it has one (`python -m nnue.data encode <set>`), else from the boards."""
+def encode(rows: dict[str, np.ndarray], layout: Layout, clock: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+    """Feature ids in `layout` and output buckets of a batch, from the dataset's
+    id cache when it has one (`python -m nnue.data encode <set>`), else from
+    the boards."""
     if "ids" in rows:
         ids = rows["ids"].astype(np.int64)
     else:
         ids = feature_ids(rows["board"], rows["since_capture"], rows["capture_clock"])
+    ids = layout.rows(ids)
     if not clock:
-        ids[(ids >= ELAPSED_BASE) & (ids < RACE_BASE)] = PAD
+        ids[(ids >= layout.elapsed_base) & (ids < layout.pad)] = layout.pad
     # A batch without boards comes from the lean mixture of a one-bucket model, whose head ignores the bucket.
     bucket = piece_bucket(rows["board"]) if "board" in rows else np.zeros(len(ids), dtype=np.int64)
     return torch.from_numpy(ids), torch.from_numpy(bucket)
@@ -131,7 +124,7 @@ def step_loss(
     value losses, an outcome term where the result is known, and the paired
     consistency term."""
     device = table.device
-    ids, bucket = encode(rows, config.clock)
+    ids, bucket = encode(rows, model.layout, config.clock)
     ids, bucket = ids.to(device), bucket.to(device)
     n = len(ids)
     first = torch.randint(6, (n, 1, 1), generator=rng).to(device)
@@ -165,7 +158,7 @@ def evaluate(
     values = []
     for start in range(0, len(rows["board"]), batch):
         part = {k: v[start : start + batch] for k, v in rows.items()}
-        ids, bucket = encode(part, clock)
+        ids, bucket = encode(part, model.layout, clock)
         ids, bucket = ids.to(table.device), bucket.to(table.device)
         views = [model(table[k, ids], bucket, qat=True).tanh() for k in range(6)]
         values.append(torch.stack(views, 1).cpu().numpy())
@@ -217,36 +210,25 @@ def initial_model(config: Config) -> NNUE:
     if config.init.endswith(".nnue"):
         model = export_module.load(Path(config.init))
         if model.hidden < config.hidden:
-            model = model.widen_hidden(config.hidden)
+            model = model.widen_hidden(config.hidden, config.seed)
         elif model.hidden != config.hidden:
             raise ValueError(f"{config.init} has hidden {model.hidden}, config says {config.hidden}")
         if model.buckets == 1 and config.buckets > 1:
             model = model.widen_buckets()
         elif model.buckets != config.buckets:
             raise ValueError(f"{config.init} has {model.buckets} buckets, config says {config.buckets}")
-        if config.race and model.features < FEATURES:
-            model = model.widen_features()
-        elif not config.race and model.features == FEATURES:
-            raise ValueError(f"{config.init} has the race rows, pass --race true")
+        if model.version < config.version:
+            model = model.widen_contexts()
+        elif model.version != config.version:
+            raise ValueError(f"{config.init} is format {model.version}, config says {config.version}")
     else:
-        model = NNUE(config.hidden, config.buckets, FEATURES if config.race else FORMAT6_FEATURES)
+        model = NNUE(config.hidden, config.buckets, config.version)
         if config.init:
-            load_state(model, torch.load(config.init, map_location="cpu", weights_only=False)["model"])
+            model.load_state_dict(torch.load(config.init, map_location="cpu", weights_only=False)["model"])
     if not config.clock:
         with torch.no_grad():
-            model.embedding.weight[ELAPSED_BASE:RACE_BASE].zero_()
+            model.clock.zero_()
     return model
-
-
-def load_state(model: NNUE, state: dict) -> None:
-    """Load a checkpoint's parameters; a checkpoint written before the race
-    rows (a 1,005-row table) fills the first rows and leaves the rest zero."""
-    weight = state["embedding.weight"]
-    if weight.shape[0] < model.embedding.weight.shape[0]:
-        padded = torch.zeros_like(model.embedding.weight)
-        padded[: weight.shape[0] - 1] = weight[:-1]  # the old padding row is dropped
-        state = {**state, "embedding.weight": padded}
-    model.load_state_dict(state)
 
 
 def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
@@ -263,9 +245,9 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
         datasets, config.batch, config.seed, ("target", "weight", "outcome", "outcome_ok") if lean else None
     )
     device = torch.device(config.device)
-    table = torch.from_numpy(symmetry_table()).to(device)
     rng = torch.Generator().manual_seed(config.seed + 1)
     model = initial_model(config).to(device)
+    table = torch.from_numpy(symmetry_table(model.layout)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     total_steps = config.epochs * config.steps_per_epoch
     step, first_epoch, best, stale = 0, 0, float("inf"), 0
