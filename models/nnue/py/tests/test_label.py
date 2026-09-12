@@ -61,16 +61,24 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     rng = np.random.default_rng(2)
     n = 12
     boards = np.stack([np.frombuffer(engine.initial_board(), dtype=np.uint8)] * n)
-    data.write(paths.data_dir("raw"), rows_of(boards, rng), {"producer": "test"})
+    rows = rows_of(boards, rng)
+    data.write(paths.data_dir("raw"), rows, {"producer": "test"})
     seen = []
+    broken = {int(s) for s in rows["since_capture"][:2]}  # two roots fail every time
+    flaky = {int(rows["since_capture"][2])}  # one fails once and succeeds on the retry
 
     def analyse(engine_spec, requests, sims):
         seen.append((engine_spec, sims, len(requests)))
         out = []
         for i, row in enumerate(requests):
             assert len(row["board"]) == 81
+            since = int(row["since_capture"])
+            if since in broken or since in flaky:
+                flaky.discard(since)
+                out.append({"error": "x"})
+                continue
             value = 0.5 if i % 2 else -1.5  # the second is clipped
-            out.append({"search": {"root_value": value, "lines": [{"q": value / 2}]}} if i != 3 else {"error": "x"})
+            out.append({"search": {"root_value": value, "lines": [{"q": value / 2}]}})
         return out
 
     monkeypatch.setattr(label, "analyse", analyse)
@@ -83,12 +91,12 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     assert (np.load(target / "source.npy") == data.SOURCE_STUDENT).all()
     assert (np.load(target / "capture_clock.npy") == 200).all()
     provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["sims"] == 64 and provenance["errors"] == 2
+    assert provenance["sims"] == 64 and provenance["errors"] == 2 and provenance["retries"] == 3
     assert provenance["rows"] == n - 2 and provenance["input"]["rows"] == n
     assert provenance["select"] is None and provenance["engine"]["network_sha256"] is None
     assert provenance["engine"]["binary_sha256"] == paths.sha256(tmp_path / "bot.exe")
     assert provenance["input"]["provenance_sha256"] == paths.sha256(paths.data_dir("raw") / "provenance.json")
-    assert sum(count for _, _, count in seen) == n and all(s == 64 for _, s, _ in seen)
+    assert sum(count for _, _, count in seen) == n + 3 and all(s == 64 for _, s, _ in seen)
 
 
 def test_selection_takes_the_rows_the_shallow_labels_misjudge_most(tmp_path, monkeypatch):

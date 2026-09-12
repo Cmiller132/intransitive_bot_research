@@ -180,33 +180,45 @@ def label(
     target = proofs(rows["board"])
     kind = np.where(target != 0, data.KIND_PROOF, data.KIND_TEACHER).astype(np.uint8)
     open_rows = np.flatnonzero(kind == data.KIND_TEACHER)
-    requests = [
-        {"board": rows["board"][i].tolist(), "since_capture": rows["since_capture"][i], "ply": rows["ply"][i]}
-        for i in open_rows
-    ]
-    chunks = [requests[k::workers] for k in range(workers)]
-    with ThreadPoolExecutor(workers) as pool:
-        answers = list(pool.map(lambda chunk: analyse(engine_spec, chunk, sims) if chunk else [], chunks))
+
+    def search_rows(indices: np.ndarray) -> dict[int, dict]:
+        """`bot analyse` over the rows `indices`, `workers` processes at a time."""
+        requests = [
+            {"board": rows["board"][i].tolist(), "since_capture": rows["since_capture"][i], "ply": rows["ply"][i]}
+            for i in indices
+        ]
+        chunks = [requests[k::workers] for k in range(workers)]
+        with ThreadPoolExecutor(workers) as pool:
+            answers = list(pool.map(lambda chunk: analyse(engine_spec, chunk, sims) if chunk else [], chunks))
+        return {int(indices[k + j * workers]): r for k, chunk in enumerate(answers) for j, r in enumerate(chunk)}
+
+    def failed(response: dict) -> bool:
+        return bool(response.get("error")) or not response.get("search")
+
+    responses = search_rows(open_rows)
+    # A failed root is searched once more under the same budget; no other root ever replaces it.
+    retry = np.array([i for i in open_rows if failed(responses[i])], dtype=np.int64)
+    if len(retry):
+        responses.update(search_rows(retry))
     chosen_q, root_value, errors, dropped = [], [], 0, 0
-    for k, chunk_answers in enumerate(answers):
-        for j, response in enumerate(chunk_answers):
-            i = open_rows[k + j * workers]
-            if response.get("error") or not response.get("search"):
-                errors += 1
-                kind[i] = 255
-                continue
-            search = response["search"]
-            if (
-                quiet_best
-                and search["lines"]
-                and captures(rows["board"][i], rows["since_capture"][i], rows["ply"][i], search["lines"][0]["move"])
-            ):
-                dropped += 1
-                kind[i] = 255
-                continue
-            target[i] = float(np.clip(search["root_value"], -1, 1))
-            root_value.append(search["root_value"])
-            chosen_q.append(search["lines"][0]["q"] if search["lines"] else float("nan"))
+    for i in open_rows:
+        response = responses[i]
+        if failed(response):
+            errors += 1
+            kind[i] = 255
+            continue
+        search = response["search"]
+        if (
+            quiet_best
+            and search["lines"]
+            and captures(rows["board"][i], rows["since_capture"][i], rows["ply"][i], search["lines"][0]["move"])
+        ):
+            dropped += 1
+            kind[i] = 255
+            continue
+        target[i] = float(np.clip(search["root_value"], -1, 1))
+        root_value.append(search["root_value"])
+        chosen_q.append(search["lines"][0]["q"] if search["lines"] else float("nan"))
     if errors and not root_value:
         raise SystemExit(f"every search request failed ({errors} errors); is {engine_spec!r} an analysable engine?")
     keep = kind != 255
@@ -248,6 +260,7 @@ def label(
             if selection
             else None,
             "proofs": int((kind == data.KIND_PROOF).sum()),
+            "retries": int(len(retry)),
             "errors": errors,
             "quiet_best": quiet_best,
             "dropped": dropped,
