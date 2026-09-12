@@ -3,7 +3,6 @@ variants and the bucketed start from a one-head file."""
 
 import csv
 
-import engine
 import numpy as np
 import pytest
 import torch
@@ -93,8 +92,7 @@ def test_resume_rejects_changed_settings(sets):
         train("guard", sets, tiny(lr=1e-3, resume=str(first / "latest.pt")))
 
 
-def test_loss_variants_and_bucketed_start(sets):
-    train("bce", sets, tiny(loss="bce", outcome_weight=0.1))
+def test_bucketed_start_from_a_one_head_file(sets):
     out = train("one", sets, tiny(epochs=1))
     wide = train("four", sets, tiny(buckets=4, init=str(out / "best.nnue"), epochs=1))
     assert export.read(wide / "best.nnue")["buckets"] == 4
@@ -112,16 +110,6 @@ def test_format8_from_a_format6_init_trains_the_context_rows(sets, tmp_path):
     # A checkpoint of the other format does not load: the parameters differ.
     with pytest.raises(RuntimeError):
         initial_model(tiny(init=str(out / "latest.pt")))
-
-
-def test_clock_ablation_leaves_the_clock_rows_zero_and_inert(sets):
-    out = train("noclock", sets, tiny(clock=False))
-    weights = export.read(out / "best.nnue")["weights"]
-    assert not weights[FORMAT8.elapsed_base :].any() and weights[: FORMAT8.elapsed_base].any()
-    board = np.frombuffer(engine.initial_board(), dtype=np.uint8)[None]
-    early = export.integer_eval(out / "best.nnue", board, np.array([0]), np.array([200]))
-    late = export.integer_eval(out / "best.nnue", board, np.array([150]), np.array([200]))
-    assert early == late
 
 
 def test_id_cache_reproduces_the_encoder(sets, tmp_path):

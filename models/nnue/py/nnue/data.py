@@ -97,17 +97,6 @@ def write(directory: Path, rows: dict[str, np.ndarray], provenance: dict) -> Non
     tmp.replace(directory)
 
 
-def mover_can_capture(board: np.ndarray, chunk: int = 1 << 20) -> np.ndarray:
-    """(N,) bool: an enemy piece stands next to an own piece that beats it."""
-    from .features import attacked
-
-    out = np.zeros(len(board), dtype=bool)
-    for start in range(0, len(board), chunk):
-        part = np.asarray(board[start : start + chunk])
-        out[start : start + chunk] = (attacked(part) & (part >= 4)).any(1)
-    return out
-
-
 @dataclass
 class Dataset:
     """One dataset's arrays, memory-mapped, and the row indices of one split."""
@@ -118,12 +107,7 @@ class Dataset:
     index: np.ndarray
 
     @classmethod
-    def open(
-        cls, directory: Path, split: int = TRAIN, kinds: tuple[int, ...] | None = None, quiet: bool = False
-    ) -> Dataset:
-        """`quiet` keeps only rows where the mover has no capture (the
-        positions the search evaluates after quiescence, Stockfish's rule of
-        skipping positions whose best move is a capture)."""
+    def open(cls, directory: Path, split: int = TRAIN, kinds: tuple[int, ...] | None = None) -> Dataset:
         directory = Path(directory)
         rows = {name: np.load(directory / f"{name}.npy", mmap_mode="r") for name in FIELDS}
         if (directory / IDS_FILE).is_file():
@@ -137,8 +121,6 @@ class Dataset:
         keep = rows["split"] == split
         if kinds is not None:
             keep &= np.isin(rows["kind"], kinds)
-        if quiet:
-            keep &= ~mover_can_capture(rows["board"])
         return cls(directory, rows, provenance, np.flatnonzero(keep))
 
     def __len__(self) -> int:

@@ -49,13 +49,9 @@ class Config:
     warmup_steps: int = 200
     lr_floor: float = 0.15  # the cosine schedule ends at this share of lr
     qat_start_epoch: int = 0  # fake quantisation from this epoch on
-    loss: str = "control"  # control: tanh MSE + bounded logit term; bce: soft cross-entropy on 2 raw
-    raw_weight: float = 0.02
-    outcome_weight: float = 0.0
+    raw_weight: float = 0.02  # weight of the bounded logit term beside the tanh mean squared error
     symmetry_weight: float = 0.2
-    clock: bool = True  # false: the 32 clock rows stay zero and never fire (the ablation of item 5)
     version: int = 8  # the file format: 8 (27 opponent-material contexts) or 6 (the incumbent's layout)
-    quiet: bool = False  # true: train and validate only on rows where the mover has no capture
     threads: int = 4
     device: str = "cpu"  # or cuda when the GPU is free; the file and the checkpoints are device-free
     seed: int = 0
@@ -92,16 +88,12 @@ def flag(text: str) -> bool:
 
 
 def value_loss(raw: torch.Tensor, target: torch.Tensor, config: Config) -> torch.Tensor:
-    """Per-row value loss (DESIGN item 9)."""
-    if config.loss == "bce":
-        return F.binary_cross_entropy_with_logits(2 * raw, (target + 1) / 2, reduction="none")
-    if config.loss != "control":
-        raise ValueError(f"unknown loss {config.loss}")
+    """Per-row value loss (DESIGN item 9): tanh mean squared error plus the bounded logit term."""
     logit = torch.atanh(target.clamp(-0.98, 0.98))
     return (raw.tanh() - target).square() + config.raw_weight * F.smooth_l1_loss(raw, logit, reduction="none")
 
 
-def encode(rows: dict[str, np.ndarray], layout: Layout, clock: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+def encode(rows: dict[str, np.ndarray], layout: Layout) -> tuple[torch.Tensor, torch.Tensor]:
     """Feature ids in `layout` and output buckets of a batch, from the dataset's
     id cache when it has one (`python -m nnue.data encode <set>`), else from
     the boards."""
@@ -110,8 +102,6 @@ def encode(rows: dict[str, np.ndarray], layout: Layout, clock: bool = True) -> t
     else:
         ids = feature_ids(rows["board"], rows["since_capture"], rows["capture_clock"])
     ids = layout.rows(ids)
-    if not clock:
-        ids[(ids >= layout.elapsed_base) & (ids < layout.pad)] = layout.pad
     # A batch without boards comes from the lean mixture of a one-bucket model, whose head ignores the bucket.
     bucket = piece_bucket(rows["board"]) if "board" in rows else np.zeros(len(ids), dtype=np.int64)
     return torch.from_numpy(ids), torch.from_numpy(bucket)
@@ -121,10 +111,9 @@ def step_loss(
     model: NNUE, rows: dict[str, np.ndarray], table: torch.Tensor, config: Config, qat: bool, rng: torch.Generator
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """The batch under two different random symmetries: the mean of both
-    value losses, an outcome term where the result is known, and the paired
-    consistency term."""
+    value losses and the paired consistency term."""
     device = table.device
-    ids, bucket = encode(rows, model.layout, config.clock)
+    ids, bucket = encode(rows, model.layout)
     ids, bucket = ids.to(device), bucket.to(device)
     n = len(ids)
     first = torch.randint(6, (n, 1, 1), generator=rng).to(device)
@@ -137,28 +126,18 @@ def step_loss(
     value = ((value_loss(a, target, config) + value_loss(b, target, config)) * 0.5 * weight).sum() / norm
     consistency = (a.tanh() - b.tanh()).square().mean()
     loss = value + config.symmetry_weight * consistency
-    parts = {"value": float(value.detach()), "consistency": float(consistency.detach())}
-    if config.outcome_weight > 0:
-        mask = torch.from_numpy(rows["outcome_ok"]).float().to(device)
-        outcome = torch.from_numpy(rows["outcome"]).float().to(device)
-        term = ((a.tanh() - outcome).square() + (b.tanh() - outcome).square()) * 0.5 * mask
-        outcome_loss = term.sum() / mask.sum().clamp_min(1)
-        loss = loss + config.outcome_weight * outcome_loss
-        parts["outcome"] = float(outcome_loss.detach())
-    return loss, parts
+    return loss, {"value": float(value.detach()), "consistency": float(consistency.detach())}
 
 
 @torch.no_grad()
-def evaluate(
-    model: NNUE, dataset: Dataset, table: torch.Tensor, limit: int, clock: bool = True, batch: int = 2048
-) -> dict:
+def evaluate(model: NNUE, dataset: Dataset, table: torch.Tensor, limit: int, batch: int = 2048) -> dict:
     """Validation under all six symmetries at qat: error statistics overall
     and by stratum (pieces at most 4, 5-12, over 12; since_capture over 100)."""
     rows = dataset.all(limit)
     values = []
     for start in range(0, len(rows["board"]), batch):
         part = {k: v[start : start + batch] for k, v in rows.items()}
-        ids, bucket = encode(part, model.layout, clock)
+        ids, bucket = encode(part, model.layout)
         ids, bucket = ids.to(table.device), bucket.to(table.device)
         views = [model(table[k, ids], bucket, qat=True).tanh() for k in range(6)]
         values.append(torch.stack(views, 1).cpu().numpy())
@@ -225,9 +204,6 @@ def initial_model(config: Config) -> NNUE:
         model = NNUE(config.hidden, config.buckets, config.version)
         if config.init:
             model.load_state_dict(torch.load(config.init, map_location="cpu", weights_only=False)["model"])
-    if not config.clock:
-        with torch.no_grad():
-            model.clock.zero_()
     return model
 
 
@@ -236,14 +212,12 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     torch.manual_seed(config.seed)
     out = run_dir(run)
     out.mkdir(parents=True, exist_ok=True)
-    datasets = [(Dataset.open(data_dir(name), TRAIN, quiet=config.quiet), share) for name, share in parts]
-    validation = [(name, Dataset.open(data_dir(name), VALIDATION, quiet=config.quiet), share) for name, share in parts]
-    # With id caches everywhere and one head, a step needs three small columns and the ids; gathering every
+    datasets = [(Dataset.open(data_dir(name), TRAIN), share) for name, share in parts]
+    validation = [(name, Dataset.open(data_dir(name), VALIDATION), share) for name, share in parts]
+    # With id caches everywhere and one head, a step needs two small columns and the ids; gathering every
     # column (the 81-byte board above all) from the memory maps made the trainer page instead of compute.
     lean = config.buckets == 1 and all("ids" in dataset.rows for dataset, _ in datasets)
-    mixture = Mixture(
-        datasets, config.batch, config.seed, ("target", "weight", "outcome", "outcome_ok") if lean else None
-    )
+    mixture = Mixture(datasets, config.batch, config.seed, ("target", "weight") if lean else None)
     device = torch.device(config.device)
     rng = torch.Generator().manual_seed(config.seed + 1)
     model = initial_model(config).to(device)
@@ -287,7 +261,7 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
             for k, v in {"loss": float(loss.detach()), **parts_of_loss}.items():
                 sums[k] = sums.get(k, 0.0) + v
         model.eval()
-        metrics = {name: evaluate(model, d, table, config.val_rows, config.clock) for name, d, _ in validation}
+        metrics = {name: evaluate(model, d, table, config.val_rows) for name, d, _ in validation}
         shares = sum(share for _, _, share in validation)
         objective = (
             sum((metrics[name]["selection"] or metrics[name])["mse"] * share for name, _, share in validation) / shares

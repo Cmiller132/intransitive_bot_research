@@ -126,13 +126,11 @@ losses, the selection objective, which scores only rows that are not bare
 game outcomes, validation error overall and by stratum under all six
 symmetries for every dataset), `latest.pt`, `best.pt` and
 `best.nnue` with its JSON sidecar (hashes, shape, the run's settings). Every
-config field is a flag (`--batch 2048`, `--loss bce`, `--buckets 4`,
+config field is a flag (`--batch 2048`, `--buckets 4`,
 `--hidden 768` with a 512-wide `--init` widens it with seeded new columns
 (DESIGN item 33), `--version 6` trains the incumbent's layout where the
 default 8 turns a format 6 `--init` into the factorised format 8 network,
-which evaluates identically at first (item 38),
-`--clock false` for the clock-row ablation, `--quiet true` to train only on
-rows where the mover has no capture). Experiments and their verdicts go to
+which evaluates identically at first, item 38). Experiments and their verdicts go to
 `runs/nnue_gauntlets/<name>/`.
 
 `nnue.export` writes and reads formats 6 and 8 (`export`, `read`, `load`),
