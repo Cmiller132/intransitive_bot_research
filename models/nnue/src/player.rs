@@ -1,5 +1,4 @@
 //! The NNUE seat in the shared match runner.
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -63,11 +62,8 @@ impl NnuePlayer {
                 )
             }
         };
-        self.failed = self.search.leaf_error().is_some();
-        let action = result.action.unwrap_or_else(|| {
-            self.failed = true;
-            state.legal_actions()[0]
-        });
+        self.failed = result.action.is_none();
+        let action = result.action.unwrap_or_else(|| state.legal_actions()[0]);
         self.last = Some(result);
         action
     }
@@ -79,10 +75,6 @@ impl Player for NnuePlayer {
         self.last = None;
         self.failed = false;
         self.sims = 0;
-    }
-
-    fn set_leaves(&mut self, path: &Path) -> Result<()> {
-        self.search.set_leaves(path)
     }
 
     fn choose(&mut self, state: &State, _: &History, clock: Clock) -> Action {
@@ -110,7 +102,7 @@ impl Player for NnuePlayer {
             serde_json::json!({
                 "nodes": s.nodes, "qnodes": s.qnodes, "depth": s.depth,
                 "score": s.score, "pv": s.pv, "elapsed_ms": s.elapsed.as_secs_f64()*1000.,
-                "aborted": s.aborted, "partial": s.partial, "hash_mib": self.hash_mib, "leaf_error": self.search.leaf_error(),
+                "aborted": s.aborted, "partial": s.partial, "hash_mib": self.hash_mib,
                 "root_moves": s.root_moves, "iterations": s.iterations
             })
         })

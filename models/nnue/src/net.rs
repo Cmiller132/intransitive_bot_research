@@ -15,19 +15,16 @@ fn swap_side(c: u8) -> u8 {
     Cell::from_code(c).expect("valid cell").swap_side().code()
 }
 
-/// Size of the converted prototype (H512/B1).
-pub const FILE_SIZE: usize = 1_064_172;
 const CLOCK_BOUNDS: [u32; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160];
-fn clock_rows(since: u32, clock: u32) -> [usize; 2] {
+fn clock_rows(features: usize, since: u32, clock: u32) -> [usize; 2] {
     [
-        972 + CLOCK_BOUNDS.partition_point(|&b| b <= since) - 1,
-        988 + CLOCK_BOUNDS.partition_point(|&b| b <= clock.saturating_sub(since)) - 1,
+        features - 32 + CLOCK_BOUNDS.partition_point(|&b| b <= since) - 1,
+        features - 16 + CLOCK_BOUNDS.partition_point(|&b| b <= clock.saturating_sub(since)) - 1,
     ]
 }
 use std::{fs, path::Path};
 
 pub const FEATURES: usize = 6 * N_SQ;
-pub const TACTICAL_FEATURES: usize = 2 * FEATURES;
 pub const HIDDEN_LANES: usize = 32;
 #[cfg(target_arch = "x86_64")]
 const DOT_CHUNK: usize = 4096;
@@ -60,41 +57,76 @@ pub struct DenseHead {
 pub struct Model {
     pub features: usize,
     pub hidden: usize,
-    pub buckets: usize,
     pub qa: i32,
     pub qb: i32,
     pub eval_scale: f32,
     pub bias: Vec<i16>,
     pub weights: Vec<i16>,
     pub output: Vec<i16>,
-    pub output_bias: Vec<i32>,
-    pub dense: Option<DenseHead>,
+    pub output_bias: i32,
+    pub dense: DenseHead,
     avx2: bool,
     vnni: bool,
+}
+
+/// Exact material and clocks travel independently of deferred vector values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FeatureState {
+    pub counts: [[u8; 3]; 2],
+    pub since: u32,
+    pub clock: u32,
+}
+impl FeatureState {
+    pub fn new(board: &Board, since: u32, clock: u32) -> Self {
+        let mut counts = [[0; 3]; 2];
+        for cell in board {
+            let code = cell.code() as usize;
+            if code != 0 {
+                counts[(code - 1) / 3][(code - 1) % 3] += 1;
+            }
+        }
+        Self {
+            counts,
+            since,
+            clock,
+        }
+    }
+    pub fn contexts(self) -> [usize; 2] {
+        let context =
+            |c: [u8; 3]| c[0].min(2) as usize + 3 * c[1].min(2) as usize + 9 * c[2].min(2) as usize;
+        [context(self.counts[1]), context(self.counts[0])]
+    }
+    pub fn after(self, board: &Board, action: u16, since: u32) -> Self {
+        let mut counts = [self.counts[1], self.counts[0]];
+        let captured = board[action_from_to(action).1].code();
+        if captured != 0 {
+            debug_assert!(captured >= 4);
+            counts[0][(captured - 4) as usize] -= 1;
+        }
+        Self {
+            counts,
+            since,
+            clock: self.clock,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Accumulator {
     pub own: Vec<i32>,
     pub opponent: Vec<i32>,
-    pieces: usize,
-    clock: u32,
-    clock_rows: [usize; 2],
-    race: [u8; 2],
-    race_dirty: bool,
+    pub(crate) state: FeatureState,
 }
-
 impl Accumulator {
     pub fn empty(hidden: usize) -> Self {
         Self {
             own: vec![0; hidden],
             opponent: vec![0; hidden],
-            pieces: 0,
-            clock: 0,
-            clock_rows: [0; 2],
-            race: [8; 2],
-            race_dirty: false,
+            state: FeatureState::default(),
         }
+    }
+    pub fn contexts(&self) -> [usize; 2] {
+        self.state.contexts()
     }
 }
 
@@ -112,21 +144,15 @@ impl Model {
         let buckets = u(32) as usize;
         let hidden = u(16) as usize;
         let features = u(12) as usize;
-        if !matches!((u(8), features), (6, 1004) | (7, 1022))
+        if !matches!((u(8), features), (6, 1004) | (8, 13640))
             || [u(20), u(24)] != [255, 64]
             || f32::from_le_bytes(bytes[28..32].try_into().unwrap()) != 600.
-            || ![1, 4].contains(&buckets)
+            || buckets != 1
         {
             return Err("unsupported NNUE format, dimensions, scales or buckets".into());
         }
-        if hidden == 0
-            || !hidden.is_multiple_of(HIDDEN_LANES)
-            || hidden as u64 > i64::MAX as u64 / (2 * 255 * 255 * 32768)
-        {
-            return Err(
-                "hidden width must be a positive multiple of 32 with representable integer sums"
-                    .into(),
-            );
+        if !(32..=1024).contains(&hidden) || !hidden.is_multiple_of(HIDDEN_LANES) {
+            return Err("hidden width must be a multiple of 32 in 32..1024".into());
         }
         let expected = hidden
             .checked_mul(2 * features + 66 + 4 * buckets)
@@ -159,29 +185,28 @@ impl Model {
         Ok(Self {
             features,
             hidden,
-            buckets,
             qa: 255,
             qb: 64,
             eval_scale: 600.,
             bias: i16s(36, hidden),
             weights: i16s(features_start, features * hidden),
             output: i16s(output_start, buckets * 2 * hidden),
-            output_bias: i32s(bias_start, buckets),
-            dense: Some(DenseHead {
+            output_bias: i32s(bias_start, 1)[0],
+            dense: DenseHead {
                 weights: bytes[dense_start..dense_bias_start]
                     .iter()
                     .map(|&b| b as i8)
                     .collect(),
                 bias: i32s(dense_bias_start, 32),
-                output: i16s(residual_start, buckets * 32),
-            }),
+                output: i16s(residual_start, 32),
+            },
             avx2: has_avx2(),
             vnni: has_vnni(),
         })
     }
 
     pub fn backend(&self) -> &'static str {
-        if self.avx2 && self.vnni && self.dense.is_some() {
+        if self.avx2 && self.vnni {
             "avx512vnni"
         } else if self.avx2 {
             "avx2"
@@ -196,222 +221,205 @@ impl Model {
     }
 
     #[inline]
-    fn feature(&self, piece: u8, square: usize) -> &[i16] {
-        let start = ((piece as usize - 1) * N_SQ + square) * self.hidden;
-        &self.weights[start..start + self.hidden]
+    fn feature(&self, piece: u8, square: usize, context: usize) -> &[i16] {
+        let row = context * FEATURES + (piece as usize - 1) * N_SQ + square;
+        self.row(row)
     }
-
+    #[inline]
+    fn row(&self, row: usize) -> &[i16] {
+        &self.weights[row * self.hidden..(row + 1) * self.hidden]
+    }
     #[inline]
     fn threat_feature(&self, piece: u8, square: usize) -> &[i16] {
-        let start = (FEATURES + (piece as usize - 1) * N_SQ + square) * self.hidden;
-        &self.weights[start..start + self.hidden]
+        self.row(self.features - 518 + (piece as usize - 1) * N_SQ + square)
+    }
+    pub(crate) fn requires_refresh(
+        &self,
+        before: FeatureState,
+        after: FeatureState,
+        side: usize,
+    ) -> bool {
+        self.features == 13640 && before.contexts()[side ^ 1] != after.contexts()[side]
     }
 
-    pub fn refresh(&self, board: &Board, since_capture: u32, clock: u32) -> Accumulator {
-        assert!(
-            (50..=200).contains(&clock),
-            "capture clock must be 50..=200"
-        );
-        let mut acc = Accumulator::empty(self.hidden);
-        for j in 0..self.hidden {
-            acc.own[j] = self.bias[j] as i32;
-            acc.opponent[j] = self.bias[j] as i32;
-        }
+    /// Active rows in the file layout; padding occupies the unused slots.
+    pub fn feature_ids(&self, board: &Board, since: u32, clock: u32) -> [[usize; 42]; 2] {
+        self.ids(board, FeatureState::new(board, since, clock))
+    }
+    fn ids(&self, board: &Board, state: FeatureState) -> [[usize; 42]; 2] {
+        let contexts = if self.features == 13640 {
+            state.contexts()
+        } else {
+            [0; 2]
+        };
+        let mut ids = [[self.features; 42]; 2];
+        let (mut pieces, mut threats) = (0, 20);
         for (square, cell) in board.iter().enumerate() {
             let piece = cell.code();
             if piece == 0 {
                 continue;
             }
-            assert!(piece <= 6, "invalid piece code");
-            let own = self.feature(piece, square);
-            let opp = self.feature(swap_side(piece), mirror_anti(square));
-            for j in 0..self.hidden {
-                acc.own[j] += own[j] as i32;
-                acc.opponent[j] += opp[j] as i32;
-            }
+            assert!(pieces < 20, "at most twenty pieces fit the feature slots");
+            ids[0][pieces] = contexts[0] * FEATURES + (piece as usize - 1) * N_SQ + square;
+            ids[1][pieces] = contexts[1] * FEATURES
+                + (swap_side(piece) as usize - 1) * N_SQ
+                + mirror_anti(square);
+            pieces += 1;
             if is_attacked(board, square as u8) {
-                let own = self.threat_feature(piece, square);
-                let opp = self.threat_feature(swap_side(piece), mirror_anti(square));
-                for j in 0..self.hidden {
-                    acc.own[j] += own[j] as i32;
-                    acc.opponent[j] += opp[j] as i32;
-                }
+                ids[0][threats] = self.features - 518 + (piece as usize - 1) * N_SQ + square;
+                ids[1][threats] = self.features - 518
+                    + (swap_side(piece) as usize - 1) * N_SQ
+                    + mirror_anti(square);
+                threats += 1;
             }
         }
-        acc.pieces = board.iter().filter(|&&cell| cell != Cell::Empty).count();
-        acc.clock = clock;
-        acc.clock_rows = clock_rows(since_capture, clock);
-        for row in acc.clock_rows {
-            let weights = &self.weights[row * self.hidden..(row + 1) * self.hidden];
-            self.add_row(&mut acc.own, weights, true);
-            self.add_row(&mut acc.opponent, weights, true);
+        for side in &mut ids {
+            side[40..].copy_from_slice(&clock_rows(self.features, state.since, state.clock));
         }
-        if self.features == 1022 {
-            let (mover, opponent) = engine::race::race_buckets(board);
-            acc.race = [mover, opponent];
-            for perspective in 0..2 {
-                for side in 0..2 {
-                    let row = 1004 + 9 * side + acc.race[side ^ perspective] as usize;
-                    let values = if perspective == 0 {
-                        &mut acc.own
-                    } else {
-                        &mut acc.opponent
-                    };
-                    self.add_row(
-                        values,
-                        &self.weights[row * self.hidden..(row + 1) * self.hidden],
-                        true,
-                    );
-                }
-            }
-        }
+        ids
+    }
+    pub fn refresh(&self, board: &Board, since: u32, clock: u32) -> Accumulator {
+        let mut acc = Accumulator::empty(self.hidden);
+        self.refresh_into(board, since, clock, &mut acc);
         acc
     }
+    pub(crate) fn refresh_into(
+        &self,
+        board: &Board,
+        since: u32,
+        clock: u32,
+        acc: &mut Accumulator,
+    ) -> u64 {
+        assert!(
+            (50..=200).contains(&clock),
+            "capture clock must be 50..=200"
+        );
+        acc.state = FeatureState::new(board, since, clock);
+        let ids = self.ids(board, acc.state);
+        self.fill_half(&ids[0], &mut acc.own) + self.fill_half(&ids[1], &mut acc.opponent)
+    }
+    fn fill_half(&self, ids: &[usize; 42], dst: &mut [i32]) -> u64 {
+        for (value, &bias) in dst.iter_mut().zip(&self.bias) {
+            *value = bias as i32;
+        }
+        let mut rows = 0;
+        for &id in ids {
+            if id != self.features {
+                self.add_row(dst, self.row(id), true);
+                rows += 1;
+            }
+        }
+        rows
+    }
 
-    /// Child canonicalization swaps the two parent perspectives; only moved and
-    /// captured piece-square and changed attack/clock/race rows need updating.
-    /// The caller supplies a legal move and the counter returned by engine::apply.
+    /// Update both canonical halves, refreshing only a changed capped context.
     pub fn update(
         &self,
         parent: &Accumulator,
         board: &Board,
         action: u16,
-        child_since_capture: u32,
+        since: u32,
         child: &mut Accumulator,
     ) {
-        self.update_deferred(parent, board, action, child_since_capture, child);
-        if self.features == 1022 {
-            let (from, to) = action_from_to(action);
-            let mut moved = *board;
-            moved[to] = moved[from];
-            moved[from] = Cell::Empty;
-            self.resolve_race(&engine::flip(&moved), child);
-        }
+        let after = parent.state.after(board, action, since);
+        self.update_perspective(
+            &parent.opponent,
+            board,
+            action,
+            parent.state,
+            after,
+            0,
+            &mut child.own,
+        );
+        self.update_perspective(
+            &parent.own,
+            board,
+            action,
+            parent.state,
+            after,
+            1,
+            &mut child.opponent,
+        );
+        child.state = after;
     }
 
-    /// Carry existing race rows through the frame swap until a value is needed.
-    pub(crate) fn update_deferred(
+    /// Materialise one half into its preallocated vector; returns added/removed rows.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_perspective(
         &self,
-        parent: &Accumulator,
+        src: &[i32],
         board: &Board,
         action: u16,
-        child_since_capture: u32,
-        child: &mut Accumulator,
-    ) {
-        #[cfg(feature = "profile")]
-        let _probe = crate::profile::Probe::new(crate::profile::Zone::Accumulator);
+        before: FeatureState,
+        after: FeatureState,
+        side: usize,
+        dst: &mut [i32],
+    ) -> (u64, u64) {
         let (from, to) = action_from_to(action);
         let piece = board[from].code();
         let captured = board[to].code();
-        self.update_half(
-            &parent.opponent,
-            &mut child.own,
-            self.feature(swap_side(piece), mirror_anti(from)),
-            self.feature(swap_side(piece), mirror_anti(to)),
-            (captured != 0).then(|| self.feature(swap_side(captured), mirror_anti(to))),
-        );
-        self.update_half(
-            &parent.own,
-            &mut child.opponent,
-            self.feature(piece, from),
-            self.feature(piece, to),
-            (captured != 0).then(|| self.feature(captured, to)),
-        );
-        self.update_threats(board, action, child);
-        child.pieces = parent.pieces - usize::from(captured != 0);
-        child.clock = parent.clock;
-        child.clock_rows = clock_rows(child_since_capture, parent.clock);
-        for (old, new) in parent.clock_rows.into_iter().zip(child.clock_rows) {
-            if old != new {
-                let old_row = &self.weights[old * self.hidden..(old + 1) * self.hidden];
-                let new_row = &self.weights[new * self.hidden..(new + 1) * self.hidden];
-                for values in [&mut child.own, &mut child.opponent] {
-                    self.add_row(values, old_row, false);
-                    self.add_row(values, new_row, true);
-                }
-            }
-        }
-        child.race = [parent.race[1], parent.race[0]];
-        child.race_dirty = self.features == 1022;
-    }
-
-    /// Resolve pending rows against this accumulator's canonical board.
-    pub(crate) fn resolve_race(&self, board: &Board, acc: &mut Accumulator) {
-        if !acc.race_dirty {
-            return;
-        }
-        #[cfg(feature = "profile")]
-        let query_probe = crate::profile::Probe::new(crate::profile::Zone::RaceQuery);
-        let (mover, opponent) = engine::race::race_buckets(board);
-        #[cfg(feature = "profile")]
-        drop(query_probe);
-        #[cfg(feature = "profile")]
-        let _rows_probe = crate::profile::Probe::new(crate::profile::Zone::RaceRows);
-        let next = [mover, opponent];
-        for perspective in 0..2 {
-            for side in 0..2 {
-                let old = acc.race[side ^ perspective];
-                let new = next[side ^ perspective];
-                if old != new {
-                    let values = if perspective == 0 {
-                        &mut acc.own
-                    } else {
-                        &mut acc.opponent
-                    };
-                    for (bucket, add) in [(old, false), (new, true)] {
-                        let row = 1004 + 9 * side + bucket as usize;
-                        self.add_row(
-                            values,
-                            &self.weights[row * self.hidden..(row + 1) * self.hidden],
-                            add,
-                        );
-                    }
-                }
-            }
-        }
-        acc.race = next;
-        acc.race_dirty = false;
-    }
-
-    /// Update the occupied and attacked rows affected by the move.
-    fn update_threats(&self, board: &Board, action: u16, child: &mut Accumulator) {
-        let (from, to) = action_from_to(action);
         let mut moved = *board;
         moved[to] = moved[from];
         moved[from] = Cell::Empty;
+        if self.requires_refresh(before, after, side) {
+            let ids = self.ids(&engine::flip(&moved), after);
+            return (self.fill_half(&ids[side], dst), 0);
+        }
+        let context = if self.features == 13640 {
+            after.contexts()[side]
+        } else {
+            0
+        };
+        let transform = |piece: u8, square: usize| {
+            if side == 0 {
+                (swap_side(piece), mirror_anti(square))
+            } else {
+                (piece, square)
+            }
+        };
+        let feature = |piece, square| {
+            let (piece, square) = transform(piece, square);
+            self.feature(piece, square, context)
+        };
+        self.update_half(
+            src,
+            dst,
+            feature(piece, from),
+            feature(piece, to),
+            (captured != 0).then(|| feature(captured, to)),
+        );
+        let (mut added, mut removed) = (1, 1 + u64::from(captured != 0));
         let mut affected = engine::tactics::attack_candidates(board, action);
         while affected != 0 {
-            let sq = affected.trailing_zeros() as usize;
+            let square = affected.trailing_zeros() as usize;
             affected &= affected - 1;
-            let old_piece = board[sq].code();
-            let new_piece = moved[sq].code();
-            let old_threat = old_piece != 0 && is_attacked(board, sq as u8);
-            let new_threat = new_piece != 0 && is_attacked(&moved, sq as u8);
-            if old_threat && (!new_threat || old_piece != new_piece) {
-                self.add_row(
-                    &mut child.opponent,
-                    self.threat_feature(old_piece, sq),
-                    false,
-                );
-                self.add_row(
-                    &mut child.own,
-                    self.threat_feature(swap_side(old_piece), mirror_anti(sq)),
-                    false,
-                );
+            let old = board[square].code();
+            let new = moved[square].code();
+            let old_threat = old != 0 && is_attacked(board, square as u8);
+            let new_threat = new != 0 && is_attacked(&moved, square as u8);
+            if old_threat && (!new_threat || old != new) {
+                let (piece, square) = transform(old, square);
+                self.add_row(dst, self.threat_feature(piece, square), false);
+                removed += 1;
             }
-            if new_threat && (!old_threat || old_piece != new_piece) {
-                self.add_row(
-                    &mut child.opponent,
-                    self.threat_feature(new_piece, sq),
-                    true,
-                );
-                self.add_row(
-                    &mut child.own,
-                    self.threat_feature(swap_side(new_piece), mirror_anti(sq)),
-                    true,
-                );
+            if new_threat && (!old_threat || old != new) {
+                let (piece, square) = transform(new, square);
+                self.add_row(dst, self.threat_feature(piece, square), true);
+                added += 1;
             }
         }
+        for (old, new) in clock_rows(self.features, before.since, before.clock)
+            .into_iter()
+            .zip(clock_rows(self.features, after.since, after.clock))
+        {
+            if old != new {
+                self.add_row(dst, self.row(old), false);
+                self.add_row(dst, self.row(new), true);
+                added += 1;
+                removed += 1;
+            }
+        }
+        (added, removed)
     }
 
     #[inline]
@@ -451,21 +459,8 @@ impl Model {
         }
     }
 
-    fn bucket(&self, acc: &Accumulator) -> usize {
-        if self.buckets == 1 {
-            0
-        } else {
-            match acc.pieces {
-                0..=4 => 0,
-                5..=8 => 1,
-                9..=12 => 2,
-                _ => 3,
-            }
-        }
-    }
-
     pub fn sum_scalar(&self, acc: &Accumulator) -> i64 {
-        let start = self.bucket(acc) * 2 * self.hidden;
+        let start = 0;
         let mut sum = 0i64;
         for (perspective, values) in [&acc.own, &acc.opponent].iter().enumerate() {
             for (j, &value) in values.iter().enumerate() {
@@ -481,7 +476,7 @@ impl Model {
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Readout);
         #[cfg(target_arch = "x86_64")]
         if self.vnni {
-            let start = self.bucket(acc) * 2 * self.hidden;
+            let start = 0;
             let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx512(&acc.own, &output[..self.hidden], self.qa)
@@ -490,7 +485,7 @@ impl Model {
         }
         #[cfg(target_arch = "x86_64")]
         if self.avx2 {
-            let start = self.bucket(acc) * 2 * self.hidden;
+            let start = 0;
             let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx2(&acc.own, &output[..self.hidden], self.qa)
@@ -501,33 +496,22 @@ impl Model {
     }
 
     pub fn raw(&self, acc: &Accumulator) -> f64 {
-        debug_assert!(
-            !acc.race_dirty,
-            "race rows must be resolved before evaluation"
-        );
         self.sum(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
-            + self.output_bias[self.bucket(acc)] as f64 / self.qb as f64
+            + self.output_bias as f64 / self.qb as f64
             + self.dense_sum(acc, self.avx2) as f64 / (self.qa as f64 * self.qb as f64)
     }
 
     pub fn raw_scalar(&self, acc: &Accumulator) -> f64 {
-        debug_assert!(
-            !acc.race_dirty,
-            "race rows must be resolved before evaluation"
-        );
         self.sum_scalar(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
-            + self.output_bias[self.bucket(acc)] as f64 / self.qb as f64
+            + self.output_bias as f64 / self.qb as f64
             + self.dense_sum(acc, false) as f64 / (self.qa as f64 * self.qb as f64)
     }
 
     fn dense_sum(&self, acc: &Accumulator, avx2: bool) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Dense);
-        let Some(head) = &self.dense else {
-            return 0;
-        };
-        let start = self.bucket(acc) * DENSE_WIDTH;
-        let output = &head.output[start..start + DENSE_WIDTH];
+        let head = &self.dense;
+        let output = &head.output;
         if output.iter().all(|&w| w == 0) {
             return 0;
         }
@@ -908,27 +892,6 @@ unsafe fn sum_avx2(acc: &[i32], weights: &[i16], qa: i32) -> i64 {
     sums.iter().sum()
 }
 
-/// Convert prototype v3 weights to the migration format without changing arithmetic.
-pub fn convert_v3(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    if bytes.len() != 1_031_400 || &bytes[..8] != b"RPSNNUE1" {
-        return Err("expected prototype v3 H512/D32 file".into());
-    }
-    let u = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-    if [u(8), u(12), u(16), u(20), u(24)] != [3, 972, 512, 255, 64] || u(998436) != 32 {
-        return Err("expected prototype v3 F972/H512/D32".into());
-    }
-    let mut out = bytes[..32].to_vec();
-    out[8..12].copy_from_slice(&6u32.to_le_bytes());
-    out[12..16].copy_from_slice(&1004u32.to_le_bytes());
-    out.extend(1u32.to_le_bytes());
-    let end = 32 + 2 * 512 + 2 * 972 * 512;
-    out.extend(&bytes[32..end]);
-    out.resize(out.len() + 32 * 512 * 2, 0);
-    out.extend(&bytes[end..]);
-    Model::from_bytes(&out)?;
-    Ok(out)
-}
-
 #[cfg(test)]
 mod width_tests {
     use super::*;
@@ -965,48 +928,5 @@ mod width_tests {
             }
             assert_eq!(actual, expected);
         }
-    }
-}
-
-#[cfg(test)]
-mod deferred_tests {
-    use super::*;
-    use engine::{apply, Outcome, Rules, State};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
-
-    #[test]
-    fn pending_race_rows_survive_multiple_unresolved_ancestors() {
-        let model = Model::from_bytes(include_bytes!("../tests/fixtures/h256_race.nnue")).unwrap();
-        let mut rng = StdRng::seed_from_u64(2026091101);
-        let mut state = State::initial();
-        let mut acc = model.refresh(&state.board, 0, 200);
-        let mut captures = 0;
-        let mut pending_ancestors = 0;
-        for turn in 0..2000 {
-            pending_ancestors += usize::from(acc.race_dirty);
-            let legal = state.legal_actions();
-            let action = legal[rng.random_range(0..legal.len())];
-            let (child, end) = apply(&Rules::SITE, &state, action);
-            captures += usize::from(child.since_capture == 0);
-            let mut next = Accumulator::empty(model.hidden);
-            model.update_deferred(&acc, &state.board, action, child.since_capture, &mut next);
-            let mut resolved = next.clone();
-            model.resolve_race(&child.board, &mut resolved);
-            assert_eq!(
-                resolved,
-                model.refresh(&child.board, child.since_capture, 200)
-            );
-            assert_eq!(model.raw(&resolved), model.raw_scalar(&resolved));
-            let mut repeated = resolved.clone();
-            model.resolve_race(&child.board, &mut repeated);
-            assert_eq!(repeated, resolved);
-            state = child;
-            acc = if turn % 7 == 0 { resolved } else { next };
-            if end != Outcome::Ongoing {
-                state = State::initial();
-                acc = model.refresh(&state.board, 0, 200);
-            }
-        }
-        assert!(captures > 10 && pending_ancestors > 1000);
     }
 }

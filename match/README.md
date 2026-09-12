@@ -17,8 +17,7 @@ matches, and the site adapter all go through it. It knows the engine and the
   reports that the last `choose` produced no move, and `info()` returns the
   search behind the last move (`MoveInfo`: root value, the played move's Q
   and visit share, plies left, the top root moves) for players that expose it.
-  `supports_clock` validates budget support, `set_leaves` configures an optional
-  training leaf sink, and `search_details` adds model-specific search fields
+  `supports_clock` validates budget support, and `search_details` adds model-specific search fields
   to recorded MoveStats without inventing policy visits for alpha-beta.
 - `play` (game.rs): one game between two players from an `Opening` (random
   legal plies) under `Rules`, returning the winner, the end reason (goal,

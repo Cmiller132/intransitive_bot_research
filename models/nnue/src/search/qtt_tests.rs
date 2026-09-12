@@ -1,7 +1,6 @@
 use super::*;
 
 const DENSE: &[u8] = include_bytes!("../../tests/fixtures/h768_dense.nnue");
-const RACE: &[u8] = include_bytes!("../../tests/fixtures/h256_race.nnue");
 
 fn prepared(model: &Model, state: &State, ply: usize) -> Searcher {
     let mut search = Searcher::new(1);
@@ -232,21 +231,13 @@ fn safety_frontier_does_not_reuse_or_store_quiescence_bounds() {
 
 #[test]
 fn fixture_fixed_node_signatures_are_repeatable() {
-    let golden = [
-        vec![
-            (Some(604), 29, 2, 4000, 3635, Some((516, 36, 2))),
-            (Some(576), -39, 3, 4000, 3543, Some((576, -39, 3))),
-            (Some(348), -41, 2, 4000, 3838, Some((348, -41, 2))),
-            (Some(588), 13, 2, 4000, 3658, Some((507, -42, 2))),
-        ],
-        vec![
-            (Some(37), -215, 3, 4000, 2231, Some((37, -215, 3))),
-            (Some(10), -140, 3, 4000, 3178, Some((10, -140, 3))),
-            (Some(524), -66, 2, 4000, 1934, Some((37, 343, 2))),
-            (Some(523), -202, 2, 4000, 1822, Some((37, 392, 2))),
-        ],
-    ];
-    for (bytes, golden) in [DENSE, RACE].into_iter().zip(golden) {
+    let golden = [vec![
+        (Some(604), 29, 2, 4000, 3635, Some((516, 36, 2))),
+        (Some(576), -39, 3, 4000, 3543, Some((576, -39, 3))),
+        (Some(348), -41, 2, 4000, 3838, Some((348, -41, 2))),
+        (Some(588), 13, 2, 4000, 3658, Some((507, -42, 2))),
+    ]];
+    for (bytes, golden) in [DENSE].into_iter().zip(golden) {
         let model = Model::from_bytes(bytes).unwrap();
         let mut signatures = Vec::new();
         for line in include_str!("../../tests/fixtures/h768_positions.jsonl")
@@ -285,7 +276,7 @@ fn fixture_fixed_node_signatures_are_repeatable() {
 
 #[test]
 fn fixture_quiescence_scores_survive_warm_tables_and_horizon_changes() {
-    for bytes in [DENSE, RACE] {
+    for bytes in [DENSE] {
         let model = Model::from_bytes(bytes).unwrap();
         for line in include_str!("../../tests/fixtures/h768_positions.jsonl")
             .lines()

@@ -207,10 +207,6 @@ pub struct Searcher {
     stop_signal: Option<(Arc<AtomicU64>, u64)>,
     forced_deadline: Option<Instant>,
     worker_id: u64,
-    leaf_sink: Option<Arc<Mutex<LeafSink>>>,
-    leaf_root: State,
-    leaf_search: u64,
-    leaf_path: [u16; MAX_PLY + 2],
 }
 
 /// Optional Lazy SMP. Each worker completes its own legal iterative search;
@@ -221,28 +217,6 @@ pub struct SearchPool {
 }
 
 impl SearchPool {
-    pub fn set_leaves(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        let sink = Arc::new(Mutex::new(LeafSink {
-            writer: std::io::BufWriter::new(file),
-            error: None,
-            next_id: 0,
-        }));
-        for worker in &mut self.workers {
-            worker.leaf_sink = Some(Arc::clone(&sink));
-        }
-        Ok(())
-    }
-    pub fn leaf_error(&self) -> Option<String> {
-        self.workers[0]
-            .leaf_sink
-            .as_ref()
-            .and_then(|s| s.lock().expect("leaf sink").error.clone())
-    }
-
     pub fn new(hash_mb: usize, threads: usize) -> Self {
         let threads = threads.clamp(1, 8);
         let bytes = hash_mb.clamp(1, 2048) * 1024 * 1024;
@@ -374,10 +348,6 @@ impl Searcher {
             stop_signal: None,
             forced_deadline: None,
             worker_id: 0,
-            leaf_sink: None,
-            leaf_root: State::initial(),
-            leaf_search: 0,
-            leaf_path: [0; MAX_PLY + 2],
         }
     }
     pub fn clear(&mut self) {
@@ -401,12 +371,7 @@ impl Searcher {
         limits: Limits,
     ) -> SearchResult {
         self.start = Instant::now();
-        if let Some(sink) = &self.leaf_sink {
-            let mut sink = sink.lock().expect("leaf sink");
-            sink.next_id += 1;
-            self.leaf_search = sink.next_id;
-            self.leaf_root = state.clone();
-        }
+
         self.deadline = self.forced_deadline.unwrap_or_else(|| {
             self.start
                 .checked_add(limits.time)
@@ -1033,11 +998,10 @@ impl Searcher {
     fn static_eval(&mut self, model: &Model, state: &State, ply: usize) -> i32 {
         let key = position_key(self.hashes[ply][0], state.since_capture);
         let mut entry = self.tt.get(key);
-        let score = if entry.key == key && entry.static_valid {
+        if entry.key == key && entry.static_valid {
             entry.static_eval
         } else {
             self.resolve_acc(model, ply);
-            model.resolve_race(&state.board, &mut self.acc[ply]);
             let score = model.evaluate(&self.acc[ply]);
             if entry.key != key {
                 entry = Entry::default();
@@ -1048,35 +1012,9 @@ impl Searcher {
             entry.generation = self.generation;
             self.tt.store(entry);
             score
-        };
-        if self.leaf_sink.is_some() {
-            self.resolve_acc(model, ply);
-            model.resolve_race(&state.board, &mut self.acc[ply]);
-            let record = serde_json::json!({
-                "schema":1,"search_id":self.leaf_search,"worker":self.worker_id,
-                "root":{"board":engine::codes(&self.leaf_root.board).as_slice(),"since_capture":self.leaf_root.since_capture,"ply":self.leaf_root.ply,"clock":200},
-                "board":engine::codes(&state.board).as_slice(),"since_capture":state.since_capture,"ply":state.ply,"clock":200,
-                "raw":model.raw(&self.acc[ply]),"score":score,"path":&self.leaf_path[..ply]
-            });
-            let mut sink = self.leaf_sink.as_ref().unwrap().lock().expect("leaf sink");
-            if sink.error.is_none() {
-                use std::io::Write;
-                let result = serde_json::to_writer(&mut sink.writer, &record)
-                    .map_err(std::io::Error::other)
-                    .and_then(|()| sink.writer.write_all(b"\n"))
-                    .and_then(|()| sink.writer.flush());
-                if let Err(e) = result {
-                    sink.error = Some(e.to_string());
-                    self.stopped = true;
-                }
-            } else {
-                self.stopped = true;
-            }
         }
-        score
     }
     fn prepare_child(&mut self, state: &State, action: u16, child_since_capture: u32, ply: usize) {
-        self.leaf_path[ply] = action;
         self.hashes[ply + 1] = child_hashes(self.hashes[ply], &state.board, action);
         self.tt
             .prefetch(position_key(self.hashes[ply + 1][0], child_since_capture));
@@ -1090,7 +1028,7 @@ impl Searcher {
         };
         self.resolve_acc(model, ply - 1);
         let (parents, children) = self.acc.split_at_mut(ply);
-        model.update_deferred(
+        model.update(
             &parents[ply - 1],
             &board,
             action,
@@ -1235,12 +1173,6 @@ fn apply_position(state: &State, action: u16) -> (State, Outcome) {
     engine::apply(&Rules::SITE, state, action)
 }
 
-struct LeafSink {
-    writer: std::io::BufWriter<std::fs::File>,
-    error: Option<String>,
-    next_id: u64,
-}
-
 const ZOBRIST: [[u64; 81]; 7] = {
     let mut keys = [[0; 81]; 7];
     let mut piece = 1;
@@ -1308,7 +1240,7 @@ mod tests {
 
     #[test]
     fn deferred_accumulators_resolve_ancestors_and_replaced_branches() {
-        for features in [1004, 1022] {
+        for features in [1004, 13640] {
             let mut model =
                 Model::from_bytes(include_bytes!("../tests/fixtures/h768_dense.nnue")).unwrap();
             model.features = features;
@@ -1338,7 +1270,6 @@ mod tests {
             assert!(depth >= 4);
             assert!(search.pending[1..=depth].iter().all(Option::is_some));
             search.resolve_acc(&model, depth);
-            model.resolve_race(&state.board, &mut search.acc[depth]);
             assert_eq!(
                 search.acc[depth],
                 model.refresh(&state.board, state.since_capture, 200)
@@ -1348,7 +1279,6 @@ mod tests {
             let (child, _) = apply_position(&root, action);
             search.prepare_child(&root, action, child.since_capture, 0);
             search.resolve_acc(&model, 1);
-            model.resolve_race(&child.board, &mut search.acc[1]);
             assert_eq!(
                 search.acc[1],
                 model.refresh(&child.board, child.since_capture, 200)

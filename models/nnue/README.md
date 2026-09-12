@@ -13,8 +13,7 @@ release network was the migration control, DESIGN item 4).
 
 The two halves share only the feature definition and the file format:
 
-- `src/` (Rust crate `nnue`): the file reader (format 6; format 8 is DESIGN
-  item 38's Rust side), the accumulators and the
+- `src/` (Rust crate `nnue`): the format-6/8 file reader, the accumulators and the
   scalar, AVX2 and VNNI kernels, the search, and `NnuePlayer`, which
   implements `match::Player`. `bot` builds it from `nnue:<file.nnue>`.
 - `py/` (Python package `nnue`): features, the trainable network with
@@ -57,11 +56,13 @@ The two halves share only the feature definition and the file format:
   may send `info json` search statistics after its move; the host copies
   them into the game record, so an external seat's nodes and time appear in
   `bot eval` records like a native player's (match/README.md).
-- `bot nnue convert --input <v3.nnue> --output <v6.nnue>`,
-  `bot nnue validate --model <v6.nnue> --input <positions.jsonl>`,
+- `bot nnue validate --model <v6.nnue> --input <positions.jsonl>`,
   `bot nnue diagnose --model <v6.nnue> --input <positions.jsonl> --nodes N`:
-  the migration and parity tools; positions are
-  `{"board": [81 codes], "since_capture", "ply", "clock"}` lines. Built
+  the parity tools; positions are
+  `{"board": [81 codes], "since_capture", "ply", "clock"}` lines. Optional
+  `context`, 42-slot `ids` in the shared format-8 layout, `raw` and `raw6`
+  expectations let both fixture networks read the same file directly; format 6
+  checks `raw6` when supplied. Raw tolerance is 1e-12. Built
   with `--features nnue/profile`, `diagnose` adds a sampled profile
   (accumulator, dense head, readout, move generation, ordering, table).
 - `bot analyse --engine nnue:<file>`: the analyser interface (static

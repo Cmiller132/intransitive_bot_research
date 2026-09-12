@@ -5,10 +5,9 @@ match runner stays model-agnostic.
 
 ```
 bot eval  --candidate sq:runs/x/export.onnx [--reference sq:weights/sq_g128.onnx] [--pairs 32 | --sprt pairs.jsonl] [--resume] [--sims 32 | --move-ms 100] [--reference-move-ms 100 | --reference-sims 32] [--threads 4] [--player-threads 1] [--seed 0] [--opening-plies 8] [--records games.jsonl] [--stream]
-bot play  --first sq:a.onnx --second sq:b.onnx [--sims 32 | --move-ms 100] [--player-threads 1] [--seed 0] [--opening-plies 8] [--leaves leaves.jsonl] [--random-moves K --random-from P --random-to Q] [--random-seed S]
+bot play  --first sq:a.onnx --second sq:b.onnx [--sims 32 | --move-ms 100] [--player-threads 1] [--seed 0] [--opening-plies 8] [--random-moves K --random-from P --random-to Q] [--random-seed S]
 bot rpsi  --player sq:model.onnx [--move-ms 250] [--max-move-ms 250] [--sims 32] [--movetime 100] [--threads 4] [--name intransitive_bot]
 bot analyse --engine conv:model.onnx [--threads 1]   # or sq:<onnx>, nnue:<file.nnue>
-bot nnue convert --input prototype.nnue --output model.nnue
 bot nnue validate --model model.nnue --input positions.jsonl
 bot nnue diagnose --model model.nnue --input positions.jsonl --nodes 20000 [--threads 1]
 bot --version
@@ -94,17 +93,14 @@ n simulations to n * 2,500 nodes on one worker (120 s safety ceiling); use timed
 eval for equal wall-time comparisons. Its records include nodes, depth, score
 and canonical PV under `search`. `partial=true` marks a move found by a fully
 searched root child in an unfinished iteration; `depth` remains the last completed
-depth. The same fields appear in `nnue diagnose`. `play --leaves` writes the first player's
-static leaves as JSONL to a new file, including root, canonical action path,
-board codes, since_capture, ply, clock, raw and score; tracing affects speed.
+depth. The same fields appear in `nnue diagnose`.
 
-`nnue convert` accepts only the frozen prototype's v3 H512/D32 network and
-creates a v6 network with zero clock rows. The runtime
-accepts v6 with any positive hidden width divisible by 32, a 32-unit dense head,
-one or four output buckets and learned clock rows. Dimensions must fit the file
-and integer arithmetic. Validation inputs
+The runtime accepts format 6 and format 8, hidden widths divisible by 32 in
+32..1024, one output head and dense width 32. Header scales and exact payload
+lengths are validated. Validation inputs
 are JSONL objects with board (81 codes), since_capture, ply and clock (50-200);
-optional raw is checked within 1e-6. Every child accumulator is checked against
+optional context, ids (42 slots per half), raw and raw6 check the shared fixtures.
+Raw tolerance is 1e-12; raw6 is used for version 6. Every child accumulator is checked against
 a full refresh. Diagnose requires site clock=200 and additionally searches each position with a fresh
 64 MiB table at the requested node budget, with a 60 s safety ceiling.
 
