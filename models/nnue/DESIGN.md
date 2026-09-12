@@ -508,6 +508,11 @@ unchanged, everything around them is rebuilt.
     against 348-350 ms per 8,192-row step on eight threads); over 2 M gen3
     rows the full context (two or more of each type) holds 40.6 % of the
     perspectives and seven contexts fall under 0.5 %, which the shared
-    factor covers. The Rust reader, the context refresh and the gate (at
-    least 95 % of format 6 nodes per second) are Astra's; parity fixtures
-    in tests/fixtures/format8_*, kept in step by py/tests/test_fixtures.py.
+    factor covers. Rust reads versions 6/8 with shared strict validation.
+    Exact counts travel through pending states; halves resolve independently
+    only to their last context change, refreshing from bias and active rows
+    into reused vectors. Diagnose reports materialisations, context changes,
+    updates, discarded halves and timed row work with explicit denominators.
+    Shared parity fixtures in tests/fixtures/format8_* cover 512 positions
+    and 2,986 legal plies, kept in step by py/tests/test_fixtures.py. The
+    throughput gate (at least 95 % of format 6 nodes/s) remains required.

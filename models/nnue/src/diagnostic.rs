@@ -68,6 +68,7 @@ pub fn run(
     #[cfg(feature = "profile")]
     let profile_timer_ns = crate::profile::calibrate();
     let mut search = SearchPool::new(64, threads);
+    search.enable_accumulator_metrics();
     let mut count = 0;
     for (row, line) in input.lines().enumerate() {
         let request: Position =
@@ -186,6 +187,7 @@ pub fn run(
             response["depth"] = serde_json::json!(r.depth);
             response["nodes"] = serde_json::json!(r.nodes);
             response["qnodes"] = serde_json::json!(r.qnodes);
+            response["accumulator"] = serde_json::to_value(search.accumulator_metrics())?;
             response["elapsed_ms"] = serde_json::json!(r.elapsed.as_secs_f64() * 1000.);
             response["aborted"] = serde_json::json!(r.aborted);
             response["partial"] = serde_json::json!(r.partial);

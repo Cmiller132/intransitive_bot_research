@@ -103,6 +103,8 @@ optional context, ids (42 slots per half), raw and raw6 check the shared fixture
 Raw tolerance is 1e-12; raw6 is used for version 6. Every child accumulator is checked against
 a full refresh. Diagnose requires site clock=200 and additionally searches each position with a fresh
 64 MiB table at the requested node budget, with a 60 s safety ceiling.
+Its accumulator work counters and timing denominators are documented in
+models/nnue/README.md; timings are instrumented worker spans.
 
 
 For CPU profiling, build a separate diagnostic binary with

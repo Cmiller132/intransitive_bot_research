@@ -1,5 +1,5 @@
 //! Iterative-deepening PVS with tactical quiescence and a clock-aware TT.
-use crate::net::{Accumulator, Model};
+use crate::net::{Accumulator, FeatureState, Model};
 use engine::tactics::{goal_move as own_goal_move, goal_threat as enemy_goal_threat};
 use engine::{Board, Cell, Outcome, Rules, State};
 fn action_from_to(a: u16) -> (usize, usize) {
@@ -18,6 +18,8 @@ pub const INF: i32 = 32_000;
 pub const MAX_PLY: usize = 120;
 const NO_MOVE: u16 = u16::MAX;
 
+#[cfg(test)]
+mod accumulator_tests;
 #[cfg(test)]
 mod qtt_tests;
 
@@ -186,13 +188,41 @@ impl Table {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Pending {
+    board: Board,
+    action: u16,
+    before: FeatureState,
+    after: FeatureState,
+    ready: u8,
+}
+
+/// Diagnostic work counts summed over search workers; times sum elapsed spans on those workers.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct AccumulatorMetrics {
+    pub prepared_edges: u64,
+    pub exact_count_transitions: u64,
+    pub materializations: u64,
+    pub capped_context_changes: u64,
+    pub full_refreshes: u64,
+    pub half_refreshes: u64,
+    pub incremental_updates: u64,
+    pub row_additions: u64,
+    pub row_subtractions: u64,
+    pub refresh_ns: u64,
+    pub update_ns: u64,
+    pub pending_nodes_discarded: u64,
+    pub pending_halves_discarded: u64,
+}
+
 pub struct Searcher {
     tt: Table,
     generation: u8,
     killers: [[u16; 2]; MAX_PLY + 2],
     history: [[i32; 648]; 2],
     acc: Vec<Accumulator>,
-    pending: Vec<Option<(Board, u16, u32)>>,
+    pending: Vec<Option<Pending>>,
+    metrics: Option<AccumulatorMetrics>,
     hashes: [[u64; 2]; MAX_PLY + 2],
     move_buffers: Vec<Vec<u16>>,
     quiet_buffers: Vec<Vec<u16>>,
@@ -243,6 +273,39 @@ impl SearchPool {
     pub fn threads(&self) -> usize {
         self.workers.len()
     }
+    pub fn enable_accumulator_metrics(&mut self) {
+        for worker in &mut self.workers {
+            worker.metrics = Some(AccumulatorMetrics::default());
+        }
+    }
+    pub fn accumulator_metrics(&self) -> AccumulatorMetrics {
+        let mut total = AccumulatorMetrics::default();
+        for worker in &self.workers {
+            if let Some(m) = worker.metrics {
+                total.prepared_edges += m.prepared_edges;
+                total.exact_count_transitions += m.exact_count_transitions;
+                total.materializations += m.materializations;
+                total.capped_context_changes += m.capped_context_changes;
+                total.full_refreshes += m.full_refreshes;
+                total.half_refreshes += m.half_refreshes;
+                total.incremental_updates += m.incremental_updates;
+                total.row_additions += m.row_additions;
+                total.row_subtractions += m.row_subtractions;
+                total.refresh_ns += m.refresh_ns;
+                total.update_ns += m.update_ns;
+                total.pending_nodes_discarded += m.pending_nodes_discarded;
+                total.pending_halves_discarded += m.pending_halves_discarded;
+            }
+        }
+        total
+    }
+    fn reset_metrics(&mut self) {
+        for worker in &mut self.workers {
+            if let Some(m) = &mut worker.metrics {
+                *m = AccumulatorMetrics::default();
+            }
+        }
+    }
     pub fn clear(&mut self) {
         self.workers[0].tt.clear();
         for worker in &mut self.workers {
@@ -256,6 +319,7 @@ impl SearchPool {
     }
     /// Node-budget play uses one worker regardless of the timed-search configuration.
     pub fn search_one(&mut self, model: &Model, state: &State, limits: Limits) -> SearchResult {
+        self.reset_metrics();
         self.workers[0].forced_deadline = None;
         self.workers[0].search(model, state, None, limits)
     }
@@ -266,6 +330,7 @@ impl SearchPool {
         allowed: Option<&[u16]>,
         limits: Limits,
     ) -> SearchResult {
+        self.reset_metrics();
         if self.workers.len() == 1 {
             self.workers[0].forced_deadline = None;
             return self.workers[0].search(model, state, allowed, limits);
@@ -334,6 +399,7 @@ impl Searcher {
             history: [[0; 648]; 2],
             acc: Vec::new(),
             pending: vec![None; MAX_PLY + 2],
+            metrics: None,
             hashes: [[0; 2]; MAX_PLY + 2],
             move_buffers: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(80)).collect(),
             quiet_buffers: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(80)).collect(),
@@ -396,7 +462,17 @@ impl Searcher {
                 .collect();
         }
         self.pending.fill(None);
-        self.acc[0] = model.refresh(&state.board, state.since_capture, 200);
+        let timer = self.metrics.map(|_| Instant::now());
+        let rows = model.refresh_into(&state.board, state.since_capture, 200, &mut self.acc[0]);
+        if let Some(m) = &mut self.metrics {
+            *m = AccumulatorMetrics {
+                full_refreshes: 1,
+                materializations: 2,
+                row_additions: rows,
+                refresh_ns: timer.unwrap().elapsed().as_nanos() as u64,
+                ..AccumulatorMetrics::default()
+            };
+        }
         self.hashes[0] = [
             board_hash(&state.board),
             board_hash(&engine::flip(&state.board)),
@@ -516,6 +592,9 @@ impl Searcher {
         result.qnodes = self.qnodes;
         result.elapsed = self.start.elapsed();
         result.aborted = self.stopped;
+        for ply in 1..self.pending.len() {
+            self.discard_pending(ply);
+        }
         result
     }
 
@@ -1018,23 +1097,79 @@ impl Searcher {
         self.hashes[ply + 1] = child_hashes(self.hashes[ply], &state.board, action);
         self.tt
             .prefetch(position_key(self.hashes[ply + 1][0], child_since_capture));
-        self.pending[ply + 1] = Some((state.board, action, child_since_capture));
+        self.discard_pending(ply + 1);
+        let before = self.pending[ply].map_or(self.acc[ply].state, |p| p.after);
+        let after = before.after(&state.board, action, child_since_capture);
+        self.pending[ply + 1] = Some(Pending {
+            board: state.board,
+            action,
+            before,
+            after,
+            ready: 0,
+        });
+        if let Some(m) = &mut self.metrics {
+            m.prepared_edges += 1;
+            m.exact_count_transitions +=
+                u64::from(state.board[action_from_to(action).1] != Cell::Empty);
+        }
     }
 
-    /// Materialize the pending ancestor chain only when a static value is needed.
+    fn discard_pending(&mut self, ply: usize) {
+        if let Some(p) = self.pending[ply].take() {
+            if let Some(m) = &mut self.metrics {
+                m.pending_nodes_discarded += 1;
+                m.pending_halves_discarded += 2 - p.ready.count_ones() as u64;
+            }
+        }
+    }
+
+    /// Resolve each half through its ancestors only as far as its last context change.
     fn resolve_acc(&mut self, model: &Model, ply: usize) {
-        let Some((board, action, since_capture)) = self.pending[ply].take() else {
+        self.resolve_half(model, ply, 0);
+        self.resolve_half(model, ply, 1);
+    }
+
+    fn resolve_half(&mut self, model: &Model, ply: usize, side: usize) {
+        let Some(p) = self.pending[ply] else {
             return;
         };
-        self.resolve_acc(model, ply - 1);
+        if p.ready & (1 << side) != 0 {
+            return;
+        }
+        let refresh = model.requires_refresh(p.before, p.after, side);
+        if !refresh {
+            self.resolve_half(model, ply - 1, side ^ 1);
+        }
+        let timer = self.metrics.map(|_| Instant::now());
         let (parents, children) = self.acc.split_at_mut(ply);
-        model.update(
-            &parents[ply - 1],
-            &board,
-            action,
-            since_capture,
-            &mut children[0],
-        );
+        let (src, dst) = if side == 0 {
+            (&parents[ply - 1].opponent, &mut children[0].own)
+        } else {
+            (&parents[ply - 1].own, &mut children[0].opponent)
+        };
+        let (added, removed) =
+            model.update_perspective(src, &p.board, p.action, p.before, p.after, side, dst);
+        if let Some(m) = &mut self.metrics {
+            m.materializations += 1;
+            m.capped_context_changes +=
+                u64::from(p.before.contexts()[side ^ 1] != p.after.contexts()[side]);
+            m.row_additions += added;
+            m.row_subtractions += removed;
+            let elapsed = timer.unwrap().elapsed().as_nanos() as u64;
+            if refresh {
+                m.half_refreshes += 1;
+                m.refresh_ns += elapsed;
+            } else {
+                m.incremental_updates += 1;
+                m.update_ns += elapsed;
+            }
+        }
+        let pending = self.pending[ply].as_mut().unwrap();
+        pending.ready |= 1 << side;
+        if pending.ready == 3 {
+            self.acc[ply].state = p.after;
+            self.pending[ply] = None;
+        }
     }
 
     fn order(&mut self, state: &State, actions: &mut [u16], tt_move: u16, ply: usize) {

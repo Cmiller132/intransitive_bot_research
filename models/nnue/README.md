@@ -3,7 +3,7 @@
 A CPU engine: a sparse, incrementally updated integer network (two
 perspectives sharing a table of int16 rows over 13,640 features in format 8,
 piece-square rows conditioned on the opponent's material, or the incumbent's
-1,004 in format 6; 512 wide by default and any multiple of 32) scores positions
+1,004 in format 6; 512 wide by default and multiples of 32 from 32 through 1,024) scores positions
 inside a principal-variation search (partial-root selection, horizon-matched
 quiescence TT bounds, cached static evaluation, history-aware reductions,
 reverse and late quiet futility)
@@ -65,6 +65,21 @@ The two halves share only the feature definition and the file format:
   checks `raw6` when supplied. Raw tolerance is 1e-12. Built
   with `--features nnue/profile`, `diagnose` adds a sampled profile
   (accumulator, dense head, readout, move generation, ordering, table).
+  Diagnose always adds `accumulator` counters; ordinary play has no accumulator
+  timers. `prepared_edges` counts deferred child preparations, including repeats;
+  `exact_count_transitions` counts captures among them. `materializations` counts
+  halves, including two for the root `full_refreshes`; `half_refreshes` rebuild
+  a changed context and `incremental_updates` reuse an unchanged half.
+  `capped_context_changes` counts context changes encountered by materialised
+  halves (also reported for format 6). `row_additions`/`row_subtractions` count
+  feature rows, excluding bias copies. `refresh_ns`/`update_ns` sum timed worker
+  spans, exclude ancestor resolution and include timer overhead; they are not
+  unprofiled throughput. `pending_nodes_discarded` counts preparations with an
+  unresolved half when overwritten or abandoned at search end;
+  `pending_halves_discarded` counts those unresolved halves. Thus
+  `materializations = 2*full_refreshes + half_refreshes + incremental_updates`,
+  and `2*prepared_edges + 2*full_refreshes = materializations + pending_halves_discarded`.
+  All counters sum across active workers and reset for each root.
 - `bot analyse --engine nnue:<file>`: the analyser interface (static
   evaluation as the head, child static values as Q, a `sims` x 2,500-node
   search); `nnue.label --engine nnue:<file>` rescores positions with it.
@@ -150,6 +165,10 @@ per perspective (20 pieces, 20 attacked pieces, two clock rows) in the
 format 8 layout; `Layout.rows` maps them onto a format 6 table. The exact
 shared contract, with the fixtures the Rust side is checked against
 (`tests/fixtures/format8_*`), is runs/nnue_plan/format8_contract.md.
+Search carries exact counts and clocks through pending moves without evaluating
+them. Each half resolves only to its last capped-context change: a changed half
+starts from its bias and active piece, attacked and clock rows; the other half
+uses incremental deltas. Root and child vectors are preallocated and reused.
 
 ## Self-play (the volume loop)
 

@@ -355,6 +355,8 @@ impl Model {
         side: usize,
         dst: &mut [i32],
     ) -> (u64, u64) {
+        #[cfg(feature = "profile")]
+        let _probe = crate::profile::Probe::new(crate::profile::Zone::Accumulator);
         let (from, to) = action_from_to(action);
         let piece = board[from].code();
         let captured = board[to].code();
