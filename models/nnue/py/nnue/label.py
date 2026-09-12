@@ -3,7 +3,7 @@ search value from a model engine through `bot analyse`, or an exact proof
 from the engine's tactics, under the site rules.
 
     python -m nnue.label --input <set> --out <set> --engine sq:weights/sq_g128.onnx [--sims 256] [--workers 8]
-        [--rows N] [--seed S]
+        [--rows N] [--seed S | --select <shallow set>]
 
 Rows that win at once are worth 1 and rows whose every move loses in two are
 worth -1 (kind 2); every other row is worth the teacher's root value after
@@ -11,7 +11,11 @@ worth -1 (kind 2); every other row is worth the teacher's root value after
 statistics. The output keeps the input's boards, counters, games, orbits and
 splits, and records the site clock, because the teacher searches under it.
 `--rows N` labels a seeded random sample of N rows of the input (a large set
-of positions whose teacher labels are wanted a slice at a time).
+of positions whose teacher labels are wanted a slice at a time); with
+`--select <set>`, a `nnue.label` pass over a sample of the input at a shallow
+budget, it labels instead the N rows whose input label differs most from
+their shallow label (the positions the shallow search misjudges, the
+selection of step_plan_final.md item D; its control is the seeded sample).
 """
 
 from __future__ import annotations
@@ -29,8 +33,7 @@ import numpy as np
 
 from . import data
 from .games import parse_action
-from .gauntlet import bot_binary
-from .paths import data_dir, workspace_root
+from .paths import bot_binary, data_dir, sha256, workspace_root
 
 SITE_CLOCK = 200
 
@@ -101,6 +104,52 @@ def captures(board: np.ndarray, since: int, ply: int, token: str) -> bool:
     return since_after == 0 and outcome == 0
 
 
+def disagreement(source: Path, shallow: Path, count: int) -> tuple[np.ndarray, dict]:
+    """Indices of the `count` rows of `source` whose label differs most from
+    the same position's label in `shallow`; positions absent from `shallow`
+    are not eligible. Positions match by board and clock state."""
+    from .importer import context_hash
+
+    def keys(directory: Path) -> np.ndarray:
+        return context_hash(
+            np.load(directory / "board.npy", mmap_mode="r"),
+            np.load(directory / "since_capture.npy"),
+            np.load(directory / "capture_clock.npy"),
+        )
+
+    source_key, shallow_key = keys(source), keys(shallow)
+    for name, key in ((source, source_key), (shallow, shallow_key)):
+        if len(np.unique(key)) != len(key):
+            raise ValueError(f"{name} holds duplicate positions; selection needs one row per board and clock state")
+    order = np.argsort(source_key, kind="stable")
+    index = order[np.minimum(np.searchsorted(source_key, shallow_key, sorter=order), len(order) - 1)]
+    if not np.array_equal(source_key[index], shallow_key):
+        raise ValueError(f"{shallow} holds positions that are not in {source}; it must be a labelling of the source")
+    gap = np.abs(np.load(source / "target.npy")[index] - np.load(shallow / "target.npy"))
+    if not np.isfinite(gap).all():
+        raise ValueError("non-finite label gap")
+    if len(gap) < count:
+        raise ValueError(f"{len(gap)} eligible rows in {shallow}, {count} requested")
+    top = np.argsort(-gap, kind="stable")[:count]
+    stats = {
+        "pool": int(len(gap)),
+        "selected": int(len(top)),
+        "gap_min": float(gap[top].min()) if len(top) else None,
+        "gap_mean": float(gap[top].mean()) if len(top) else None,
+        "pool_gap_mean": float(gap.mean()) if len(gap) else None,
+    }
+    return np.sort(index[top]), stats
+
+
+def network_hash(engine_spec: str) -> str | None:
+    """The hash of the network an `nnue:<file>[?...]` spec names; None for other engines."""
+    kind, _, rest = engine_spec.partition(":")
+    if kind != "nnue":
+        return None
+    file = Path(rest.partition("?")[0])
+    return sha256(file if file.is_absolute() else workspace_root() / file)
+
+
 def label(
     input_set: str,
     out: str,
@@ -110,6 +159,7 @@ def label(
     sample: int = 0,
     seed: int = 0,
     quiet_best: bool = False,
+    select: str = "",
 ) -> Path:
     """`quiet_best` drops the rows whose chosen move is a capture, Stockfish's
     generation filter: the evaluator then learns positions the search
@@ -118,7 +168,12 @@ def label(
     source = Path(data_dir(input_set))
     rows = {name: np.load(source / f"{name}.npy") for name in data.FIELDS}
     n = len(rows["board"])
-    if sample and sample < n:
+    selection = None
+    if select:
+        chosen, selection = disagreement(source, Path(data_dir(select)), sample or n)
+        rows = {name: value[chosen] for name, value in rows.items()}
+        n = len(chosen)
+    elif sample and sample < n:
         chosen = np.sort(np.random.default_rng(seed).choice(n, sample, replace=False))
         rows = {name: value[chosen] for name, value in rows.items()}
         n = sample
@@ -162,7 +217,6 @@ def label(
         kind=kind[keep],
         capture_clock=np.full(int(keep.sum()), SITE_CLOCK, dtype=np.uint16),
     )
-    provenance = json.loads((source / "provenance.json").read_text(encoding="utf-8"))
     chosen = np.array(chosen_q, dtype=np.float64)
     root = np.array(root_value, dtype=np.float64)
     target_dir = data_dir(out)
@@ -171,10 +225,28 @@ def label(
         labelled,
         {
             "producer": "teacher",
-            "engine": engine_spec,
+            "engine": {
+                "spec": engine_spec,
+                "binary": str(bot_binary()),
+                "binary_sha256": sha256(bot_binary()),
+                "network_sha256": network_hash(engine_spec),
+            },
             "sims": sims,
             "rules": {"capture_clock": SITE_CLOCK, "repetition_draw": False},
-            "input": {"dataset": str(source), "provenance": provenance, "rows": n, "sample": sample, "seed": seed},
+            "input": {
+                "dataset": input_set,
+                "provenance_sha256": sha256(source / "provenance.json"),
+                "rows": n,
+                "sample": sample,
+                "seed": seed,
+            },
+            "select": {
+                "dataset": select,
+                "provenance_sha256": sha256(data_dir(select) / "provenance.json"),
+                **selection,
+            }
+            if selection
+            else None,
             "proofs": int((kind == data.KIND_PROOF).sum()),
             "errors": errors,
             "quiet_best": quiet_best,
@@ -210,8 +282,11 @@ def main(argv: list[str]) -> None:
     parser.add_argument("--rows", type=int, default=0, help="label a random sample of this many rows")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--quiet-best", action="store_true", help="drop rows whose best move is a capture")
+    parser.add_argument("--select", default="", help="label the rows disagreeing most with this shallow labelling")
     args = parser.parse_args(argv)
-    label(args.input, args.out, args.engine, args.sims, args.workers, args.rows, args.seed, args.quiet_best)
+    label(
+        args.input, args.out, args.engine, args.sims, args.workers, args.rows, args.seed, args.quiet_best, args.select
+    )
 
 
 if __name__ == "__main__":

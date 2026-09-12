@@ -1,0 +1,14 @@
+{
+  "format": "RPSNNUE1",
+  "version": 6,
+  "hidden": 32,
+  "buckets": 1,
+  "dense": 32,
+  "qa": 255,
+  "qb": 64,
+  "eval_scale": 600.0,
+  "purpose": "Python/Rust parity of the format 8 reader and refresh (tests/test_fixtures.py rebuilds it)",
+  "formula": "weights[r, j] = ((13 r + 7 j + 5 c) mod 31) - 15 with c the row's context (0 in format 6); bias[j] = 96 + (j mod 7); readout[k] = ((17 k) mod 15) - 7, readout bias 0; dense[i, k] = ((13 i + k) mod 255) - 128; dense bias[i] = (i - 16) 255 x 32; residual[i] = i - 16",
+  "bytes": 66732,
+  "sha256": "831e3bee64cc7f814d01d8ff231269e418b623a8ab9903d4156d1fbf711fec83"
+}
