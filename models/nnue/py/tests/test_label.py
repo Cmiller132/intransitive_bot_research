@@ -99,7 +99,7 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     assert provenance["input"]["provenance_sha256"] == paths.sha256(paths.data_dir("raw") / "provenance.json")
     assert sum(count for _, _, count in seen) == n + 3 and all(s == 64 for _, s, _ in seen)
     cost = provenance["cost"]
-    assert cost["root_attempts"] == n + 3 and cost["processes"] == len(seen) and cost["process_seconds"] >= 0
+    assert cost["submitted"] == n + 3 and cost["processes"] == len(seen) and cost["process_seconds"] >= 0
     assert cost["reported_nodes"] == 0 and cost["attempts_without_node_counts"] == n + 3
 
 

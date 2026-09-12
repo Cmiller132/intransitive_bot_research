@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -107,11 +108,11 @@ def scripted_launch(calls: list, outcomes: dict):
     resumed journal is replayed as C1 does: read back, nothing played, reported again."""
     results = {0: "LL", 1: "LD", 2: "DD", 3: "WD", 4: "WW"}
 
-    def launch(command, err):
+    def launch(command, err, events=None):
         calls.append(command)
         sides = {role: command[command.index(f"--{role}") + 1] for role in ("candidate", "reference")}
         tally: dict = {"W": 0, "D": 0, "L": 0}
-        events = []
+        events = [] if events is None else events
         if "--resume" in command:
             journal = Path(command[command.index("--sprt") + 1])
             tag = journal.name.removesuffix(".jsonl")
@@ -312,6 +313,7 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     with pytest.raises(ValueError):
         experiment.play(spec, directory, spec["matches"][2] | {"tag": "mixed", "reference": "arm:best"})
     assert verdict["arms"][0]["endpoints"]["best"]["sha256"]
+    assert all(e["problem"] is None for e in verdict["arms"][0]["endpoints"].values())
     assert not experiment.lock_path().exists()
 
     # A relaunch trains nothing and plays nothing; the verdict's C1 replay of the finished journal is its only call.
@@ -347,13 +349,25 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     assert "the report, journal or records changed after the match was bound" in m50["problems"]
     assert next(r for r in verdict["rules"] if r["name"] == "gain")["complete"] is False
 
+    # An endpoint that cannot stand for its arm invalidates the matches that used it.
+    sidecar = run / "epoch2.nnue.json"
+    info = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar.write_text(json.dumps({**info, "epoch": 3}), encoding="utf-8")
+    m50 = next(m for m in experiment.verdict(spec, directory, replays=False)["matches"] if m["tag"] == "m50")
+    assert "reference endpoint: epoch 3, the endpoint needs 1" in m50["problems"]
+    sidecar.write_text(json.dumps(info), encoding="utf-8")
+
     # A cached report that C1's replay of the journal contradicts is invalid; so is one bound to another affinity.
-    q_report = directory / "q.json"
-    kept = q_report.read_text(encoding="utf-8")
+    q_report, q_sidecar = directory / "q.json", directory / "q.match.json"
+    kept, kept_sidecar = q_report.read_text(encoding="utf-8"), q_sidecar.read_text(encoding="utf-8")
     q_report.write_text(kept.replace('"llr": 3.0', '"llr": 2.0'), encoding="utf-8")
+    stored = json.loads(kept_sidecar)  # bound as written, so only C1's replay can catch it
+    stored["outputs"]["report"] = paths.sha256(q_report)
+    q_sidecar.write_text(json.dumps(stored), encoding="utf-8")
     q = next(m for m in experiment.verdict(spec, directory)["matches"] if m["tag"] == "q")
     assert not q["valid"] and "C1's replay gives another llr" in q["problems"]
     q_report.write_text(kept, encoding="utf-8")
+    q_sidecar.write_text(kept_sidecar, encoding="utf-8")
     assert experiment.bound({**spec, "affinity": "2-3"}, directory, spec["matches"][2]) == (
         "the report is not bound to this manifest entry, affinity and these files"
     )
@@ -472,6 +486,10 @@ def test_audit_rejects_every_mutation_of_a_journal_or_its_report(workspace, monk
         lines[1]["games"][0]["end"] = "Forfeit"
         return "pair 0: game 0 ended by Forfeit"
 
+    def ply_capped(lines, report):
+        lines[1]["games"][1]["end"] = "PlyCap"
+        return "pair 0: game 1 ended by PlyCap"
+
     def reported_forfeits(lines, report):
         report["forfeits"] = 1
         return "1 forfeits"
@@ -502,6 +520,7 @@ def test_audit_rejects_every_mutation_of_a_journal_or_its_report(workspace, monk
         swapped_seats,
         other_opening,
         forfeited,
+        ply_capped,
         reported_forfeits,
         accepted_with_error,
         malformed_moves,
@@ -536,7 +555,7 @@ def test_fixed_count_audit_reconciles_pairs_and_openings(workspace, monkeypatch)
 def test_endpoint_reuse_is_validated_against_the_arm(workspace):
     arm = {
         "run": "arm2",
-        "train": {"config": {"hidden": 32, "epochs": 4}, "data": [["a", 1.0]]},
+        "train": {"config": {"hidden": 32, "epochs": 4}, "init": "net.nnue", "data": [["a", 1.0]]},
         "endpoints": {"epoch2": "latest@2"},
     }
     file = paths.run_dir("arm2") / "epoch2.nnue"
@@ -547,7 +566,9 @@ def test_endpoint_reuse_is_validated_against_the_arm(workspace):
         "sha256": paths.sha256(file),
         "epoch": 1,
         "config": {"hidden": 32, "epochs": 4, "batch": 64},
+        "data": [["a", 1.0]],
         "datasets": {"a": paths.sha256(paths.data_dir("a") / "provenance.json")},
+        "init_sha256": paths.sha256(workspace / "net.nnue"),
     }
     sidecar.write_text(json.dumps(good), encoding="utf-8")
     assert experiment.endpoint_problem(arm, "epoch2") is None
@@ -555,7 +576,9 @@ def test_endpoint_reuse_is_validated_against_the_arm(workspace):
     for change, expected in (
         ({"epoch": 2}, "epoch 2, the endpoint needs 1"),
         ({"config": {**good["config"], "hidden": 64}}, "config hidden is 64, the arm says 32"),
+        ({"data": [["a", 0.5], ["b", 0.5]]}, "trained on other data shares"),
         ({"datasets": {"a": "0" * 64}}, "trained on other datasets"),
+        ({"init_sha256": None}, "started from another init"),
     ):
         sidecar.write_text(json.dumps({**good, **change}), encoding="utf-8")
         assert experiment.endpoint_problem(arm, "epoch2") == expected
@@ -564,6 +587,82 @@ def test_endpoint_reuse_is_validated_against_the_arm(workspace):
     sidecar.write_text(json.dumps(good), encoding="utf-8")
     file.write_bytes(b"other weights")
     assert experiment.endpoint_problem(arm, "epoch2") == "the file differs from its sidecar's hash"
+    sidecar.write_text(json.dumps({k: v for k, v in good.items() if k != "data"}), encoding="utf-8")
+    assert experiment.endpoint_problem(arm, "epoch2") == "the sidecar lacks data"
+
+
+def test_the_verdict_never_replays_a_missing_or_truncated_journal(workspace, monkeypatch):
+    spec, directory, match, report = sequential_fixture(workspace, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(experiment, "launch", lambda command, err, events=None: calls.append(command))
+    journal = directory / "q.jsonl"
+    kept = journal.read_text(encoding="utf-8")
+    journal.write_text("".join(kept.splitlines(keepends=True)[:9]), encoding="utf-8")  # a running prefix
+    q = next(m for m in experiment.verdict(spec, directory)["matches"] if m["tag"] == "q")
+    assert not q["valid"] and calls == []
+    assert any("8 recorded pairs, the report says 16" in p for p in q["problems"])
+    journal.unlink()
+    q = next(m for m in experiment.verdict(spec, directory)["matches"] if m["tag"] == "q")
+    assert not q["valid"] and calls == []
+    with pytest.raises(RuntimeError, match="no journal"):
+        experiment.replay(spec, directory, match, report)
+    assert calls == []
+
+
+def test_an_interrupted_invocation_keeps_its_timing_and_the_resume_continues_it(workspace, monkeypatch):
+    spec = manifest(workspace)
+    spec["identities"] = experiment.identities(spec)
+    directory = workspace / "runs" / "nnue_gauntlets" / "tiny"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(experiment, "nice", lambda mask: None)
+    match = spec["matches"][2]
+    scripted = scripted_launch([], {"q": ([2, 3, 5, 4, 2], "accept")})
+
+    def interrupted(command, err, events=None):
+        """Sixteen pairs committed and streamed, a seventeenth started, then the coordinator is interrupted."""
+        scripted(command, err)  # writes the full journal; keep its first batch only
+        journal = Path(command[command.index("--sprt") + 1])
+        journal.write_text("".join(journal.read_text(encoding="utf-8").splitlines(keepends=True)[:17]), "utf-8")
+        base = time.monotonic()
+        for pair in range(16):
+            events.append((base + 10.0 * (pair // 8), {"event": "start", "pair": pair, "game": 0}))
+            events.append((base + 10.0 * (pair // 8) + 8, {"event": "end", "pair": pair, "game": 1}))
+        events.append((base + 20.0, {"event": "start", "pair": 16, "game": 0}))
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(experiment, "launch", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        experiment.play(spec, directory, match)
+    timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
+    (first,) = timing["invocations"]
+    assert first["interrupted"] and not first["completed"] and first["returncode"] is None
+    assert first["initial_pairs"] == 0 and first["committed_pairs"] == 16 and first["reported_pairs"] is None
+    assert first["observed_pairs"] == 16 and len(first["batches"]) == 1 and first["batches"][0]["complete"]
+    assert first["active_seconds"] is not None and first["finish_seconds"] is None
+    assert timing["committed_pairs"] == 16 and timing["process_seconds"] > 0
+    monkeypatch.setattr(experiment, "launch", scripted)
+    resumed = experiment.play(spec, directory, match)
+    assert resumed["pairs"] == 16 and resumed["sequential"]["stop_reason"] == "accept"
+    timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
+    assert len(timing["invocations"]) == 2 and timing["invocations"][1]["initial_pairs"] == 16
+    assert timing["committed_pairs"] == 16
+
+
+def test_launch_reaps_the_seats_of_a_coordinator_that_exits_abruptly(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    pid_file = tmp_path / "orphan"
+    script = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "sys.exit(3)\n"
+    )
+    with (tmp_path / "err").open("w") as err:
+        report, events, code = experiment.launch([sys.executable, "-c", script], err)
+    assert (report, events, code) == (None, [], 3)
+    orphan = int(pid_file.read_text())
+    assert not psutil.pid_exists(orphan) or psutil.Process(orphan).status() == psutil.STATUS_DEAD
+    assert orphan not in experiment.SURVIVORS
 
 
 def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
@@ -585,8 +684,9 @@ def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
 
 
 def test_runner_keeps_the_lock_while_a_child_survives(workspace, monkeypatch):
+    real_launch = experiment.launch
     spec = manifest(workspace)
-    spec["arms"], spec["rules"] = [], []
+    spec["arms"], spec["rules"], spec["matches"] = [], [], [spec["matches"][2]]  # the sequential test only
     spec["identities"] = experiment.identities(spec)
     directory = workspace / "runs" / "nnue_gauntlets" / "tiny"
     directory.mkdir(parents=True)
@@ -595,13 +695,14 @@ def test_runner_keeps_the_lock_while_a_child_survives(workspace, monkeypatch):
     monkeypatch.setattr(experiment, "nice", lambda mask: None)
     orphans = []
 
-    def dying_launch(command, err):
+    def dying_launch(command, err, events=None):
         orphans.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]))
         raise RuntimeError("the coordinator died")
 
     monkeypatch.setattr(experiment, "launch", dying_launch)
     with pytest.raises(RuntimeError, match="coordinator died"):
         experiment.main(["run", str(file), "--only", "match"])
+    assert (directory / "q.timing.json").is_file()  # the failed invocation's timing is kept
     held = experiment.lock_read()
     assert held and held["owner"] == "experiment" and held["pid"] == os.getpid()
     with pytest.raises(RuntimeError, match="pid 1"):
@@ -611,12 +712,28 @@ def test_runner_keeps_the_lock_while_a_child_survives(workspace, monkeypatch):
     assert experiment.main(["lock", "release", "experiment", str(os.getpid())]) == 0
     assert experiment.lock_read() is None
 
-    def clean_launch(command, err):
+    def clean_launch(command, err, events=None):
         raise RuntimeError("the coordinator died cleanly")
 
     monkeypatch.setattr(experiment, "launch", clean_launch)
     with pytest.raises(RuntimeError, match="died cleanly"):
         experiment.main(["run", str(file), "--only", "match"])
+    assert experiment.lock_read() is None
+
+    # A real coordinator that spawns a seat and exits abruptly: the seat dies with the job, the lock is released.
+    pid_file = workspace / "orphan"
+    script = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "sys.exit(3)\n"
+    )
+    monkeypatch.setattr(experiment, "launch", real_launch)
+    monkeypatch.setattr(experiment, "command_of", lambda e, d, m: [sys.executable, "-c", script])
+    with pytest.raises(RuntimeError, match="exit code 3"):
+        experiment.main(["run", str(file), "--only", "match"])
+    orphan = int(pid_file.read_text())
+    assert not psutil.pid_exists(orphan) or psutil.Process(orphan).status() == psutil.STATUS_DEAD
     assert experiment.lock_read() is None
 
 

@@ -277,7 +277,7 @@ def label(
             "retries": int(len(retry)),
             "errors": errors,
             "cost": {
-                "root_attempts": int(len(open_rows) + len(retry)),
+                "submitted": int(len(open_rows) + len(retry)),  # request slots, not proven searches
                 "processes": attempts["processes"],
                 "process_seconds": attempts["seconds"],
                 "reported_nodes": nodes,

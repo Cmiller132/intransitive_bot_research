@@ -305,7 +305,7 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
             export_module.export(
                 copy.deepcopy(model).cpu(),
                 out / "best.nnue",
-                {"run": run, "epoch": epoch, "objective": objective, "config": asdict(config), "datasets": provenance},
+                {"run": run, "epoch": epoch, "objective": objective, "config": asdict(config), **inputs},
             )
         if stale >= config.patience or (config.stop_epoch and epoch + 1 >= config.stop_epoch):
             break

@@ -64,20 +64,26 @@ an audit of every match's recorded games reconciled with its report (the
 journal's protocol, digest and provenance against the report, the manifest
 and the pinned files; pairs, seats, openings, endings, the candidate's
 results; how the games ended, the first mover's score, distinct openings,
-mean plies) and, for a finished sequential test, C1's own replay of the
-journal; a match whose records, binding or replay disagree is invalid. The
-runner keeps the lock when a child survives an exceptional exit.
+mean plies) and, for a finished, bound and audited sequential test, C1's
+own replay of the journal; a match whose records, binding or replay
+disagree is invalid. Every `bot eval` runs in a job object that is
+terminated when the invocation ends, however it ends; the runner keeps the
+lock when a member of a job survives its termination.
 """
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
+from ctypes import wintypes
 from pathlib import Path
 
 import psutil
@@ -243,14 +249,15 @@ def train(experiment: dict, arm: dict, stop: int | None) -> None:
 
 
 def snapshot(checkpoint: Path, target: Path) -> dict:
-    """Export a checkpoint exactly as the trainer would export it at that epoch."""
+    """Export a checkpoint exactly as the trainer would export it at that
+    epoch, with the run's binding (data shares, dataset hashes, init hash)."""
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
     config = saved["config"]
     model = NNUE(config["hidden"], config["version"])
     model.load_state_dict(saved["model"])
-    return export.export(
-        model, target, {"checkpoint": str(checkpoint), "epoch": saved["epoch"], "step": saved["step"], "config": config}
-    )
+    metadata = {"checkpoint": str(checkpoint), "epoch": saved["epoch"], "step": saved["step"], "config": config}
+    metadata.update({key: saved[key] for key in ("data", "datasets", "init_sha256")})
+    return export.export(model, target, metadata)
 
 
 def endpoint_file(run: str, name: str) -> Path:
@@ -259,34 +266,41 @@ def endpoint_file(run: str, name: str) -> Path:
 
 def endpoint_problem(arm: dict, name: str) -> str | None:
     """Why an existing endpoint file cannot stand for this arm (None when it
-    can): its sidecar must hash the file and carry the arm's config, the
-    checkpoint epoch its source names and, when it records them, the arm's
-    datasets."""
+    can): its sidecar must hash the file and carry the arm's config, data
+    shares, dataset hashes, init hash and the checkpoint epoch its source
+    names. An endpoint without that binding is refused; there is no fallback."""
     file = endpoint_file(arm["run"], name)
     sidecar = file.with_suffix(".nnue.json")
     if not sidecar.is_file():
         return "no sidecar"
     info = json.loads(sidecar.read_text(encoding="utf-8"))
-    if info.get("sha256") != sha256(file):
+    for key in ("sha256", "epoch", "config", "data", "datasets", "init_sha256"):
+        if key not in info:
+            return f"the sidecar lacks {key}"
+    if info["sha256"] != sha256(file):
         return "the file differs from its sidecar's hash"
     spec = arm.get("train", {})
-    config = info.get("config") or {}
     for key, value in spec.get("config", {}).items():
-        if config.get(key) != value:
-            return f"config {key} is {config.get(key)!r}, the arm says {value!r}"
+        if info["config"].get(key) != value:
+            return f"config {key} is {info['config'].get(key)!r}, the arm says {value!r}"
+    if "train" in arm:
+        if [list(part) for part in info["data"]] != [list(part) for part in spec.get("data", [])]:
+            return "trained on other data shares"
+        expected = {name: sha256(data_dir(name) / "provenance.json") for name, _ in spec.get("data", [])}
+        if info["datasets"] != expected:
+            return "trained on other datasets"
+        init = sha256(absolute(spec["init"])) if spec.get("init") else None
+        if info["init_sha256"] != init:
+            return "started from another init"
     source = arm.get("endpoints", {}).get(name, "")
     total = int(spec.get("config", {}).get("epochs", 20))
-    epoch = info.get("epoch")
+    epoch = info["epoch"]
     if source.startswith("latest@") and epoch != int(source[7:]) - 1:
         return f"epoch {epoch}, the endpoint needs {int(source[7:]) - 1}"
     if source == "latest" and "train" in arm and epoch != total - 1:
         return f"epoch {epoch}, the final checkpoint needs {total - 1}"
     if source == "best" and not (isinstance(epoch, int) and 0 <= epoch < total):
         return f"epoch {epoch} is outside the arm's {total} epochs"
-    if "datasets" in info and spec.get("data"):
-        expected = {name: sha256(data_dir(name) / "provenance.json") for name, _ in spec["data"]}
-        if info["datasets"] != expected:
-            return "trained on other datasets"
     return None
 
 
@@ -448,38 +462,149 @@ def journal_pairs(journal: Path) -> tuple[dict, list[list[dict]]]:
     return header, pairs
 
 
-def stop_tree(process: subprocess.Popen) -> None:
-    """Kills the process and every descendant (the rpsi seats) and waits for them."""
+SURVIVORS: set[int] = (
+    set()
+)  # members of a coordinator's job that outlived its termination; the lock stays until they are gone
+
+
+class IoCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_ulonglong) for name in ("ro", "wo", "oo", "rt", "wt", "ot")]
+
+
+class BasicLimits(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class ExtendedLimits(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", BasicLimits),
+        ("IoInfo", IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def running(pid: int) -> bool:
+    """Whether a process still runs (a terminated one whose handle is held is not running)."""
     try:
-        children = psutil.Process(process.pid).children(recursive=True)
+        return psutil.Process(pid).status() != psutil.STATUS_DEAD
     except psutil.NoSuchProcess:
-        children = []
-    for child in children:
-        try:
-            child.kill()
-        except psutil.NoSuchProcess:
-            pass
-    process.kill()
-    for child in children:
-        try:
-            child.wait(timeout=10)
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-            pass
-    process.wait(timeout=10)
+        return False
 
 
-def launch(command: list[str], err) -> tuple[dict | None, list[tuple[float, dict]], int]:
-    """Runs `bot eval`: its report (the last stdout line without an `event`),
-    the streamed start/end events stamped with the monotonic time of their
-    receipt, and the exit code. An exception while it runs (an interruption,
-    unreadable output) kills the process tree before it propagates."""
-    report, events = None, []
+class Job:
+    """A Windows job object containing the coordinator and every descendant
+    (the rpsi seats inherit it): terminating the job kills them all, whether
+    or not their parent still lives, and the job's member list names what
+    survived without traversing a dead parent."""
+
+    KILL_ON_CLOSE, EXTENDED_LIMITS, PROCESS_IDS, CREATE_SUSPENDED = 0x2000, 9, 3, 0x4
+
+    def __init__(self):
+        self.kernel = ctypes.windll.kernel32
+        self.kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError(ctypes.get_last_error(), "CreateJobObject failed")
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = self.KILL_ON_CLOSE
+        if not self.kernel.SetInformationJobObject(
+            wintypes.HANDLE(self.handle), self.EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+
+    def assign(self, process: subprocess.Popen) -> None:
+        if not self.kernel.AssignProcessToJobObject(
+            wintypes.HANDLE(self.handle), wintypes.HANDLE(int(process._handle))
+        ):
+            raise OSError(
+                ctypes.get_last_error(),
+                "AssignProcessToJobObject failed (is the runner in a job that forbids nesting?)",
+            )
+
+    def members(self) -> list[int]:
+        """The pids still assigned to the job."""
+        count = 1024
+        fields = [("assigned", wintypes.DWORD), ("listed", wintypes.DWORD), ("ids", ctypes.c_size_t * count)]
+        record = type("ProcessIds", (ctypes.Structure,), {"_fields_": fields})()
+        if not self.kernel.QueryInformationJobObject(
+            wintypes.HANDLE(self.handle), self.PROCESS_IDS, ctypes.byref(record), ctypes.sizeof(record), None
+        ):
+            raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
+        return [int(record.ids[i]) for i in range(record.listed)]
+
+    def reap(self, process: subprocess.Popen) -> list[int]:
+        """Terminates the job and waits for its members; the pids that survived."""
+        self.kernel.TerminateJobObject(wintypes.HANDLE(self.handle), 1)
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while (alive := [pid for pid in self.members() if pid != process.pid and running(pid)]) and (
+            time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        self.kernel.CloseHandle(wintypes.HANDLE(self.handle))
+        SURVIVORS.update(alive)
+        return alive
+
+
+def read_lines(stream, lines: queue.Queue) -> None:
+    """Feeds a pipe's lines to a queue, then None (the pipe closed)."""
+    try:
+        for line in stream:
+            lines.put(line)
+    except (OSError, ValueError):
+        pass
+    lines.put(None)
+
+
+def launch(command: list[str], err, events: list | None = None) -> tuple[dict | None, list[tuple[float, dict]], int]:
+    """Runs `bot eval` inside its own job: its report (the last stdout line
+    without an `event`), the streamed start/end events stamped with the
+    monotonic time of their receipt (appended to `events` as they come, so an
+    interruption leaves them with the caller), and the exit code. However the
+    run ends, the job is terminated: an exception kills the tree before it
+    propagates, and a coordinator that exits abruptly leaves no seat behind."""
+    events = [] if events is None else events
+    report = None
+    job = Job()
     process = subprocess.Popen(
-        command, cwd=workspace_root(), stdout=subprocess.PIPE, stderr=err, text=True, encoding="utf-8"
+        command,
+        cwd=workspace_root(),
+        stdout=subprocess.PIPE,
+        stderr=err,
+        text=True,
+        encoding="utf-8",
+        creationflags=Job.CREATE_SUSPENDED,  # assigned to the job before it runs, so every seat inherits it
     )
     try:
+        job.assign(process)
+        psutil.Process(process.pid).resume()
         assert process.stdout is not None
-        for line in process.stdout:
+        lines: queue.Queue = queue.Queue()
+        threading.Thread(target=read_lines, args=(process.stdout, lines), daemon=True).start()
+        while True:
+            try:
+                line = lines.get(timeout=0.5)
+            except queue.Empty:
+                if process.poll() is None:
+                    continue
+                break  # the coordinator has exited; whatever still holds its pipe is an orphan for the reaper
+            if line is None:
+                break
             if not line.strip():
                 continue
             entry = json.loads(line)
@@ -490,10 +615,8 @@ def launch(command: list[str], err) -> tuple[dict | None, list[tuple[float, dict
             elif entry["event"] in ("start", "end"):
                 events.append((time.monotonic(), entry))
         code = process.wait()
-    except BaseException:
-        stop_tree(process)
-        raise
     finally:
+        job.reap(process)
         if process.stdout is not None:
             process.stdout.close()
     return report, events, code
@@ -533,15 +656,25 @@ def occupancy(events: list[tuple[float, dict]], batch: int, concurrent: int) -> 
     return {"observed_pairs": len(pairs), "idle_share": idle, "batches": batches}
 
 
-def record_timing(
-    directory: Path, match: dict, report: dict | None, events: list, pairs: tuple, times: tuple, code: int
-):
-    """Appends one invocation to `<tag>.timing.json`, finished or not: the
-    launch time, pairs before, committed to the journal after and reported;
-    process, startup, play and finish seconds; pairs per second of the play
-    time; the batch occupancy (batch size from the journal header); and the
-    aggregate over every invocation (committed pairs over summed play
-    seconds, never paused time). Written atomically."""
+def committed_pairs(journal: Path) -> int | None:
+    """The complete pairs a journal holds: 0 without a journal, None when its header is unreadable."""
+    if not journal.is_file():
+        return 0
+    try:
+        return len(journal_pairs(journal)[1])
+    except ValueError:
+        return None
+
+
+def record_timing(directory: Path, match: dict, report: dict | None, events: list, pairs: tuple, times: tuple, code):
+    """Appends one invocation to `<tag>.timing.json`, finished, failed or
+    interrupted: the launch time, pairs before, committed to the journal after
+    and reported; process, startup, play (first to last event), active (to
+    the process end when a game was still open) and finish seconds; new pairs
+    per active second; the batch occupancy (batch size from the journal
+    header); and the aggregate over every invocation, committed pairs over
+    summed active seconds and over summed process seconds, never paused
+    time. Written atomically."""
     initial, committed = pairs
     started, launched, ended = times
     journal = directory / f"{match['tag']}.jsonl"
@@ -552,9 +685,14 @@ def record_timing(
     batch = int(header.get("protocol", {}).get("test", {}).get("batch", 16))
     stamps = [at for at, _ in events]
     first, last = (min(stamps), max(stamps)) if stamps else (None, None)
+    completed = code == 0 and report is not None
+    open_tail = bool(events) and events[-1][1]["event"] == "start"
+    active = None if first is None else (ended - first if open_tail or not completed else last - first)
+    new = None if committed is None or initial is None else committed - initial
     entry = {
         "launched_utc": started,
-        "completed": code == 0 and report is not None,
+        "completed": completed,
+        "interrupted": code is None,
         "returncode": code,
         "initial_pairs": initial,
         "committed_pairs": committed,
@@ -562,16 +700,25 @@ def record_timing(
         "process_seconds": ended - launched,
         "startup_seconds": None if first is None else first - launched,
         "play_seconds": None if first is None else last - first,
-        "finish_seconds": None if last is None else ended - last,
-        "pairs_per_second": None if first is None or last <= first else (committed - initial) / (last - first),
+        "active_seconds": active,
+        "finish_seconds": None if last is None or not completed else ended - last,
+        "pairs_per_second": None if new is None or not active or active <= 0 else new / active,
         **occupancy(events, batch, int(match.get("concurrent", 8))),
     }
     path = directory / f"{match['tag']}.timing.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"invocations": []}
     data["invocations"].append(entry)
-    active = sum(i["play_seconds"] or 0.0 for i in data["invocations"])
-    total = sum(i["committed_pairs"] - i["initial_pairs"] for i in data["invocations"])
-    data.update(committed_pairs=total, active_seconds=active, pairs_per_second=total / active if active > 0 else None)
+    counted = [i for i in data["invocations"] if i["committed_pairs"] is not None and i["initial_pairs"] is not None]
+    total = sum(i["committed_pairs"] - i["initial_pairs"] for i in counted)
+    active_sum = sum(i["active_seconds"] or 0.0 for i in data["invocations"])
+    process_sum = sum(i["process_seconds"] for i in data["invocations"])
+    data.update(
+        committed_pairs=total,
+        active_seconds=active_sum,
+        process_seconds=process_sum,
+        pairs_per_second=total / active_sum if active_sum > 0 else None,
+        pairs_per_process_second=total / process_sum if process_sum > 0 else None,
+    )
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, path)
@@ -581,7 +728,7 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
     """The match's report: the one on disk when it is finished and bound to
     this manifest entry, these files and its own outputs, else played (a
     sequential test resumes its journal). A sequential invocation's timing is
-    recorded whether or not it finished, before the report is cached."""
+    recorded however it ends, before the report is cached."""
     for role in ("candidate", "reference"):
         if match[role].endswith((".nnue", ".exe")):
             verify(experiment, side(match[role]))
@@ -597,14 +744,17 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
             return loaded
     command = command_of(experiment, directory, match)
     journal = directory / f"{match['tag']}.jsonl"
-    initial = len(journal_pairs(journal)[1]) if match.get("sprt") and journal.is_file() else 0
+    initial = committed_pairs(journal) if match.get("sprt") else 0
     started, launched = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic()
-    with (directory / f"{match['tag']}.err").open("a", encoding="utf-8") as err:
-        report, events, code = launch(command, err)
-    ended = time.monotonic()
-    if match.get("sprt"):
-        committed = len(journal_pairs(journal)[1]) if journal.is_file() else 0
-        record_timing(directory, match, report, events, (initial, committed), (started, launched, ended), code)
+    events: list = []
+    report, code = None, None
+    try:
+        with (directory / f"{match['tag']}.err").open("a", encoding="utf-8") as err:
+            report, _, code = launch(command, err, events)
+    finally:
+        if match.get("sprt"):
+            times = (started, launched, time.monotonic())
+            record_timing(directory, match, report, events, (initial, committed_pairs(journal)), times, code)
     if code != 0 or report is None:
         raise RuntimeError(f"bot eval failed for {match['tag']} (exit code {code}, see {match['tag']}.err)")
     report_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -617,7 +767,11 @@ def replay(experiment: dict, directory: Path, match: dict, report: dict) -> list
     """C1's own validation of a finished sequential journal: `bot eval --resume`
     on it replays the pairs under the same protocol (so under the same
     affinity), plays nothing once the test has stopped and reports again; the
-    problems are where that report differs from the cached one."""
+    problems are where that report differs from the cached one. Only a
+    journal that exists, is bound and passed the audit is given to C1, so the
+    replay can never start or continue a test."""
+    if not (directory / f"{match['tag']}.jsonl").is_file():
+        raise RuntimeError(f"{match['tag']}: no journal to replay")
     nice(experiment.get("affinity", "16-31"))
     with (directory / f"{match['tag']}.replay.err").open("a", encoding="utf-8") as err:
         again, _, code = launch(command_of(experiment, directory, match), err)
@@ -854,7 +1008,7 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
     validate(experiment)
     for path in fixed_inputs(experiment):
         verify(experiment, path)
-    arms = []
+    arms, broken = [], {}
     for arm in experiment.get("arms", []):
         endpoints = {}
         for name in arm.get("endpoints", {}):
@@ -864,6 +1018,8 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
                 info = json.loads(sidecar.read_text(encoding="utf-8"))
                 kept = {k: info[k] for k in ("sha256", "epoch", "objective") if k in info}
                 endpoints[name] = {"file": str(file), **kept, "problem": endpoint_problem(arm, name)}
+                if endpoints[name]["problem"]:
+                    broken[f"{arm['run']}:{name}"] = endpoints[name]["problem"]
             else:
                 endpoints[name] = None
         arms.append({"run": arm["run"], "epochs": epochs_done(arm["run"]), "endpoints": endpoints})
@@ -873,9 +1029,15 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
         loaded = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else None
         summary = summarise(match, loaded, directory, experiment)
         if summary["played"]:
+            problems = [
+                f"{role} endpoint: {broken[match[role]]}"
+                for role in ("candidate", "reference")
+                if match[role] in broken
+            ]
             problem = bound(experiment, directory, match)
-            problems = [problem] if problem else []
-            if replays and match.get("sprt") and finished(match, loaded):
+            problems += [problem] if problem else []
+            clean = not problems and not summary["problems"]
+            if replays and match.get("sprt") and finished(match, loaded) and clean:
                 problems += replay(experiment, directory, match, loaded)
             if problems:
                 summary["problems"] += problems
@@ -959,7 +1121,9 @@ def main(argv: list[str]) -> int:
     finally:
         # The reservation outlives a failure that leaves a child (a seat's engine) alive: release it by hand
         # once every child is gone (`lock release experiment <pid>`).
-        survivors = [p.pid for p in psutil.Process().children(recursive=True)]
+        survivors = sorted(
+            {p.pid for p in psutil.Process().children(recursive=True)} | {p for p in SURVIVORS if running(p)}
+        )
         if survivors:
             print(json.dumps({"event": "lock_kept", "surviving_children": survivors}), flush=True)
         else:
