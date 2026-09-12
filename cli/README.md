@@ -4,7 +4,7 @@ The `bot` binary. It is the only place that knows every model crate, so the
 match runner stays model-agnostic.
 
 ```
-bot eval  --candidate sq:runs/x/export.onnx [--reference sq:weights/sq_g128.onnx] [--pairs 32] [--sims 32 | --move-ms 100] [--reference-move-ms 100 | --reference-sims 32] [--threads 4] [--player-threads 1] [--seed 0] [--opening-plies 8] [--records games.jsonl] [--stream]
+bot eval  --candidate sq:runs/x/export.onnx [--reference sq:weights/sq_g128.onnx] [--pairs 32 | --sprt pairs.jsonl] [--resume] [--sims 32 | --move-ms 100] [--reference-move-ms 100 | --reference-sims 32] [--threads 4] [--player-threads 1] [--seed 0] [--opening-plies 8] [--records games.jsonl] [--stream]
 bot play  --first sq:a.onnx --second sq:b.onnx [--sims 32 | --move-ms 100] [--player-threads 1] [--seed 0] [--opening-plies 8] [--leaves leaves.jsonl] [--random-moves K --random-from P --random-to Q] [--random-seed S]
 bot rpsi  --player sq:model.onnx [--move-ms 250] [--max-move-ms 250] [--sims 32] [--movetime 100] [--threads 4] [--name intransitive_bot]
 bot analyse --engine conv:model.onnx [--threads 1]   # or sq:<onnx>, nnue:<file.nnue>
@@ -47,6 +47,39 @@ both players receive the candidate budget.
 
 Adding a model means adding one arm to `player_from_spec`. Results are printed
 as JSON.
+
+`eval --sprt pairs.jsonl` runs the fixed C1 pentanomial test: pair-average
+candidate scores 0, .25, .5, .75, 1; hypotheses .50/.52, alpha=beta=.05,
+LLR bounds ±log(19), batches of 16, first check 128, cap 3,008 pairs. It
+conflicts with `--pairs` and `--records`; the journal contains both game
+records for every retired pair. At most 16 concurrent workers are supported.
+The report's `sequential` object includes the protocol, its SHA256 digest,
+five counts, LLR and `stop_reason`: accept, reject, inconclusive or invalid.
+Any forfeit, censored game or numerical failure invalidates the test. Acceptance
+rejects the null; it does not establish a gain of at least two score points.
+Intervals at sequential stopping are descriptive only. Fixed-count eval keeps
+its existing report and flat game-record format.
+
+Native player specs infer the network file to hash. External RPSI seats require
+`--candidate-network PATH` / `--reference-network PATH` for their actual weights,
+and an explicit executable path as the first token of their command. Use direct
+engine executables; wrapper scripts and undeclared auxiliary model files are
+not covered by this identity contract. The coordinator binary, each engine
+binary and network, specs, player threads, CPU affinity, settings and openings
+are bound into the protocol. Repeat the same options with `--resume` to continue;
+any identity change is rejected. A completed journal returns its existing verdict.
+
+The journal has an exclusive writer lock. Both colours and the entire batch
+finish before a stopping decision. Records retire in opening-id order and each
+batch is synced. Resume retains complete newline-terminated pair records and
+discards only a torn last line; complete malformed lines fail. Pairs not yet
+journaled are replayed after a crash. Wall-clock timings are not deterministic.
+
+Numerical/reference tests run with `cargo test -p match --test sprt_reference`.
+Before live use, run the production-rule simulation with
+`cargo test -p match --release --test sprt_calibration -- --ignored --nocapture`.
+The frozen Python fixtures live at `match/tests/fixtures/sprt.json`; production
+statistics and the maintained calibration are Rust only.
 
 `bot --version` prints the crate version followed by the git short hash and
 `-dirty` when the checkout had uncommitted changes at build time (build.rs);

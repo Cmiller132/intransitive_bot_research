@@ -374,9 +374,14 @@ unchanged, everything around them is rebuilt.
     a many-pass GPU continuation can try it.
 34. Search: multithreading worth at four threads against doubled time, and
     the evaluator's cost per node (profile and SIMD work), both under
-    measurement by Astra; then time management at 250 ms; sequential
-    testing (SPRT) in `bot eval` if a paired-outcome likelihood is added
-    cleanly. Since 2026-09-10 the arena seat plays under a wall clock
+    measurement by Astra; then time management at 250 ms. Sequential
+    testing uses `bot eval --sprt <journal>`: pentanomial expectation MLE,
+    score hypotheses .50/.52, alpha=beta=.05, checks every 16 pairs from
+    128 through the 3,008-pair cap; invalid forfeits and hash-bound resume.
+    Rust agrees with the independent reference on 20 likelihood values and
+    265 trajectory checks; simulated-distribution calibration is maintained
+    in `match/tests/sprt_calibration.rs`. Protocol and measured calibration
+    are recorded in `runs/nnue_plan/astra_status20.md`. Since 2026-09-10 the arena seat plays under a wall clock
     (`bot rpsi --movetime 100` overrides the host's `go sims 32`), so
     nodes per second count in the arena as well as in the timed matches;
     the speed work (a `znver4` target for both Zen 4 machines, staged move

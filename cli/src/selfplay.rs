@@ -138,7 +138,7 @@ struct Manifest {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn file_hash(path: &Path) -> Result<String> {
+pub(crate) fn file_hash(path: &Path) -> Result<String> {
     let mut input = BufReader::new(File::open(path)?);
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
