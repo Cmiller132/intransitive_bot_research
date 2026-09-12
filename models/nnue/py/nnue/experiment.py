@@ -642,7 +642,7 @@ def pair_points(games: list[dict]) -> int:
     return points
 
 
-ENDS = {"Goal", "Elimination", "Stalemate", "CaptureClock", "PlyCap"}  # a forfeit or an interruption is no result
+ENDS = {"Goal", "Elimination", "Stalemate", "CaptureClock"}  # C1 censors Forfeit, PlyCap and Interrupted
 
 
 def first_mover_points(game: dict) -> float:
