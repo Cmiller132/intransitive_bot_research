@@ -88,10 +88,13 @@ python -m nnue.experiment verdict runs/nnue_gauntlets/<name>/experiment.json
 
 The data loop is generate (self-play, below), import, train, label, train
 again: `nnue.label` gives every row an exact proof from the engine or the
-teacher's root value from `bot analyse` (a root whose search fails is
-searched once more under the same budget, never replaced by another root;
-provenance counts `retries` and the `errors` left after them), and
-`nnue.gpu_label` does the same
+teacher's root value from `bot analyse` (one process per chunk of roots,
+answers matched by request id; the answers a dying process gave are kept
+and a root it did not answer is searched once more under the same budget,
+never replaced by another root; provenance counts `retries`, the `errors`
+left after them and the `cost`: root attempts, processes and their wall
+seconds, the nodes the answers report, the attempts whose node count is
+unknown), and `nnue.gpu_label` does the same
 in bulk when the GPU is free, through conv's or sq's batched search from a
 training checkpoint (`--teacher`; about 250 positions per second at 128
 simulations on the RTX 4070 Ti, against one or two per second per CPU

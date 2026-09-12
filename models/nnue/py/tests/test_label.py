@@ -3,6 +3,7 @@ fake `bot analyse` written back with the rows' provenance kept, and the
 selection of the rows a shallow labelling misjudges most."""
 
 import json
+import subprocess
 
 import engine
 import numpy as np
@@ -97,6 +98,28 @@ def test_label_writes_teacher_values_and_keeps_provenance(tmp_path, monkeypatch)
     assert provenance["engine"]["binary_sha256"] == paths.sha256(tmp_path / "bot.exe")
     assert provenance["input"]["provenance_sha256"] == paths.sha256(paths.data_dir("raw") / "provenance.json")
     assert sum(count for _, _, count in seen) == n + 3 and all(s == 64 for _, s, _ in seen)
+    cost = provenance["cost"]
+    assert cost["root_attempts"] == n + 3 and cost["processes"] == len(seen) and cost["process_seconds"] >= 0
+    assert cost["reported_nodes"] == 0 and cost["attempts_without_node_counts"] == n + 3
+
+
+def test_analyse_keeps_the_answers_of_a_dying_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    fake_bot(tmp_path, monkeypatch)
+    rows = [{"board": [0] * 81, "since_capture": 0, "ply": k} for k in range(4)]
+    answer = {"search": {"root_value": 0.1, "lines": [], "nodes": 5}}
+    out = json.dumps({"id": 1, **answer}) + "\n" + json.dumps({"id": 0, **answer}) + '\n{"id": 2, "sea'
+    sent = []
+
+    def run(command, input, **kwargs):
+        sent.append(input)
+        return subprocess.CompletedProcess(command, 1, stdout=out, stderr="boom")
+
+    monkeypatch.setattr(label.subprocess, "run", run)
+    responses = label.analyse("sq:fake", rows, 8)
+    assert responses[:2] == [{"id": 0, **answer}, {"id": 1, **answer}]
+    assert [r["error"] for r in responses[2:]] == ["bot analyse exited with 1: boom"] * 2
+    assert [json.loads(line)["id"] for line in sent[0].splitlines()] == [0, 1, 2, 3]
 
 
 def test_selection_takes_the_rows_the_shallow_labels_misjudge_most(tmp_path, monkeypatch):

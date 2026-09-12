@@ -7,7 +7,7 @@ priority on the declared logical CPUs, under the workspace's compute lock.
     python -m nnue.experiment pin <experiment.json>
     python -m nnue.experiment run <experiment.json> [--only train|match]
     python -m nnue.experiment verdict <experiment.json>
-    python -m nnue.experiment lock status | acquire <owner> <phase> [<mask>] | release <owner>
+    python -m nnue.experiment lock status | acquire <owner> <phase> [<mask>] | release <owner> [<pid>]
 
 The file (schema 2) sits in its experiment directory, where the match
 reports, journals, timings and `verdict.json` are written:
@@ -50,16 +50,23 @@ overhead is equal) playing the experiment's `network`. A match with
 `<tag>.jsonl`, resumed when it exists, stopped by its own rule, streamed so
 that `<tag>.timing.json` records each invocation's pairs, wall time and the
 batch-barrier idle share); every other match plays `pairs` openings and
-records its games. A played match is bound to its manifest entry and the
-hashes of the files it used (`<tag>.match.json`); a report whose binding
-differs is played again. Rule types: `lower_bound_above` and
+records its games. A played match is bound to its manifest entry, the
+affinity, the hashes of the files it used and of its own report and journal
+or records (`<tag>.match.json`); a report whose binding differs is played
+again and judged invalid. An existing endpoint is reused only when its
+sidecar carries the arm's config, the epoch its source names and the file's
+hash. Rule types: `lower_bound_above` and
 `score_at_least` (fixed-count matches only: the paired bootstrap lower
 bound above, or the score at least, the threshold in every named match) and
 `sprt_accept` (sequential matches only: every named test accepted). The
-verdict records numbers, rule outcomes and an audit of every match's
-recorded games reconciled with its report (pairs, games, the candidate's
+verdict verifies the pinned inputs and records numbers, rule outcomes and
+an audit of every match's recorded games reconciled with its report (the
+journal's protocol, digest and provenance against the report, the manifest
+and the pinned files; pairs, seats, openings, endings, the candidate's
 results; how the games ended, the first mover's score, distinct openings,
-mean plies); a match whose records or binding disagree is invalid.
+mean plies) and, for a finished sequential test, C1's own replay of the
+journal; a match whose records, binding or replay disagree is invalid. The
+runner keeps the lock when a child survives an exceptional exit.
 """
 
 from __future__ import annotations
@@ -250,8 +257,44 @@ def endpoint_file(run: str, name: str) -> Path:
     return run_dir(run) / ("best.nnue" if name == "best" else f"{name}.nnue")
 
 
+def endpoint_problem(arm: dict, name: str) -> str | None:
+    """Why an existing endpoint file cannot stand for this arm (None when it
+    can): its sidecar must hash the file and carry the arm's config, the
+    checkpoint epoch its source names and, when it records them, the arm's
+    datasets."""
+    file = endpoint_file(arm["run"], name)
+    sidecar = file.with_suffix(".nnue.json")
+    if not sidecar.is_file():
+        return "no sidecar"
+    info = json.loads(sidecar.read_text(encoding="utf-8"))
+    if info.get("sha256") != sha256(file):
+        return "the file differs from its sidecar's hash"
+    spec = arm.get("train", {})
+    config = info.get("config") or {}
+    for key, value in spec.get("config", {}).items():
+        if config.get(key) != value:
+            return f"config {key} is {config.get(key)!r}, the arm says {value!r}"
+    source = arm.get("endpoints", {}).get(name, "")
+    total = int(spec.get("config", {}).get("epochs", 20))
+    epoch = info.get("epoch")
+    if source.startswith("latest@") and epoch != int(source[7:]) - 1:
+        return f"epoch {epoch}, the endpoint needs {int(source[7:]) - 1}"
+    if source == "latest" and "train" in arm and epoch != total - 1:
+        return f"epoch {epoch}, the final checkpoint needs {total - 1}"
+    if source == "best" and not (isinstance(epoch, int) and 0 <= epoch < total):
+        return f"epoch {epoch} is outside the arm's {total} epochs"
+    if "datasets" in info and spec.get("data"):
+        expected = {name: sha256(data_dir(name) / "provenance.json") for name, _ in spec["data"]}
+        if info["datasets"] != expected:
+            return "trained on other datasets"
+    return None
+
+
 def run_arm(experiment: dict, arm: dict) -> None:
     run, endpoints = arm["run"], arm.get("endpoints", {})
+    for name in endpoints:
+        if endpoint_file(run, name).is_file() and (problem := endpoint_problem(arm, name)):
+            raise RuntimeError(f"{run}: endpoint {name} cannot stand for this arm ({problem})")
     if all(endpoint_file(run, name).is_file() for name in endpoints):
         return
     if "train" in arm:
@@ -298,14 +341,14 @@ def seat(experiment: dict, match: dict, role: str) -> list[str]:
     """The `bot eval` arguments of one side: a network under the preregistered
     search, or a search build (`.exe`) playing the experiment's `network` with
     the match's player threads. The child's command is split on whitespace by
-    `bot eval`, so paths with spaces are refused; a sequential test also names
-    the network so the journal hashes the shared weights."""
+    `bot eval`, so paths with whitespace are refused; a sequential test also
+    names the network so the journal hashes the shared weights."""
     file = side(match[role])
     if file.suffix != ".exe":
         return [f"--{role}", f"nnue:{file}"]
     network = verify(experiment, absolute(experiment["network"]))
-    if " " in str(file) or " " in str(network):
-        raise ValueError(f"{match['tag']}: an rpsi seat cannot hold a path with spaces ({file}, {network})")
+    if any(ch.isspace() for ch in f"{file}{network}"):
+        raise ValueError(f"{match['tag']}: an rpsi seat cannot hold a path with whitespace ({file}, {network})")
     out = [f"--{role}", f"rpsi:{file} rpsi --player nnue:{network} --threads {match.get('player_threads', 1)}"]
     if match.get("sprt"):
         out += [f"--{role}-network", str(network)]
@@ -344,23 +387,51 @@ def finished(match: dict, report: dict) -> bool:
 
 
 def binding(experiment: dict, match: dict) -> dict:
-    """What a played match is bound to: its manifest entry and the hashes of the files it used."""
+    """What a played match is bound to: its manifest entry, the affinity it ran
+    under and the hashes of the files it used."""
     files = [absolute(experiment["bot"]), side(match["candidate"]), side(match["reference"])]
     if any(file.suffix == ".exe" for file in files[1:]):
         files.append(absolute(experiment["network"]))
-    return {"match": match, "identities": {relative(file): sha256(file) for file in files}}
+    return {
+        "match": match,
+        "affinity": experiment.get("affinity", "16-31"),
+        "identities": {relative(file): sha256(file) for file in files},
+    }
 
 
-def journal_pairs(journal: Path) -> list[list[dict]]:
-    """The complete pairs of a sequential journal, in order: a header line
-    `{"protocol": ...}`, then `{"pair": n, "games": [candidate first,
-    reference first]}` per pair. Only an unterminated last line is ignored
-    (as `bot eval --resume` does); anything else malformed is an error."""
+def outputs(directory: Path, match: dict) -> dict:
+    """The hashes of a match's report and of its journal or records as they are now."""
+    kind, suffix = ("journal", "jsonl") if match.get("sprt") else ("records", "games.jsonl")
+    files = {"report": directory / f"{match['tag']}.json", kind: directory / f"{match['tag']}.{suffix}"}
+    return {key: sha256(file) if file.is_file() else None for key, file in files.items()}
+
+
+def bound(experiment: dict, directory: Path, match: dict) -> str | None:
+    """Why the match's report is not bound to this manifest entry, affinity,
+    these files and the outputs on disk (None when it is)."""
+    sidecar = directory / f"{match['tag']}.match.json"
+    if not sidecar.is_file():
+        return "no binding sidecar"
+    stored = json.loads(sidecar.read_text(encoding="utf-8"))
+    expected = binding(experiment, match)
+    if {k: stored.get(k) for k in expected} != expected:
+        return "the report is not bound to this manifest entry, affinity and these files"
+    if stored.get("outputs") != outputs(directory, match):
+        return "the report, journal or records changed after the match was bound"
+    return None
+
+
+def journal_pairs(journal: Path) -> tuple[dict, list[list[dict]]]:
+    """The header and the complete pairs of a sequential journal, in order: a
+    header line `{"protocol": ..., "protocol_digest": ...}`, then `{"pair": n,
+    "games": [candidate first, reference first]}` per pair. Only an
+    unterminated last line is ignored (as `bot eval --resume` does); anything
+    else malformed is an error."""
     lines = journal.read_text(encoding="utf-8").split("\n")[:-1]
     if not lines:
         raise ValueError(f"{journal}: no header")
     header = json.loads(lines[0])
-    if not isinstance(header, dict) or "protocol" not in header:
+    if not isinstance(header, dict) or not isinstance(header.get("protocol"), dict) or "protocol_digest" not in header:
         raise ValueError(f"{journal}: the first line is not the protocol header")
     pairs = []
     for n, line in enumerate(lines[1:]):
@@ -374,29 +445,58 @@ def journal_pairs(journal: Path) -> list[list[dict]]:
         ):
             raise ValueError(f"{journal}: malformed pair line {n + 1}")
         pairs.append(games)
-    return pairs
+    return header, pairs
 
 
-def launch(command: list[str], err) -> tuple[dict | None, list[tuple[float, dict]]]:
-    """Runs `bot eval`: its report (the last stdout line without an `event`)
-    and the streamed start/end events, each stamped with the monotonic time
-    of its receipt."""
+def stop_tree(process: subprocess.Popen) -> None:
+    """Kills the process and every descendant (the rpsi seats) and waits for them."""
+    try:
+        children = psutil.Process(process.pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        children = []
+    for child in children:
+        try:
+            child.kill()
+        except psutil.NoSuchProcess:
+            pass
+    process.kill()
+    for child in children:
+        try:
+            child.wait(timeout=10)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            pass
+    process.wait(timeout=10)
+
+
+def launch(command: list[str], err) -> tuple[dict | None, list[tuple[float, dict]], int]:
+    """Runs `bot eval`: its report (the last stdout line without an `event`),
+    the streamed start/end events stamped with the monotonic time of their
+    receipt, and the exit code. An exception while it runs (an interruption,
+    unreadable output) kills the process tree before it propagates."""
     report, events = None, []
-    with subprocess.Popen(
+    process = subprocess.Popen(
         command, cwd=workspace_root(), stdout=subprocess.PIPE, stderr=err, text=True, encoding="utf-8"
-    ) as process:
+    )
+    try:
         assert process.stdout is not None
         for line in process.stdout:
             if not line.strip():
                 continue
             entry = json.loads(line)
+            if not isinstance(entry, dict):
+                raise ValueError(f"bot eval printed {line.strip()[:80]!r}")
             if "event" not in entry:
                 report = entry
             elif entry["event"] in ("start", "end"):
                 events.append((time.monotonic(), entry))
-    if process.returncode != 0:
-        raise RuntimeError(f"bot eval failed with code {process.returncode}")
-    return report, events
+        code = process.wait()
+    except BaseException:
+        stop_tree(process)
+        raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+    return report, events, code
 
 
 def occupancy(events: list[tuple[float, dict]], batch: int, concurrent: int) -> dict:
@@ -434,64 +534,101 @@ def occupancy(events: list[tuple[float, dict]], batch: int, concurrent: int) -> 
 
 
 def record_timing(
-    directory: Path, match: dict, report: dict, events: list, initial: int, launched: float, ended: float
+    directory: Path, match: dict, report: dict | None, events: list, pairs: tuple, times: tuple, code: int
 ):
-    """Appends one invocation's timing to `<tag>.timing.json`: pairs before and
-    after, process, startup, play and finish seconds, pairs per second of the
-    play time and the batch occupancy (the journal header's batch size)."""
+    """Appends one invocation to `<tag>.timing.json`, finished or not: the
+    launch time, pairs before, committed to the journal after and reported;
+    process, startup, play and finish seconds; pairs per second of the play
+    time; the batch occupancy (batch size from the journal header); and the
+    aggregate over every invocation (committed pairs over summed play
+    seconds, never paused time). Written atomically."""
+    initial, committed = pairs
+    started, launched, ended = times
     journal = directory / f"{match['tag']}.jsonl"
-    header = json.loads(journal.read_text(encoding="utf-8").split("\n", 1)[0])
-    batch = int(header["protocol"].get("test", {}).get("batch", 16))
+    try:
+        header = journal_pairs(journal)[0] if journal.is_file() else {}
+    except ValueError:
+        header = {}
+    batch = int(header.get("protocol", {}).get("test", {}).get("batch", 16))
     stamps = [at for at, _ in events]
     first, last = (min(stamps), max(stamps)) if stamps else (None, None)
-    final = int(report.get("pairs") or 0)
     entry = {
-        "launched": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "launched_utc": started,
+        "completed": code == 0 and report is not None,
+        "returncode": code,
         "initial_pairs": initial,
-        "final_pairs": final,
+        "committed_pairs": committed,
+        "reported_pairs": None if report is None else report.get("pairs"),
         "process_seconds": ended - launched,
         "startup_seconds": None if first is None else first - launched,
         "play_seconds": None if first is None else last - first,
         "finish_seconds": None if last is None else ended - last,
-        "pairs_per_second": None if first is None or last <= first else (final - initial) / (last - first),
+        "pairs_per_second": None if first is None or last <= first else (committed - initial) / (last - first),
         **occupancy(events, batch, int(match.get("concurrent", 8))),
     }
     path = directory / f"{match['tag']}.timing.json"
-    invocations = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-    path.write_text(json.dumps([*invocations, entry], indent=2), encoding="utf-8")
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"invocations": []}
+    data["invocations"].append(entry)
+    active = sum(i["play_seconds"] or 0.0 for i in data["invocations"])
+    total = sum(i["committed_pairs"] - i["initial_pairs"] for i in data["invocations"])
+    data.update(committed_pairs=total, active_seconds=active, pairs_per_second=total / active if active > 0 else None)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def play(experiment: dict, directory: Path, match: dict) -> dict:
     """The match's report: the one on disk when it is finished and bound to
-    this manifest entry and these files, else played (a sequential test
-    resumes its journal)."""
+    this manifest entry, these files and its own outputs, else played (a
+    sequential test resumes its journal). A sequential invocation's timing is
+    recorded whether or not it finished, before the report is cached."""
     for role in ("candidate", "reference"):
         if match[role].endswith((".nnue", ".exe")):
             verify(experiment, side(match[role]))
     if (side(match["candidate"]).suffix == ".exe") != (side(match["reference"]).suffix == ".exe"):
         raise ValueError(f"{match['tag']}: a search build plays another search build on the shared network")
     verify(experiment, absolute(experiment["bot"]))
-    bound = binding(experiment, match)
-    report_file, sidecar = directory / f"{match['tag']}.json", directory / f"{match['tag']}.match.json"
-    if report_file.is_file() and sidecar.is_file():
+    if side(match["candidate"]).suffix == ".exe":
+        verify(experiment, absolute(experiment["network"]))
+    report_file = directory / f"{match['tag']}.json"
+    if report_file.is_file() and bound(experiment, directory, match) is None:
         loaded = json.loads(report_file.read_text(encoding="utf-8"))
-        stored = json.loads(sidecar.read_text(encoding="utf-8"))
-        if {k: stored.get(k) for k in bound} == bound and finished(match, loaded):
+        if finished(match, loaded):
             return loaded
     command = command_of(experiment, directory, match)
     journal = directory / f"{match['tag']}.jsonl"
-    initial = len(journal_pairs(journal)) if match.get("sprt") and journal.is_file() else 0
-    launched = time.monotonic()
+    initial = len(journal_pairs(journal)[1]) if match.get("sprt") and journal.is_file() else 0
+    started, launched = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic()
     with (directory / f"{match['tag']}.err").open("a", encoding="utf-8") as err:
-        report, events = launch(command, err)
+        report, events, code = launch(command, err)
     ended = time.monotonic()
-    if report is None:
-        raise RuntimeError(f"bot eval printed no report for {match['tag']} ({match['tag']}.err)")
-    report_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    sidecar.write_text(json.dumps({**bound, "command": command}, indent=2), encoding="utf-8")
     if match.get("sprt"):
-        record_timing(directory, match, report, events, initial, launched, ended)
+        committed = len(journal_pairs(journal)[1]) if journal.is_file() else 0
+        record_timing(directory, match, report, events, (initial, committed), (started, launched, ended), code)
+    if code != 0 or report is None:
+        raise RuntimeError(f"bot eval failed for {match['tag']} (exit code {code}, see {match['tag']}.err)")
+    report_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    sidecar = {**binding(experiment, match), "outputs": outputs(directory, match), "command": command}
+    (directory / f"{match['tag']}.match.json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     return report
+
+
+def replay(experiment: dict, directory: Path, match: dict, report: dict) -> list[str]:
+    """C1's own validation of a finished sequential journal: `bot eval --resume`
+    on it replays the pairs under the same protocol (so under the same
+    affinity), plays nothing once the test has stopped and reports again; the
+    problems are where that report differs from the cached one."""
+    nice(experiment.get("affinity", "16-31"))
+    with (directory / f"{match['tag']}.replay.err").open("a", encoding="utf-8") as err:
+        again, _, code = launch(command_of(experiment, directory, match), err)
+    if code != 0 or again is None:
+        return [f"C1 refuses to replay the journal (exit code {code}, see {match['tag']}.replay.err)"]
+    keys = ("wins", "draws", "losses", "pairs", "complete_pairs")
+    problems = [f"C1's replay gives another {k}" for k in keys if again.get(k) != report.get(k)]
+    mine, theirs = report.get("sequential") or {}, again.get("sequential") or {}
+    keys = ("protocol_digest", "counts", "llr", "stop_reason")
+    problems += [f"C1's replay gives another {k}" for k in keys if theirs.get(k) != mine.get(k)]
+    return problems
 
 
 # Verdict.
@@ -505,69 +642,153 @@ def pair_points(games: list[dict]) -> int:
     return points
 
 
-def audit(match: dict, report: dict, directory: Path) -> dict:
-    """The recorded games of a match reconciled with its report (pairs, games,
-    the candidate's results) and their descriptive counts."""
-    problems: list[str] = []
-    candidate = report.get("candidate")
-    games: list[dict] = []
-    if match.get("sprt"):
-        journal = directory / f"{match['tag']}.jsonl"
-        try:
-            pairs = journal_pairs(journal) if journal.is_file() else []
-        except ValueError as error:
-            pairs, problems = [], [str(error)]
-        games = [g for pair in pairs for g in pair]
-        counts = [0] * 5
-        for pair in pairs:
-            counts[pair_points(pair)] += 1
-        if len(pairs) != report.get("pairs"):
-            problems.append(f"{len(pairs)} recorded pairs, the report says {report.get('pairs')}")
-        if counts != list(report.get("sequential", {}).get("counts") or []):
-            problems.append("the recorded pairs give other pentanomial counts than the report")
-    else:
-        records = directory / f"{match['tag']}.games.jsonl"
-        try:
-            if records.is_file():
-                games = [json.loads(line) for line in records.read_text(encoding="utf-8").split("\n") if line]
-        except ValueError as error:
-            problems.append(f"malformed record: {error}")
-        results: Counter = Counter()
-        for g in games:
-            mine = 0 if g.get("first") == candidate else 1 if g.get("second") == candidate else None
-            if mine is None:
-                problems.append("a recorded game without the candidate")
-                break
-            results["draws" if g["winner"] is None else "wins" if g["winner"] == mine else "losses"] += 1
-        if len(games) != 2 * (report.get("complete_pairs") or 0):
-            problems.append(f"{len(games)} recorded games for {report.get('complete_pairs')} complete pairs")
-        elif any(results[k] != report.get(k) for k in ("wins", "draws", "losses")):
-            problems.append("the recorded games give other results than the report")
-    out = {"games": len(games), "consistent": not problems, "problems": problems}
-    if games:
-        out.update(
-            ends=dict(Counter(g.get("end") for g in games)),
-            first_mover_score=sum(1.0 if g["winner"] == 0 else 0.5 if g["winner"] is None else 0.0 for g in games)
-            / len(games),
-            distinct_openings=len({tuple(g["moves"][: match.get("opening_plies", 8)]) for g in games}),
-            mean_plies=sum(g["plies"] for g in games) / len(games),
-        )
+ENDS = {"Goal", "Elimination", "Stalemate", "CaptureClock", "PlyCap"}  # a forfeit or an interruption is no result
+
+
+def first_mover_points(game: dict) -> float:
+    return 1.0 if game["winner"] == 0 else 0.5 if game["winner"] is None else 0.0
+
+
+def game_result(game: dict, mine: int) -> str:
+    return "draws" if game["winner"] is None else "wins" if game["winner"] == mine else "losses"
+
+
+def check_pair(games: list, names: tuple, opening: int, problems: list[str], where: str) -> bool:
+    """Two games of one opening with the seats swapped, the candidate first in the first game."""
+    candidate, reference = names
+    for n, (game, first, second) in enumerate(zip(games, (candidate, reference), (reference, candidate), strict=True)):
+        if game.get("first") != first or game.get("second") != second:
+            problems.append(f"{where}: game {n} has other seats than the pair's order")
+            return False
+        if game.get("end") not in ENDS:
+            problems.append(f"{where}: game {n} ended by {game.get('end')}")
+            return False
+    if games[0]["moves"][:opening] != games[1]["moves"][:opening]:
+        problems.append(f"{where}: the two games have different openings")
+        return False
+    return True
+
+
+def expected_provenance(experiment: dict, match: dict) -> dict:
+    """The file hashes C1's journal provenance must carry for this match: the
+    coordinator and, per side, the binary and the network."""
+    pinned = experiment.get("identities", {})
+    out = {"coordinator": pinned.get(relative(absolute(experiment["bot"])))}
+    for role in ("candidate", "reference"):
+        file = side(match[role])
+        if file.suffix == ".exe":
+            network = relative(absolute(experiment["network"]))
+            out[role] = {"binary": pinned.get(relative(file)), "network": pinned.get(network)}
+        else:
+            out[role] = {"binary": out["coordinator"], "network": pinned.get(relative(file)) or sha256(file)}
     return out
 
 
-def summarise(match: dict, report: dict | None, directory: Path) -> dict:
+def protocol_problems(protocol: dict, match: dict, experiment: dict | None) -> list[str]:
+    """The journal protocol's settings and provenance against the match and the pinned identities."""
+    settings = protocol.get("settings") or {}
+    expected = {
+        "seed": match["seed"],
+        "move_ms": match["move_ms"],
+        "opening_plies": match.get("opening_plies", 8),
+        "workers": match.get("concurrent", 8),
+    }
+    out = [
+        f"protocol {k} is {settings.get(k)}, the match says {v}" for k, v in expected.items() if settings.get(k) != v
+    ]
+    provenance = protocol.get("provenance") or {}
+    if provenance.get("player_threads") != match.get("player_threads", 1):
+        out.append(f"protocol player threads are {provenance.get('player_threads')}")
+    if experiment is not None:
+        wanted = expected_provenance(experiment, match)
+        if (provenance.get("coordinator") or {}).get("sha256") != wanted["coordinator"]:
+            out.append("the journal's coordinator is not the pinned bot")
+        for role in ("candidate", "reference"):
+            recorded = provenance.get(role) or {}
+            for kind in ("binary", "network"):
+                if (recorded.get(kind) or {}).get("sha256") != wanted[role][kind]:
+                    out.append(f"the journal's {role} {kind} is not the pinned file")
+    return out
+
+
+def audit(match: dict, report: dict, directory: Path, experiment: dict | None = None) -> dict:
+    """The recorded games of a match reconciled with its report (protocol,
+    pairs, seats, openings, endings, results) and their descriptive counts."""
+    problems: list[str] = []
+    names = (report.get("candidate"), report.get("reference"))
+    opening = int(match.get("opening_plies", 8))
+    games: list[dict] = []
+    results: Counter = Counter()
+    out: dict = {}
+    try:
+        if match.get("sprt"):
+            journal = directory / f"{match['tag']}.jsonl"
+            header, pairs = journal_pairs(journal) if journal.is_file() else ({}, [])
+            sequential = report.get("sequential") or {}
+            if header.get("protocol_digest") != sequential.get("protocol_digest") or header.get("protocol") != (
+                sequential.get("protocol")
+            ):
+                problems.append("the journal header's protocol differs from the report's")
+            problems += protocol_problems(header.get("protocol") or {}, match, experiment)
+            counts = [0] * 5
+            for n, pair in enumerate(pairs):
+                if check_pair(pair, names, opening, problems, f"pair {n}"):
+                    counts[pair_points(pair)] += 1
+                    for game, mine in zip(pair, (0, 1), strict=True):
+                        results[game_result(game, mine)] += 1
+            games = [g for pair in pairs for g in pair]
+            if len(pairs) != report.get("pairs") or len(pairs) != report.get("complete_pairs"):
+                problems.append(
+                    f"{len(pairs)} recorded pairs, the report says {report.get('pairs')} "
+                    f"of which {report.get('complete_pairs')} complete"
+                )
+            if counts != list(sequential.get("counts") or []):
+                problems.append("the recorded pairs give other pentanomial counts than the report")
+            if sequential.get("stop_reason") in ("accept", "reject", "inconclusive") and sequential.get("error"):
+                problems.append(f"a completed test reports an error: {sequential.get('error')}")
+        else:
+            records = directory / f"{match['tag']}.games.jsonl"
+            if records.is_file():
+                games = [json.loads(line) for line in records.read_text(encoding="utf-8").split("\n") if line]
+            if len(games) % 2:
+                problems.append("an odd number of recorded games")
+            for n in range(0, len(games) - 1, 2):
+                if check_pair(games[n : n + 2], names, opening, problems, f"pair {n // 2}"):
+                    for game, mine in zip(games[n : n + 2], (0, 1), strict=True):
+                        results[game_result(game, mine)] += 1
+            if len(games) != 2 * (report.get("complete_pairs") or 0):
+                problems.append(f"{len(games)} recorded games for {report.get('complete_pairs')} complete pairs")
+        if any(results[k] != report.get(k) for k in ("wins", "draws", "losses")):
+            problems.append("the recorded games give other results than the report")
+        if report.get("forfeits"):
+            problems.append(f"{report['forfeits']} forfeits")
+        if games:
+            out = {
+                "ends": dict(Counter(g.get("end") for g in games)),
+                "first_mover_score": sum(first_mover_points(g) for g in games) / len(games),
+                "distinct_openings": len({tuple(g["moves"][:opening]) for g in games}),
+                "mean_plies": sum(g["plies"] for g in games) / len(games),
+            }
+    except (TypeError, KeyError, AttributeError, ValueError) as error:
+        problems.append(f"malformed records: {error}")
+        games, out = [], {}
+    return {"games": len(games), "consistent": not problems, "problems": problems, **out}
+
+
+def summarise(match: dict, report: dict | None, directory: Path, experiment: dict | None = None) -> dict:
     if report is None:
         return {"tag": match["tag"], "played": False}
     games = report["wins"] + report["draws"] + report["losses"]
     lo, hi = report["bootstrap_interval"]
-    records = audit(match, report, directory)
+    records = audit(match, report, directory, experiment)
     problems = list(records["problems"])
-    if (
-        str(side(match["candidate"])) not in str(report.get("candidate", ""))
-        or str(side(match["reference"])) not in str(report.get("reference", ""))
-        or report.get("move_ms") != match["move_ms"]
-    ):
-        problems.append("the report's sides or clock differ from the manifest")
+    # C1 names a network side by its path and a search build by the engine's id; the builds are identified
+    # by the journal provenance (sequential) and the binding sidecar (fixed count).
+    for role in ("candidate", "reference"):
+        if side(match[role]).suffix != ".exe" and str(side(match[role])) not in str(report.get(role, "")):
+            problems.append(f"the report's {role} is not the manifest's")
+    if report.get("move_ms") != match["move_ms"]:
+        problems.append("the report's clock differs from the manifest")
     if match.get("sprt"):
         sequential = report.get("sequential", {})
         valid = sequential.get("stop_reason") in ("accept", "reject", "inconclusive")
@@ -596,6 +817,7 @@ def summarise(match: dict, report: dict | None, directory: Path) -> dict:
             llr=sequential.get("llr"),
             counts=sequential.get("counts"),
             protocol_digest=sequential.get("protocol_digest"),
+            protocol=sequential.get("protocol"),
             error=sequential.get("error"),
             interval_descriptive_only=sequential.get("intervals_descriptive_only", True),
         )
@@ -625,8 +847,13 @@ def validate(experiment: dict) -> None:
                 raise ValueError(f"rule {rule['name']}: {rule['type']} judges {kind} matches only")
 
 
-def verdict(experiment: dict, directory: Path) -> dict:
+def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
+    """The experiment judged from what is on disk: the pinned inputs verified,
+    every endpoint and every match audited (a finished sequential journal
+    replayed through C1), the rules decided."""
     validate(experiment)
+    for path in fixed_inputs(experiment):
+        verify(experiment, path)
     arms = []
     for arm in experiment.get("arms", []):
         endpoints = {}
@@ -636,7 +863,7 @@ def verdict(experiment: dict, directory: Path) -> dict:
             if sidecar.is_file():
                 info = json.loads(sidecar.read_text(encoding="utf-8"))
                 kept = {k: info[k] for k in ("sha256", "epoch", "objective") if k in info}
-                endpoints[name] = {"file": str(file), **kept}
+                endpoints[name] = {"file": str(file), **kept, "problem": endpoint_problem(arm, name)}
             else:
                 endpoints[name] = None
         arms.append({"run": arm["run"], "epochs": epochs_done(arm["run"]), "endpoints": endpoints})
@@ -644,16 +871,14 @@ def verdict(experiment: dict, directory: Path) -> dict:
     for match in experiment.get("matches", []):
         report = directory / f"{match['tag']}.json"
         loaded = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else None
-        summary = summarise(match, loaded, directory)
+        summary = summarise(match, loaded, directory, experiment)
         if summary["played"]:
-            bound = directory / f"{match['tag']}.match.json"
-            try:
-                expected = binding(experiment, match)
-                stored = json.loads(bound.read_text(encoding="utf-8")) if bound.is_file() else {}
-                if {k: stored.get(k) for k in expected} != expected:
-                    raise ValueError("the report is not bound to this manifest entry and these files")
-            except (OSError, ValueError) as error:
-                summary["problems"].append(str(error))
+            problem = bound(experiment, directory, match)
+            problems = [problem] if problem else []
+            if replays and match.get("sprt") and finished(match, loaded):
+                problems += replay(experiment, directory, match, loaded)
+            if problems:
+                summary["problems"] += problems
                 summary["valid"] = False
         matches[match["tag"]] = summary
     rules = []
@@ -690,7 +915,7 @@ def main(argv: list[str]) -> int:
             mask = argv[4] if len(argv) > 4 else "16-31"
             print(json.dumps(lock_acquire(argv[2], argv[3], mask, pid=os.getppid())))
         elif argv[1] == "release":
-            print(json.dumps(lock_release(argv[2])))
+            print(json.dumps(lock_release(argv[2], int(argv[3]) if len(argv) > 3 else None)))
         else:
             raise SystemExit(__doc__)
         return 0
@@ -723,10 +948,16 @@ def main(argv: list[str]) -> int:
                 print(json.dumps({"event": "arm", "run": arm["run"], "epochs": epochs_done(arm["run"])}), flush=True)
         if only in (None, "match"):
             for match in experiment.get("matches", []):
-                summary = summarise(match, play(experiment, directory, match), directory)
+                summary = summarise(match, play(experiment, directory, match), directory, experiment)
                 print(json.dumps({"event": "match", **summary}), flush=True)
     finally:
-        lock_release("experiment", os.getpid())
+        # The reservation outlives a failure that leaves a child (a seat's engine) alive: release it by hand
+        # once every child is gone (`lock release experiment <pid>`).
+        survivors = [p.pid for p in psutil.Process().children(recursive=True)]
+        if survivors:
+            print(json.dumps({"event": "lock_kept", "surviving_children": survivors}), flush=True)
+        else:
+            lock_release("experiment", os.getpid())
     print(json.dumps({"event": "verdict", **{k: v for k, v in verdict(experiment, directory).items() if k == "rules"}}))
     return 0
 

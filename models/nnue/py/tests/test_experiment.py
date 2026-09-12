@@ -3,11 +3,15 @@ with a stop, its retained checkpoint and endpoints, a relaunch that skips
 finished steps, matches through a scripted `bot eval`, their bindings and
 timings, the audit and the verdict."""
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
+import psutil
 import pytest
 
 from nnue import experiment, export, paths, train
@@ -51,9 +55,56 @@ def game(pair: int, number: int, result: str, sides: dict) -> dict:
     return {"first": first, "second": second, "winner": winner, "end": end, "plies": 40 + pair, "moves": [f"m{pair}"]}
 
 
+def header_of(command: list, sides: dict) -> dict:
+    """A journal header shaped like C1's: the protocol with its settings and the artifact provenance, and its digest."""
+
+    def artifact(path: str) -> dict:
+        return {"path": path, "sha256": paths.sha256(Path(path))}
+
+    def identity(role: str) -> dict:
+        kind, value = sides[role].split(":", 1)
+        if kind == "rpsi":
+            binary, network = value.split()[0], command[command.index(f"--{role}-network") + 1]
+        else:
+            binary, network = command[0], value
+        return {"spec": sides[role], "binary": artifact(binary), "network": artifact(network)}
+
+    def option(name: str) -> int:
+        return int(command[command.index(name) + 1])
+
+    protocol = {
+        "schema": 1,
+        "test": {"method": "pentanomial_expectation_mle", "batch": 16, "first_check": 128, "cap": 3008},
+        "settings": {
+            "capture_clock": 200,
+            "pairs": 3008,
+            "sims": 0,
+            "move_ms": option("--move-ms"),
+            "reference_move_ms": None,
+            "reference_sims": None,
+            "workers": option("--threads"),
+            "seed": option("--seed"),
+            "opening_plies": option("--opening-plies"),
+            "stream": True,
+        },
+        "openings_sha256": "0" * 64,
+        "provenance": {
+            "coordinator": artifact(command[0]),
+            "version": "test",
+            "player_threads": option("--player-threads"),
+            "logical_cpus": [0, 1],
+            "candidate": identity("candidate"),
+            "reference": identity("reference"),
+        },
+    }
+    digest = hashlib.sha256(json.dumps(protocol, separators=(",", ":")).encode()).hexdigest()
+    return {"protocol": protocol, "protocol_digest": digest}
+
+
 def scripted_launch(calls: list, outcomes: dict):
     """A `launch` that answers `bot eval` with a canned report and records or a journal consistent with it;
-    a sequential test also streams events: pairs of eight seconds, eight at a time, ten seconds apart."""
+    a sequential test also streams events: pairs of eight seconds, eight at a time, ten seconds apart. A
+    resumed journal is replayed as C1 does: read back, nothing played, reported again."""
     results = {0: "LL", 1: "LD", 2: "DD", 3: "WD", 4: "WW"}
 
     def launch(command, err):
@@ -61,13 +112,31 @@ def scripted_launch(calls: list, outcomes: dict):
         sides = {role: command[command.index(f"--{role}") + 1] for role in ("candidate", "reference")}
         tally: dict = {"W": 0, "D": 0, "L": 0}
         events = []
-        if "--sprt" in command:
+        if "--resume" in command:
+            journal = Path(command[command.index("--sprt") + 1])
+            tag = journal.name.removesuffix(".jsonl")
+            header, replayed = experiment.journal_pairs(journal)
+            counts = [0] * 5
+            for pair in replayed:
+                counts[experiment.pair_points(pair)] += 1
+                for played, mine in zip(pair, (0, 1), strict=True):
+                    tally[experiment.game_result(played, mine)[0].upper()] += 1
+            pairs = len(replayed)
+            sequential = {
+                **header,
+                "counts": counts,
+                "llr": 3.0 if outcomes[tag][1] == "accept" else -3.0,
+                "stop_reason": outcomes[tag][1],
+                "intervals_descriptive_only": True,
+            }
+        elif "--sprt" in command:
             journal = command[command.index("--sprt") + 1]
             tag = journal.replace("\\", "/").split("/")[-1].removesuffix(".jsonl")
             counts, stop = outcomes[tag]
             pairs = sum(counts)
+            header = header_of(command, sides)
             with open(journal, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"protocol": {"test": {"batch": 16}}}) + "\n")
+                f.write(json.dumps(header) + "\n")
                 pair = 0
                 for k, count in enumerate(counts):
                     for _ in range(count):
@@ -85,10 +154,10 @@ def scripted_launch(calls: list, outcomes: dict):
                         pair += 1
                 f.write(f'{{"pair": {pair}, "games": [')  # a torn last line
             sequential = {
+                **header,
                 "counts": counts,
                 "llr": 3.0 if stop == "accept" else -3.0,
                 "stop_reason": stop,
-                "protocol_digest": "digest",
                 "intervals_descriptive_only": True,
             }
         else:
@@ -114,7 +183,7 @@ def scripted_launch(calls: list, outcomes: dict):
             "bootstrap_interval": [-0.05, 0.25],
             **({"sequential": sequential} if sequential else {}),
         }
-        return report, events
+        return report, events, 0
 
     return launch
 
@@ -209,7 +278,8 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     q = by_tag["q"]
     assert q["records"]["games"] == 320 and q["records"]["distinct_openings"] == 160 and q["records"]["consistent"]
     assert q["stop_reason"] == "accept" and q["pairs"] == 160 and q["valid"] and q["counts"] == [10, 30, 60, 40, 20]
-    assert q["protocol_digest"] == "digest" and q["interval_descriptive_only"] and q["error"] is None
+    assert len(q["protocol_digest"]) == 64 and q["interval_descriptive_only"] and q["error"] is None
+    assert q["protocol"]["settings"]["seed"] == 3 and q["protocol"]["provenance"]["player_threads"] == 1
     rules = {r["name"]: r for r in verdict["rules"]}
     assert rules["gain"]["complete"] and rules["gain"]["met"] is False
     assert rules["bar"]["met"] is True
@@ -224,49 +294,69 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     fixed = next(c for c in calls if "--records" in c and "patch.exe" in c[c.index("--candidate") + 1])
     assert fixed[fixed.index("--candidate") + 1] == child and "--candidate-network" not in fixed
     timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
-    assert len(timing) == 1 and timing[0]["initial_pairs"] == 0 and timing[0]["final_pairs"] == 160
-    assert timing[0]["observed_pairs"] == 160 and len(timing[0]["batches"]) == 10
-    assert all(b["complete"] for b in timing[0]["batches"])
-    assert timing[0]["idle_share"] == pytest.approx(1 - 128 / (8 * 18))
+    (invocation,) = timing["invocations"]
+    assert invocation["completed"] and invocation["initial_pairs"] == 0 and invocation["committed_pairs"] == 160
+    assert invocation["reported_pairs"] == 160 and invocation["launched_utc"].endswith("Z")
+    assert invocation["observed_pairs"] == 160 and len(invocation["batches"]) == 10
+    assert all(b["complete"] for b in invocation["batches"])
+    assert invocation["idle_share"] == pytest.approx(1 - 128 / (8 * 18))
+    assert timing["committed_pairs"] == 160 and timing["active_seconds"] == invocation["play_seconds"]
     bound = json.loads((directory / "m50.match.json").read_text(encoding="utf-8"))
     assert bound["match"] == spec["matches"][0] and set(bound["identities"]) == {
         "bot.exe",
         "runs/arm/epoch4.nnue",
         "runs/arm/epoch2.nnue",
     }
+    assert bound["affinity"] == "0-1" and set(bound["outputs"]) == {"report", "records"}
+    assert bound["outputs"]["records"] == paths.sha256(directory / "m50.games.jsonl")
     with pytest.raises(ValueError):
         experiment.play(spec, directory, spec["matches"][2] | {"tag": "mixed", "reference": "arm:best"})
     assert verdict["arms"][0]["endpoints"]["best"]["sha256"]
     assert not experiment.lock_path().exists()
 
-    # A relaunch trains nothing and replays nothing.
+    # A relaunch trains nothing and plays nothing; the verdict's C1 replay of the finished journal is its only call.
     calls.clear()
     assert experiment.main(["run", str(file)]) == 0
-    assert calls == []
+    assert len(calls) == 1 and "--resume" in calls[0] and "--stream" in calls[0]
 
     # A sequential test that has not stopped is resumed from its journal.
+    calls.clear()
     report = directory / "q.json"
     unfinished = json.loads(report.read_text(encoding="utf-8"))
     unfinished["sequential"]["stop_reason"] = "running"
     report.write_text(json.dumps(unfinished), encoding="utf-8")
     assert experiment.main(["run", str(file), "--only", "match"]) == 0
-    assert len(calls) == 1 and "--resume" in calls[0]
-    assert len(json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))) == 2
+    assert len(calls) == 2 and all("--resume" in c for c in calls)  # the resumed test, then the verdict's replay
+    timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
+    assert len(timing["invocations"]) == 2 and timing["invocations"][1]["play_seconds"] is None
+    assert timing["committed_pairs"] == 160
 
     # A match whose manifest entry changed is played again; the old report is not reused.
     calls.clear()
     spec["matches"][1]["seed"] = 9
     file.write_text(json.dumps(spec), encoding="utf-8")
     assert experiment.main(["run", str(file), "--only", "match"]) == 0
-    assert len(calls) == 1 and "--records" in calls[0] and calls[0][calls[0].index("--seed") + 1] == "9"
+    assert len(calls) == 2 and "--records" in calls[0] and calls[0][calls[0].index("--seed") + 1] == "9"
 
     # Records that disagree with the report invalidate the match and its rule.
     records = directory / "m50.games.jsonl"
     records.write_text("".join(records.read_text(encoding="utf-8").splitlines(keepends=True)[:-1]), encoding="utf-8")
     verdict = experiment.verdict(spec, directory)
     m50 = next(m for m in verdict["matches"] if m["tag"] == "m50")
-    assert not m50["valid"] and m50["problems"] == ["5 recorded games for 3 complete pairs"]
+    assert not m50["valid"] and "5 recorded games for 3 complete pairs" in m50["problems"]
+    assert "the report, journal or records changed after the match was bound" in m50["problems"]
     assert next(r for r in verdict["rules"] if r["name"] == "gain")["complete"] is False
+
+    # A cached report that C1's replay of the journal contradicts is invalid; so is one bound to another affinity.
+    q_report = directory / "q.json"
+    kept = q_report.read_text(encoding="utf-8")
+    q_report.write_text(kept.replace('"llr": 3.0', '"llr": 2.0'), encoding="utf-8")
+    q = next(m for m in experiment.verdict(spec, directory)["matches"] if m["tag"] == "q")
+    assert not q["valid"] and "C1's replay gives another llr" in q["problems"]
+    q_report.write_text(kept, encoding="utf-8")
+    assert experiment.bound({**spec, "affinity": "2-3"}, directory, spec["matches"][2]) == (
+        "the report is not bound to this manifest entry, affinity and these files"
+    )
 
     # A changed fixed input is refused.
     (root / "bot.exe").write_bytes(b"rebuilt")
@@ -291,15 +381,237 @@ def test_manifest_validation(workspace):
 
 def test_journal_pairs_reject_malformed_lines(tmp_path):
     journal = tmp_path / "q.jsonl"
+    header = '{"protocol": {}, "protocol_digest": "d"}\n'
     pair = json.dumps({"pair": 0, "games": [game(0, 0, "W", {"candidate": "c", "reference": "r"})] * 2})
-    journal.write_text('{"protocol": {}}\n' + pair + "\n" + pair.replace('"pair": 0', '"pair": 1') + "\n", "utf-8")
-    assert len(experiment.journal_pairs(journal)) == 2
-    journal.write_text('{"protocol": {}}\n' + pair + "\n{torn", "utf-8")
-    assert len(experiment.journal_pairs(journal)) == 1
-    for text in ('{"protocol": {}}\n{torn}\n' + pair + "\n", '{"other": 1}\n' + pair + "\n", pair + "\n"):
+    journal.write_text(header + pair + "\n" + pair.replace('"pair": 0', '"pair": 1') + "\n", "utf-8")
+    assert experiment.journal_pairs(journal)[0]["protocol_digest"] == "d"
+    assert len(experiment.journal_pairs(journal)[1]) == 2
+    journal.write_text(header + pair + "\n{torn", "utf-8")
+    assert len(experiment.journal_pairs(journal)[1]) == 1
+    for text in (
+        header + "{torn}\n" + pair + "\n",
+        '{"other": 1}\n' + pair + "\n",
+        '{"protocol": {}}\n' + pair + "\n",
+        pair + "\n",
+    ):
         journal.write_text(text, "utf-8")
         with pytest.raises(ValueError):
             experiment.journal_pairs(journal)
+
+
+def sequential_fixture(workspace, monkeypatch) -> tuple[dict, Path, dict, dict]:
+    """The manifest, its directory, the sequential match `q` played through the scripted `bot eval` and its report."""
+    spec = manifest(workspace)
+    spec["identities"] = experiment.identities(spec)
+    directory = workspace / "runs" / "nnue_gauntlets" / "tiny"
+    directory.mkdir(parents=True)
+    (directory / "experiment.json").write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(experiment, "launch", scripted_launch([], {"q": ([2, 3, 5, 4, 2], "accept"), "qf": (2, 1, 1)}))
+    monkeypatch.setattr(experiment, "nice", lambda mask: None)
+    match = spec["matches"][2]
+    return spec, directory, match, experiment.play(spec, directory, match)
+
+
+def test_audit_rejects_every_mutation_of_a_journal_or_its_report(workspace, monkeypatch):
+    spec, directory, match, report = sequential_fixture(workspace, monkeypatch)
+    journal = directory / "q.jsonl"
+    original = journal.read_text(encoding="utf-8")
+    assert experiment.audit(match, report, directory, spec) == {
+        "games": 32,
+        "consistent": True,
+        "problems": [],
+        "ends": {"Goal": 15, "CaptureClock": 17},
+        "first_mover_score": pytest.approx(16.5 / 32),
+        "distinct_openings": 16,
+        "mean_plies": 47.5,
+    }
+
+    def swap_results(lines, report):
+        report["wins"], report["losses"] = report["losses"], report["wins"]
+        return "the recorded games give other results than the report"
+
+    def other_counts(lines, report):
+        report["sequential"]["counts"] = report["sequential"]["counts"][::-1]
+        return "the recorded pairs give other pentanomial counts than the report"
+
+    def other_digest(lines, report):
+        lines[0]["protocol_digest"] = "x"
+        return "the journal header's protocol differs from the report's"
+
+    def other_seed(lines, report):
+        lines[0]["protocol"]["settings"]["seed"] = 99
+        report["sequential"]["protocol"]["settings"]["seed"] = 99
+        return "protocol seed is 99, the match says 3"
+
+    def other_binary(lines, report):
+        for protocol in (lines[0]["protocol"], report["sequential"]["protocol"]):
+            protocol["provenance"]["candidate"]["binary"]["sha256"] = "0" * 64
+        return "the journal's candidate binary is not the pinned file"
+
+    def other_coordinator(lines, report):
+        for protocol in (lines[0]["protocol"], report["sequential"]["protocol"]):
+            protocol["provenance"]["coordinator"]["sha256"] = "0" * 64
+        return "the journal's coordinator is not the pinned bot"
+
+    def swapped_seats(lines, report):
+        g = lines[1]["games"][0]
+        g["first"], g["second"] = g["second"], g["first"]
+        return "pair 0: game 0 has other seats than the pair's order"
+
+    def other_opening(lines, report):
+        lines[1]["games"][1]["moves"] = ["elsewhere"]
+        return "pair 0: the two games have different openings"
+
+    def forfeited(lines, report):
+        lines[1]["games"][0]["end"] = "Forfeit"
+        return "pair 0: game 0 ended by Forfeit"
+
+    def reported_forfeits(lines, report):
+        report["forfeits"] = 1
+        return "1 forfeits"
+
+    def accepted_with_error(lines, report):
+        report["sequential"]["error"] = "a seat died"
+        return "a completed test reports an error: a seat died"
+
+    def malformed_moves(lines, report):
+        lines[1]["games"][0]["moves"] = 5
+        return "malformed records"
+
+    def malformed_entry(lines, report):
+        lines[1] = [1, 2]
+        return "malformed records"
+
+    def missing_pair(lines, report):
+        del lines[-1]
+        return "15 recorded pairs, the report says 16 of which 16 complete"
+
+    for mutate in (
+        swap_results,
+        other_counts,
+        other_digest,
+        other_seed,
+        other_binary,
+        other_coordinator,
+        swapped_seats,
+        other_opening,
+        forfeited,
+        reported_forfeits,
+        accepted_with_error,
+        malformed_moves,
+        malformed_entry,
+        missing_pair,
+    ):
+        lines = [json.loads(line) for line in original.split("\n")[:-1] if line]  # the torn last line dropped
+        mutated = json.loads(json.dumps(report))
+        expected = mutate(lines, mutated)
+        journal.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+        audit = experiment.audit(match, mutated, directory, spec)
+        assert not audit["consistent"] and any(expected in p for p in audit["problems"]), (mutate.__name__, audit)
+    journal.write_text(original, encoding="utf-8")
+    assert experiment.audit(match, report, directory, spec)["consistent"]
+
+
+def test_fixed_count_audit_reconciles_pairs_and_openings(workspace, monkeypatch):
+    spec, directory, _, _ = sequential_fixture(workspace, monkeypatch)
+    match = spec["matches"][3]
+    report = experiment.play(spec, directory, match)
+    assert experiment.audit(match, report, directory, spec)["consistent"]
+    records = directory / "qf.games.jsonl"
+    games = [json.loads(line) for line in records.read_text(encoding="utf-8").split("\n") if line]
+    games[1]["first"], games[1]["second"] = games[1]["second"], games[1]["first"]
+    games[3]["moves"] = ["elsewhere"]
+    records.write_text("".join(json.dumps(g) + "\n" for g in games), encoding="utf-8")
+    problems = experiment.audit(match, report, directory, spec)["problems"]
+    assert "pair 0: game 1 has other seats than the pair's order" in problems
+    assert "pair 1: the two games have different openings" in problems
+
+
+def test_endpoint_reuse_is_validated_against_the_arm(workspace):
+    arm = {
+        "run": "arm2",
+        "train": {"config": {"hidden": 32, "epochs": 4}, "data": [["a", 1.0]]},
+        "endpoints": {"epoch2": "latest@2"},
+    }
+    file = paths.run_dir("arm2") / "epoch2.nnue"
+    file.parent.mkdir(parents=True)
+    file.write_bytes(b"weights")
+    sidecar = file.with_suffix(".nnue.json")
+    good = {
+        "sha256": paths.sha256(file),
+        "epoch": 1,
+        "config": {"hidden": 32, "epochs": 4, "batch": 64},
+        "datasets": {"a": paths.sha256(paths.data_dir("a") / "provenance.json")},
+    }
+    sidecar.write_text(json.dumps(good), encoding="utf-8")
+    assert experiment.endpoint_problem(arm, "epoch2") is None
+    experiment.run_arm({}, arm)  # nothing to do
+    for change, expected in (
+        ({"epoch": 2}, "epoch 2, the endpoint needs 1"),
+        ({"config": {**good["config"], "hidden": 64}}, "config hidden is 64, the arm says 32"),
+        ({"datasets": {"a": "0" * 64}}, "trained on other datasets"),
+    ):
+        sidecar.write_text(json.dumps({**good, **change}), encoding="utf-8")
+        assert experiment.endpoint_problem(arm, "epoch2") == expected
+        with pytest.raises(RuntimeError, match="cannot stand for this arm"):
+            experiment.run_arm({}, arm)
+    sidecar.write_text(json.dumps(good), encoding="utf-8")
+    file.write_bytes(b"other weights")
+    assert experiment.endpoint_problem(arm, "epoch2") == "the file differs from its sidecar's hash"
+
+
+def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    pid_file = tmp_path / "grandchild"
+    script = (
+        "import json, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "print(json.dumps({'event': 'start', 'pair': 0, 'game': 0}), flush=True)\n"
+        "print('not json', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    with (tmp_path / "err").open("w") as err, pytest.raises(ValueError, match="Expecting value"):
+        experiment.launch([sys.executable, "-c", script], err)
+    grandchild = int(pid_file.read_text())
+    assert not psutil.pid_exists(grandchild) or psutil.Process(grandchild).status() == psutil.STATUS_DEAD
+    assert not any(p.pid == grandchild for p in psutil.Process().children(recursive=True))
+
+
+def test_runner_keeps_the_lock_while_a_child_survives(workspace, monkeypatch):
+    spec = manifest(workspace)
+    spec["arms"], spec["rules"] = [], []
+    spec["identities"] = experiment.identities(spec)
+    directory = workspace / "runs" / "nnue_gauntlets" / "tiny"
+    directory.mkdir(parents=True)
+    file = directory / "experiment.json"
+    file.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(experiment, "nice", lambda mask: None)
+    orphans = []
+
+    def dying_launch(command, err):
+        orphans.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+        raise RuntimeError("the coordinator died")
+
+    monkeypatch.setattr(experiment, "launch", dying_launch)
+    with pytest.raises(RuntimeError, match="coordinator died"):
+        experiment.main(["run", str(file), "--only", "match"])
+    held = experiment.lock_read()
+    assert held and held["owner"] == "experiment" and held["pid"] == os.getpid()
+    with pytest.raises(RuntimeError, match="pid 1"):
+        experiment.main(["lock", "release", "experiment", "1"])
+    orphans[0].kill()
+    orphans[0].wait()
+    assert experiment.main(["lock", "release", "experiment", str(os.getpid())]) == 0
+    assert experiment.lock_read() is None
+
+    def clean_launch(command, err):
+        raise RuntimeError("the coordinator died cleanly")
+
+    monkeypatch.setattr(experiment, "launch", clean_launch)
+    with pytest.raises(RuntimeError, match="died cleanly"):
+        experiment.main(["run", str(file), "--only", "match"])
+    assert experiment.lock_read() is None
 
 
 def test_lock_refuses_a_second_owner_and_a_wrong_release(workspace):

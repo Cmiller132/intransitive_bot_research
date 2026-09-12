@@ -58,20 +58,9 @@ def proofs(board: np.ndarray) -> np.ndarray:
 
 
 def analyse(engine_spec: str, rows: list[dict], sims: int) -> list[dict]:
-    """The responses for `rows`, in order. A process that dies (an analyser
-    panic on one position) is retried on each half of its rows until the
-    single offending row is isolated and answered with an error."""
-    try:
-        return analyse_once(engine_spec, rows, sims)
-    except RuntimeError as failure:
-        if len(rows) == 1:
-            return [{"error": str(failure)}]
-        half = len(rows) // 2
-        return analyse(engine_spec, rows[:half], sims) + analyse(engine_spec, rows[half:], sims)
-
-
-def analyse_once(engine_spec: str, rows: list[dict], sims: int) -> list[dict]:
-    """One `bot analyse` process over `rows`; returns its responses in order."""
+    """The responses for `rows`, in order, from one `bot analyse` process,
+    matched by request id. The answers a dying process gave are kept; a row it
+    did not answer gets an error response, and its one retry is the caller's."""
     command = [str(bot_binary()), "analyse", "--engine", engine_spec, "--threads", "1"]
     requests = "".join(
         json.dumps(
@@ -88,12 +77,21 @@ def analyse_once(engine_spec: str, rows: list[dict], sims: int) -> list[dict]:
         for i, row in enumerate(rows)
     )
     result = subprocess.run(command, input=requests, capture_output=True, text=True, cwd=workspace_root(), check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"bot analyse failed: {result.stderr.strip()}")
-    responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    if len(responses) != len(rows):
-        raise RuntimeError(f"{len(responses)} responses for {len(rows)} requests")
-    return responses
+    answered: dict[int, dict] = {}
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            response = json.loads(line)
+        except ValueError:
+            break  # the torn last line of a dying process
+        if isinstance(response, dict) and isinstance(response.get("id"), int) and 0 <= response["id"] < len(rows):
+            answered[response["id"]] = response
+    if len(answered) < len(rows):
+        tail = result.stderr.strip()[-300:]
+        reason = f"bot analyse exited with {result.returncode}: {tail}" if result.returncode else "no response"
+        return [answered.get(i, {"error": reason}) for i in range(len(rows))]
+    return [answered[i] for i in range(len(rows))]
 
 
 def captures(board: np.ndarray, since: int, ply: int, token: str) -> bool:
@@ -181,6 +179,18 @@ def label(
     kind = np.where(target != 0, data.KIND_PROOF, data.KIND_TEACHER).astype(np.uint8)
     open_rows = np.flatnonzero(kind == data.KIND_TEACHER)
 
+    attempts = {"processes": 0, "seconds": 0.0}  # every process run, failed ones included, and their wall time
+
+    def searched(chunk: list[dict]) -> list[dict]:
+        if not chunk:
+            return []
+        began = time.perf_counter()
+        try:
+            return analyse(engine_spec, chunk, sims)
+        finally:
+            attempts["processes"] += 1
+            attempts["seconds"] += time.perf_counter() - began
+
     def search_rows(indices: np.ndarray) -> dict[int, dict]:
         """`bot analyse` over the rows `indices`, `workers` processes at a time."""
         requests = [
@@ -189,7 +199,7 @@ def label(
         ]
         chunks = [requests[k::workers] for k in range(workers)]
         with ThreadPoolExecutor(workers) as pool:
-            answers = list(pool.map(lambda chunk: analyse(engine_spec, chunk, sims) if chunk else [], chunks))
+            answers = list(pool.map(searched, chunks))
         return {int(indices[k + j * workers]): r for k, chunk in enumerate(answers) for j, r in enumerate(chunk)}
 
     def failed(response: dict) -> bool:
@@ -201,13 +211,17 @@ def label(
     if len(retry):
         responses.update(search_rows(retry))
     chosen_q, root_value, errors, dropped = [], [], 0, 0
+    nodes, unknown = 0, 0  # searched nodes the answers report; attempts whose cost no answer reports
     for i in open_rows:
         response = responses[i]
         if failed(response):
             errors += 1
             kind[i] = 255
+            unknown += 1
             continue
         search = response["search"]
+        nodes += int(search.get("nodes") or 0)
+        unknown += "nodes" not in search
         if (
             quiet_best
             and search["lines"]
@@ -262,6 +276,13 @@ def label(
             "proofs": int((kind == data.KIND_PROOF).sum()),
             "retries": int(len(retry)),
             "errors": errors,
+            "cost": {
+                "root_attempts": int(len(open_rows) + len(retry)),
+                "processes": attempts["processes"],
+                "process_seconds": attempts["seconds"],
+                "reported_nodes": nodes,
+                "attempts_without_node_counts": unknown + int(len(retry)),
+            },
             "quiet_best": quiet_best,
             "dropped": dropped,
             "chosen_q_vs_root": {
