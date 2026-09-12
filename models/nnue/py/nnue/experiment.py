@@ -35,9 +35,10 @@ which training pauses (`--stop_epoch`), the checkpoint is retained as
 `<run>/epoch<N>.pt` and resumed exactly; an endpoint `latest@N` is that
 checkpoint's export, `latest` the final checkpoint's, `best` the trainer's
 `best.nnue`. A match side is `<run>:<endpoint>` or a `.nnue` path, played by
-the preregistered `bot`; a side that is an `.exe` path is a search build
-(`rpsi:` seat) playing the experiment's `network` (a search patch against
-the same weights). A match with `"sprt": true` is the sequential test of
+the preregistered `bot`; sides that are `.exe` paths are search builds
+(`rpsi:` seats, both sides so the process overhead is equal) playing the
+experiment's `network` (a search patch against the baseline build on the
+same weights). A match with `"sprt": true` is the sequential test of
 `bot eval --sprt` (journal `<tag>.jsonl`, resumed when it exists, no pair
 count: it stops by its own rule); every other match plays `pairs` openings.
 Rule types: `lower_bound_above` (every named match's paired lower bound
@@ -260,6 +261,8 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
     bot = workspace_root() / experiment["bot"]
     if sha256(bot) != experiment["bot_sha256"]:
         raise RuntimeError(f"{bot} is not the preregistered binary")
+    if (side(match["candidate"]).suffix == ".exe") != (side(match["reference"]).suffix == ".exe"):
+        raise ValueError(f"{match['tag']}: a search build plays another search build on the shared network")
     command = [
         str(bot),
         "eval",

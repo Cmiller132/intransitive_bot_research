@@ -103,7 +103,7 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
         "matches": [
             {"tag": "m50", "candidate": "arm:epoch4", "reference": "arm:epoch2", "move_ms": 50, "pairs": 3, "seed": 1},
             {"tag": "m100", "candidate": "arm:epoch4", "reference": "arm:best", "move_ms": 100, "pairs": 2, "seed": 2},
-            {"tag": "q", "candidate": "patch.exe", "reference": "arm:best", "move_ms": 50, "sprt": True, "seed": 3},
+            {"tag": "q", "candidate": "patch.exe", "reference": "base.exe", "move_ms": 50, "sprt": True, "seed": 3},
         ],
         "rules": [
             {"name": "gain", "type": "lower_bound_above", "threshold": 0.5, "matches": ["m50", "m100"]},
@@ -113,6 +113,7 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     }
     (root / "net.nnue").write_bytes(b"weights")
     (root / "patch.exe").write_bytes(b"search build")
+    (root / "base.exe").write_bytes(b"baseline build")
     file = directory / "experiment.json"
     file.write_text(json.dumps(spec), encoding="utf-8")
     calls: list = []
@@ -151,7 +152,10 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
         "net.nnue"
     )
     assert sprt[sprt.index("--candidate-network") + 1].endswith("net.nnue")
-    assert sprt[sprt.index("--reference") + 1].startswith("nnue:") and "--reference-network" not in sprt
+    assert sprt[sprt.index("--reference") + 1].startswith("rpsi:") and "--reference-network" in sprt
+    spec["matches"][2]["reference"] = "arm:best"
+    with pytest.raises(ValueError):
+        experiment.play(spec, directory, spec["matches"][2] | {"tag": "mixed"})
     assert verdict["arms"][0]["endpoints"]["best"]["sha256"]
     assert not experiment.lock_path().exists()
 
