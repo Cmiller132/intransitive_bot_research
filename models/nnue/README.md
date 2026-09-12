@@ -79,7 +79,7 @@ python -m nnue.importer selfplay --records runs/nnue_selfplay/<generation> [--re
 python -m nnue.data encode <set> [<set> ...]
 python -m nnue.train --run <name> --data <set>:<share> [--data <set>:<share> ...] [--init <file.nnue>] [--<field> value ...]
 python -m nnue.train --run <name> --data ... --resume runs/<name>/latest.pt
-python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx | nnue:<file>] [--sims 256] [--workers 8] [--rows N] [--quiet-best]
+python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx | nnue:<file>] [--sims 256] [--workers 8] [--rows N] [--seed S] [--select <shallow set>] [--quiet-best]
 python -m nnue.gpu_label --input <set> --out <set> [--input <set> --out <set> ...] --ckpt runs/conv_g128/ckpt_000150.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N] [--reuse-nodes K] [--repetition-draw false]
 python -m nnue.experiment pin runs/nnue_gauntlets/<name>/experiment.json    # hash every fixed input
 python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json [--only train|match]
@@ -186,7 +186,8 @@ python -m nnue.gpu_label --input human_games --out human_gpu<n> --ckpt runs/conv
 python -m nnue.label --input <pool> --rows 20000 --select <pool_shallow> --sims 400 --out <pool>_selected_1m --engine nnue:<incumbent.nnue>   # the rows a 1-sim pass misjudges most (plan item D)
 python -m nnue.data encode <every new set>
 python -m nnue.train --run <name> --init <incumbent.nnue> --device cuda --batch 8192 --steps_per_epoch 1000 --epochs 20 --lr 0.0003 --data ...
-python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json     # arms, endpoints, matches, verdict
+python -m nnue.experiment pin runs/nnue_gauntlets/<name>/experiment.json     # then run: arms, endpoints, matches, verdict
+python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json
 sh arena/upload.sh http://<arena> nnue_1 rpsi:./run.sh --replace <seat.tar.gz>; ssh <arena> systemctl restart arena
 ```
 
