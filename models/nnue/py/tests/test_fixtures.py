@@ -9,6 +9,7 @@ import json
 import struct
 from pathlib import Path
 
+import engine
 import numpy as np
 
 from nnue.export import HEADER, MAGIC, file_size, integer_eval
@@ -18,6 +19,11 @@ from nnue.model import DENSE, QA, QB
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 HIDDEN = 32
 COUNT = 512
+CLOCK = 120  # the trajectories' capture clock: shorter draw tails than the site's 200, elapsed buckets to 96..128
+MIN_PLIES = 1200
+MIN_GAMES = 10
+CAPTURE_BIAS = 0.5
+STEPS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]  # the action's direction index
 
 
 def h32_bytes(version: int) -> bytes:
@@ -108,3 +114,86 @@ def test_fixture_networks_and_positions_match_the_python_side():
             assert len(active) == len(set(active)) and len(active) <= 42
             pieces = [i for i in active if i < FORMAT8.attack_base]
             assert {i // PIECE_ROWS for i in pieces} == {line["context"][perspective]}
+
+
+def trajectories() -> list[dict]:
+    """Random legal games from the initial position (a capture is chosen with
+    probability 0.5 when one exists) until at least ten games and 1,200 plies
+    were played and every count transition n -> n - 1 of every piece type on
+    both colours occurred. One line per state in the mover's frame with the action played
+    from it (None at the end of a game), the outcome the engine returned for
+    that state, its legal-move count, contexts, ids and raw values."""
+    rng = np.random.default_rng(20260913)
+    starts = ((1, 3), (2, 4), (3, 3))  # code, initial count per side
+    needed = {(colour, code, n) for colour in (0, 1) for code, start in starts for n in range(1, start + 1)}
+    seen: set = set()
+    games: list[list[tuple]] = []
+    plies = 0
+    while plies < MIN_PLIES or len(games) < MIN_GAMES or not needed <= seen:
+        board, since, ply, outcome = list(engine.initial_board()), 0, 0, 0
+        states = []
+        while outcome == 0:
+            legal = np.flatnonzero(np.array(engine.legal_mask(board), dtype=bool))
+            if not len(legal):
+                break
+            captures = [a for a in legal if board[a % 81 + STEPS[a // 81][0] * 9 + STEPS[a // 81][1]] != 0]
+            pool = captures if captures and rng.random() < CAPTURE_BIAS else legal
+            action = int(rng.choice(pool))
+            states.append((board, since, ply, outcome, len(legal), action))
+            child, since_after, ply_after, outcome = engine.apply(board, since, ply, action, CLOCK)
+            child = list(child)
+            # The mover's material is codes 1-3 before and 4-6 after the frame flip; the opponent's the reverse.
+            for offset, before, after in ((0, (1, 2, 3), (4, 5, 6)), (1, (4, 5, 6), (1, 2, 3))):
+                for t in range(3):
+                    was = board.count(before[t])
+                    if child.count(after[t]) < was:
+                        seen.add(((ply + offset) % 2, t + 1, was))
+            board, since, ply = child, since_after, ply_after
+        states.append((board, since, ply, outcome, int(np.count_nonzero(engine.legal_mask(board))), None))
+        games.append(states)
+        plies += len(states) - 1
+    flat = [(g, *state) for g, states in enumerate(games) for state in states]
+    boards = np.array([state[1] for state in flat], dtype=np.uint8)
+    since = np.array([state[2] for state in flat], dtype=np.int64)
+    clock = np.full(len(flat), CLOCK)
+    ids = feature_ids(boards, since, clock)
+    contexts = context(boards)
+    raw8 = integer_eval(FIXTURES / "format8_h32.nnue", boards, since, clock)
+    raw6 = integer_eval(FIXTURES / "format6_h32.nnue", boards, since, clock)
+    return [
+        {
+            "game": g,
+            "ply": int(ply),
+            "board": list(map(int, board)),
+            "since_capture": int(s),
+            "clock": CLOCK,
+            "outcome": int(outcome),
+            "legal": int(legal),
+            "action": action,
+            "context": contexts[n].tolist(),
+            "ids": ids[n].tolist(),
+            "raw": float(raw8[n]),
+            "raw6": float(raw6[n]),
+        }
+        for n, (g, board, s, ply, outcome, legal, action) in enumerate(flat)
+    ]
+
+
+def test_fixture_trajectories_match_the_python_side():
+    lines = [json.loads(line) for line in (FIXTURES / "format8_trajectories.jsonl").read_text("utf-8").splitlines()]
+    assert lines == trajectories()
+    games = {line["game"] for line in lines}
+    assert len(lines) - len(games) >= MIN_PLIES
+    assert all(line["action"] is None for line in lines if line["outcome"] != 0 or line["legal"] == 0)
+    # Every state follows from the previous one by the engine.
+    for before, after in zip(lines, lines[1:], strict=False):
+        if before["action"] is None:
+            assert after["game"] == before["game"] + 1 and after["ply"] == 0
+            continue
+        child, since, ply, outcome = engine.apply(
+            before["board"], before["since_capture"], before["ply"], before["action"], CLOCK
+        )
+        assert list(child) == after["board"]
+        assert (since, ply, outcome) == (after["since_capture"], after["ply"], after["outcome"])
+    contexts = {c for line in lines for c in line["context"]}
+    assert {0, 26} <= contexts and len(contexts) >= 15  # a side lost every piece; the random positions cover the rest
