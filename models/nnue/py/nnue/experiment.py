@@ -45,7 +45,9 @@ Rule types: `lower_bound_above` (every named match's paired lower bound
 above the threshold), `score_at_least` (every named match's score at least
 the threshold) and `sprt_accept` (every named sequential test accepted).
 Intervals are the eval tool's opening-pair bootstrap on the score scale;
-the verdict records numbers and rule outcomes, nothing else.
+the verdict records numbers and rule outcomes, nothing else, plus an audit
+of every match's recorded games (how they ended, the first mover's score,
+distinct openings, mean plies) read from the records or the journal.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import psutil
@@ -296,7 +299,33 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
 # Verdict.
 
 
-def summarise(match: dict, report: dict | None) -> dict:
+def audit(match: dict, directory: Path) -> dict | None:
+    """Counts over the recorded games of a match, from the fixed-count records
+    or the sequential journal (whose torn last line is ignored)."""
+    games: list[dict] = []
+    journal = directory / f"{match['tag']}.jsonl"
+    records = directory / f"{match['tag']}.games.jsonl"
+    if match.get("sprt") and journal.is_file():
+        for line in journal.read_text(encoding="utf-8").splitlines()[1:]:
+            try:
+                games.extend(json.loads(line)["games"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                break
+    elif records.is_file():
+        games = [json.loads(line) for line in records.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not games:
+        return None
+    first = sum(1.0 if g["winner"] == 0 else 0.5 if g["winner"] is None else 0.0 for g in games) / len(games)
+    return {
+        "games": len(games),
+        "ends": dict(Counter(g.get("end") for g in games)),
+        "first_mover_score": first,
+        "distinct_openings": len({tuple(g["moves"][: match.get("opening_plies", 8)]) for g in games}),
+        "mean_plies": sum(g["plies"] for g in games) / len(games),
+    }
+
+
+def summarise(match: dict, report: dict | None, directory: Path) -> dict:
     if report is None:
         return {"tag": match["tag"], "played": False}
     games = report["wins"] + report["draws"] + report["losses"]
@@ -314,6 +343,7 @@ def summarise(match: dict, report: dict | None) -> dict:
         "score": (report["wins"] + report["draws"] / 2) / games if games else None,
         "interval": [(1 + lo) / 2, (1 + hi) / 2],
         "valid": report.get("complete_pairs") == match.get("pairs") and report.get("forfeits", 0) == 0,
+        "records": audit(match, directory),
     }
     if match.get("sprt"):
         sequential = report.get("sequential", {})
@@ -345,7 +375,7 @@ def verdict(experiment: dict, directory: Path) -> dict:
     for match in experiment.get("matches", []):
         report = directory / f"{match['tag']}.json"
         loaded = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else None
-        matches[match["tag"]] = summarise(match, loaded)
+        matches[match["tag"]] = summarise(match, loaded, directory)
     rules = []
     for rule in experiment.get("rules", []):
         named = [matches.get(tag) for tag in rule["matches"]]
@@ -407,7 +437,7 @@ def main(argv: list[str]) -> int:
                 print(json.dumps({"event": "arm", "run": arm["run"], "epochs": epochs_done(arm["run"])}), flush=True)
         if only in (None, "match"):
             for match in experiment.get("matches", []):
-                summary = summarise(match, play(experiment, directory, match))
+                summary = summarise(match, play(experiment, directory, match), directory)
                 print(json.dumps({"event": "match", **summary}), flush=True)
     finally:
         lock_release("experiment")

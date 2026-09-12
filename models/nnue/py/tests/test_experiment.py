@@ -40,6 +40,16 @@ def scripted(calls: list, outcomes: dict):
         if command[1] != "eval":
             return real(command, *args, **kwargs)
         calls.append(command)
+
+        def game(pair, first_wins):
+            winner = 0 if first_wins else None
+            return {
+                "winner": winner,
+                "end": "Goal" if first_wins else "CaptureClock",
+                "plies": 40 + pair,
+                "moves": [f"m{pair}"],
+            }
+
         if "--sprt" in command:
             journal = command[command.index("--sprt") + 1]
             tag = journal.split("/")[-1].split("\\")[-1].removesuffix(".jsonl")
@@ -47,12 +57,20 @@ def scripted(calls: list, outcomes: dict):
             wins, losses = 2 * counts[4] + counts[3], 2 * counts[0] + counts[1]
             draws = 2 * counts[2] + counts[1] + counts[3]
             pairs = sum(counts)
-            open(journal, "a", encoding="utf-8").close()
+            with open(journal, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"protocol": {}}) + "\n")
+                for pair in range(2):
+                    f.write(json.dumps({"pair": pair, "games": [game(pair, True), game(pair, False)]}) + "\n")
+                f.write('{"pair": 2, "games": [')  # a torn last line
             sequential = {"counts": counts, "llr": 3.0 if stop == "accept" else -3.0, "stop_reason": stop}
         else:
-            tag = command[command.index("--records") + 1].split("/")[-1].split("\\")[-1].removesuffix(".games.jsonl")
+            records = command[command.index("--records") + 1]
+            tag = records.split("/")[-1].split("\\")[-1].removesuffix(".games.jsonl")
             pairs = int(command[command.index("--pairs") + 1])
             wins, draws, losses = outcomes[tag]
+            with open(records, "w", encoding="utf-8") as f:
+                for pair in range(pairs):
+                    f.write(json.dumps(game(pair, True)) + "\n" + json.dumps(game(pair, False)) + "\n")
             sequential = None
         report = {
             "wins": wins,
@@ -141,6 +159,14 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     by_tag = {m["tag"]: m for m in verdict["matches"]}
     assert by_tag["m50"]["score"] == pytest.approx(4.5 / 6) and by_tag["m50"]["interval"] == [0.475, 0.625]
     assert by_tag["m100"]["valid"] and by_tag["m100"]["games"] == 4
+    assert by_tag["m50"]["records"] == {
+        "games": 6,
+        "ends": {"Goal": 3, "CaptureClock": 3},
+        "first_mover_score": 0.75,
+        "distinct_openings": 3,
+        "mean_plies": 41.0,
+    }
+    assert by_tag["q"]["records"]["games"] == 4 and by_tag["q"]["records"]["distinct_openings"] == 2
     rules = {r["name"]: r for r in verdict["rules"]}
     assert rules["gain"]["complete"] and rules["gain"]["met"] is False
     assert rules["bar"]["met"] is True
