@@ -85,6 +85,21 @@ The two halves share only the feature definition and the file format:
 
 ## Python interface
 
+`python -m nnue.widen_check <experiment.json>` checks a matched format-6 H512/H1024
+manifest before training. It binds the manifest, parent/sidecar, evaluator, Python
+sources, fixture and dataset/cache metadata; uses `initial_model` for both arms;
+and checks preserved parameters, zero new outgoing weights, seeded differentiation
+and integer parity through the Python oracle and `bot nnue validate` (scalar/runtime
+SIMD equality). Its fixed 256-update disposable QAT probe uses the actual seeded
+mixture, loss, AdamW and learning-rate schedule. Task gradients are recorded before
+clipping and decay; quantised outgoing crossing must precede incoming task gradients.
+It runs on CPU 8-15 BelowNormal with four Torch threads. After review and compute
+authorisation, invoke it once: `<experiment directory>/preflight/` must not exist.
+It retains the exact manifest before pin, initial exports, validation rows, channel vectors and a hash-bound
+`report.json`; exit 0 means every gate passed, exit 1 means failure. It neither
+pins the manifest nor starts or resumes an arm. Failed evidence is retained for
+review; do not reroll a seed or extend the probe to pass.
+
 `pip install -e ".[dev]"` from `py/`; the `engine` wheel comes from
 `cargo xtask wheel`. Commands, from the workspace root, all on the CPU:
 
