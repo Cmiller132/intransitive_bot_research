@@ -538,6 +538,19 @@ that record.
     over all 20 epochs 326 against 293 seconds per epoch (the last epoch 329 against 290). One seed;
     the seed-3 confirmation, preregistered before this result, must independently meet format_gain
     and promotion_format8 at both budgets to confirm training-format adoption.
+43. C2, capture history (2026-09-13; runs/nnue_gauntlets/c2_capture_history; pinned manifest
+    e5f72d57..., verdict.json 36ef7a24..., the runner's original kept as verdict.runner.json):
+    dd15c18 (a worker-local table by absolute side, attacker type, canonical destination and victim
+    type, scoring captures in place of the quiet table they shared by action index; updated at
+    completed main-search cutoffs with the quiet table's gravity, bonus and halving), frozen as
+    494b4b6 = d10f448 plus the patch (runs/nnue_bins/c2_search_capture_history.exe d00ab30f...)
+    against the gate 6 build e4e0d5ff... on the shared mb_b at 50 ms, one player thread, C1's
+    sequential test: accepted at 1,760 pairs, LLR 3.050 against the bound 2.944, pentanomial counts
+    [170, 324, 715, 319, 232], 1368/903/1249 over 3,520 games, descriptive score interval [.504,
+    .530]; reconciled by the runner, whose verdict included C1's journal replay, and independently
+    audited without replay by Claude and Astra; accepted for merge as the first patch of the bundle
+    (not yet merged). Timing: .352 pairs per active second with eight concurrent pairs, idle share
+    .284.
 
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
@@ -550,20 +563,30 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   seed; both 60-epoch arms qualify for the mb_a gate, runs/nnue_gauntlets/a1_promotion (score at
   least .575 at 100 ms over 250 pairs per arm under the frozen C1 build; preregistered, running;
   deployment is the user's decision).
-- C2, search patches by sequential test: the quiescence transposition table candidate (f528f22) was
-  rejected (item 40); the engine uses the baseline quiescence without a transposition table. Further
-  search patches are screened the same way, one at a time under C1, and an accepted bundle is
-  confirmed at 100 ms over a fixed count.
+- C2, search patches by sequential test: the quiescence transposition table rejected (item 40);
+  capture history accepted (item 43), the first patch of the bundle, its merge into master pending;
+  late move pruning and internal iterative reduction are screened next on that base, one at a time
+  (LMP rebased on the accepted base with one shared per-node safety scan, its full check interrupted
+  at the 2026-09-13 stop); a fixed-count 100 ms confirmation of the bundle after at most three
+  accepted patches.
 - D, labels: the pilot judged (item 41), the selection not supported at this size; a larger share or
   a label-depth arm would need its own preregistration.
-- B, format 8: the seed-2 pilot met its rules (item 42); the seed-3 confirmation activated and
-  queued after capture history. Adoption as the training format requires its independent format_gain
-  and promotion_format8 rules to be met.
-- A3, H1024 with the corrected widening (distinct small seeded new columns, zero outgoing columns,
-  integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart,
-  open now that A1 is judged; C3, a race term only through a measured race error that stays with
+- B, format 8: the seed-2 pilot met its rules (item 42); the seed-3 confirmation (format8_train_s3,
+  pinned bd34ff3f...) started 2026-09-13 18:02 and was stopped at the session end with its format 8
+  arm at epoch 19 of 20 and the control not started; a relaunch resumes it. Adoption as the training
+  format requires its independent format_gain and promotion_format8 rules to be met; then B2
+  (runs/nnue_gauntlets/b2_format8_lineage, preregistered, unpinned: format 8 factorised from
+  long60_s2:epoch60 against its format 6 continuation).
+- A3, H1024 with the corrected widening: the manifest runs/nnue_gauntlets/a3_width (format 6 from
+  long60_s2:epoch60) failed its preflight 2026-09-13
+  (runs/nnue_gauntlets/a3_width/preflight/report.json 75068e4b...): structure and integer parity
+  exact, but under quantisation-aware training the zero readout columns are served as zero and no
+  new channel received a task gradient in 256 updates. Agreed remedy: one float epoch for both arms
+  before QAT (qat_start_epoch 1), the checker revised for it and for format 8 (astra/widen-warmin40,
+  e059935, checked, merge pending); a new experiment is preregistered once B2's parent exists. A2,
+  the high-lr restart, open; C3, a race term only through a measured race error that stays with
   deeper labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter
-  matched controls justify it. All proposed.
+  matched controls justify it. A2, C3 and A4 proposed.
 - Exit condition, met by nothing above: at least 65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
