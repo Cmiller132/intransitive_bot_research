@@ -486,8 +486,13 @@ that record.
     f64 value within 1e-12, scalar/AVX2/VNNI bit-identical, mb_b and mb_b8 fixed-node signatures
     identical on 64 roots); the factorised step costs 13 % more than format 6 on the CPU trainer;
     over 2 M gen3 rows the full context holds 40.6 % of the perspectives and seven contexts fall
-    under 0.5 %. Gate 6 (throughput and RSS from outside, at least 95 % of format 6 in both modes)
-    is preregistered in runs/nnue_gauntlets/format8/experiment.json and pending.
+    under 0.5 %. Gate 6 (2026-09-13; runs/nnue_gauntlets/format8/gate6/attempt2, verdict
+    23d49ee6...; the frozen post-C2 build e4e0d5ff..., mb_b against its conversion mb_b8, 100 fixed
+    roots, one thread, five cycles, measured from outside): format 8 over format 6 throughput .9903
+    at fixed nodes (1,431,545 against 1,445,625 nodes/s) and .9635 at 50 ms per move (1,453,672
+    against 1,508,722), both at least the preregistered .95; loaded RSS 70.3 against 57.9 MiB; all
+    fixed-node signatures equal. A first attempt (attempt1_invalid) was invalidated by its own input
+    check when the runner module changed under it. A throughput result, not a strength result.
 39. A1, training duration (2026-09-13; runs/nnue_gauntlets/long_training, verdict.json a01c89a2...,
     the runner's original kept as verdict.runner.json): from mb_b on the new70 mixture, two seeds.
     Epoch 60 against epoch 20 of the same stretched schedule .541 [.500, .581] and .443 [.395, .493]
@@ -516,11 +521,11 @@ The state of each is written next to it: proposed, implemented, correctness-veri
 strength-accepted for code; preregistered, running or judged for an experiment.
 
 - A1, duration: 60 epochs against 20 from the same init on the same mixture, two seeds and a
-  20-epoch control; runs/nnue_gauntlets/long_training, judged (item 39): no demonstrated benefit from extending
-  the stretched schedule from epoch 20 to 60, and the recipe rule not met for either seed; both
-  60-epoch arms qualify for the mb_a gate, runs/nnue_gauntlets/a1_promotion (score at least .575 at
-  100 ms over 250 pairs per arm under the frozen C1 build; preregistered, running; deployment is the
-  user's decision).
+  20-epoch control; runs/nnue_gauntlets/long_training, judged (item 39): no demonstrated benefit
+  from extending the stretched schedule from epoch 20 to 60, and the recipe rule not met for either
+  seed; both 60-epoch arms qualify for the mb_a gate, runs/nnue_gauntlets/a1_promotion (score at
+  least .575 at 100 ms over 250 pairs per arm under the frozen C1 build; preregistered, running;
+  deployment is the user's decision).
 - C2, search patches by sequential test: the quiescence transposition table candidate (f528f22) was
   rejected (item 40); the engine uses the baseline quiescence without a transposition table. Further
   search patches are screened the same way, one at a time under C1, and an accepted bundle is
@@ -529,14 +534,14 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   the deeper pilot labels are obtained afterwards) against a seeded random sample, the same
   requested roots and node budget per arm at 1 M nodes with the actual cost recorded;
   runs/nnue_gauntlets/d_pilot preregistered, unrun.
-- B, format 8: the Rust side correctness-verified; gate 6 (throughput and RSS from outside, at least
-  95 % of format 6 in both modes) preregistered, unrun; then the training arm against the format 6
-  control on identical data, schedule and seed, a seed-2 pilot first and, only on its result, a
-  separately preregistered seed-3 confirmation.
+- B, format 8: the Rust side correctness-verified and gate 6 passed (item 38); next the training arm
+  against the format 6 control on identical data, schedule and seed, a seed-2 pilot first and, only
+  on its result, a separately preregistered seed-3 confirmation.
 - A3, H1024 with the corrected widening (distinct small seeded new columns, zero outgoing columns,
-  integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart, open now that A1 is judged; C3, a race term only through a measured race error that stays with deeper
-  labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter matched
-  controls justify it. All proposed.
+  integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart,
+  open now that A1 is judged; C3, a race term only through a measured race error that stays with
+  deeper labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter
+  matched controls justify it. All proposed.
 - Exit condition, met by nothing above: at least 65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
