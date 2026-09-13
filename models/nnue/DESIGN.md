@@ -526,6 +526,18 @@ that record.
     Cost: 39.0 G nodes and 11.8 process-hours for the two deep arms, 0.5 G nodes for the screen.
     Failure of the rules is not evidence that selection has no value at a larger share or count, and
     no arm isolates whether 1 M-node labels beat the 100k-node source labels.
+42. B, format 8 against format 6 (2026-09-13; runs/nnue_gauntlets/format8_train; pinned manifest
+    ae185de3..., verdict.json 3c9709df..., the runner's original kept as verdict.runner.json): from
+    mb_b's format 6 bytes, the format 8 arm factorised through widen_contexts (residuals zero)
+    against the format 6 continuation on the A1 mixture, 20 epochs, seed 2, CPU. Format 8 against
+    format 6 .583 [.544, .621] at 50 ms and .580 [.538, .622] at 100 ms: the format rule met.
+    Against mb_b: format 8 .586 [.545, .628] and .547 [.503, .588], format 6 .578 [.538, .616] and
+    .545 [.502, .590]: both promotion rules met. 200 pairs at 50 ms and 150 at 100 ms per match,
+    2,100 games, all valid. At the retained epoch-20 endpoints, objective on the same validation
+    rows .0197 against .0209; epoch-mean training value loss .0104 against .0154. Mean wall time
+    over all 20 epochs 326 against 293 seconds per epoch (the last epoch 329 against 290). One seed;
+    the seed-3 confirmation, preregistered before this result, must independently meet format_gain
+    and promotion_format8 at both budgets to confirm training-format adoption.
 
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
@@ -544,9 +556,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   confirmed at 100 ms over a fixed count.
 - D, labels: the pilot judged (item 41), the selection not supported at this size; a larger share or
   a label-depth arm would need its own preregistration.
-- B, format 8: the Rust side correctness-verified and gate 6 passed (item 38); next the training arm
-  against the format 6 control on identical data, schedule and seed, a seed-2 pilot first and, only
-  on its result, a separately preregistered seed-3 confirmation.
+- B, format 8: the seed-2 pilot met its rules (item 42); the seed-3 confirmation activated and
+  queued after capture history. Adoption as the training format requires its independent format_gain
+  and promotion_format8 rules to be met.
 - A3, H1024 with the corrected widening (distinct small seeded new columns, zero outgoing columns,
   integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart,
   open now that A1 is judged; C3, a race term only through a measured race error that stays with
