@@ -268,8 +268,9 @@ def binding(manifest_path: Path, manifest: dict, parts: list) -> dict:
 
 def run(manifest_path: Path) -> dict:
     manifest_path = absolute(manifest_path)
-    manifest_hash = sha256(manifest_path)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest = json.loads(manifest_bytes)
     low, high, parts = configs(manifest)
     if absolute(manifest["parent"]) != Path(low.init):
         raise ValueError("arm init differs from the bound parent")
@@ -278,6 +279,7 @@ def run(manifest_path: Path) -> dict:
         raise ValueError("manifest changed while reading")
     directory = manifest_path.parent / "preflight"
     directory.mkdir(exist_ok=False)
+    (directory / "experiment.json").write_bytes(manifest_bytes)
     report = {
         "schema": 1,
         "passed": False,

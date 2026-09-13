@@ -189,6 +189,7 @@ def test_report_binds_evidence_and_refuses_overwrite(case, tmp_path, monkeypatch
     assert bool(report["errors"]) is drift
     assert report["manifest_sha256"] == w.sha256(manifest)
     directory = tmp_path / "preflight"
+    assert (directory / "experiment.json").read_bytes() == manifest.read_bytes()
     for name, digest in report["artifacts"].items():
         assert w.sha256(directory / name) == digest
     original = (directory / "report.json").read_bytes()

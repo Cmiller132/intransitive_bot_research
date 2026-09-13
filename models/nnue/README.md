@@ -95,7 +95,7 @@ mixture, loss, AdamW and learning-rate schedule. Task gradients are recorded bef
 clipping and decay; quantised outgoing crossing must precede incoming task gradients.
 It runs on CPU 8-15 BelowNormal with four Torch threads. After review and compute
 authorisation, invoke it once: `<experiment directory>/preflight/` must not exist.
-It writes initial exports, validation rows, channel vectors and a hash-bound
+It retains the exact manifest before pin, initial exports, validation rows, channel vectors and a hash-bound
 `report.json`; exit 0 means every gate passed, exit 1 means failure. It neither
 pins the manifest nor starts or resumes an arm. Failed evidence is retained for
 review; do not reroll a seed or extend the probe to pass.
