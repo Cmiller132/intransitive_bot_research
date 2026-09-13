@@ -1,518 +1,530 @@
-# nnue design
+# NNUE design
 
-Status: proposed 2026-09-09 by Claude and Astra, built the same day; every
-item below is implemented and carries its measurement where one exists.
-Items are numbered; a change to any item is a design change and needs
-approval. The process that produced the deployed network and the work that
-remains are the last two sections.
+## 1. Purpose and ownership
 
-The idea: a sparse, incrementally updated integer network as the static
-evaluator of an alpha-beta search on the CPU. The network is trained on
-searched positions from the self-play models (any model that writes replay
-windows) and on positions from its own games labelled by such a teacher, and
-selected by games, never by validation loss. The prototype this continues
-(the read-only workspace D:/Research/NNUE) scored 1-6-25 against
-sq_g128g@60 at 750 ms; its integer arithmetic and search are migrated
-unchanged, everything around them is rebuilt.
+The NNUE is the site bot's evaluator: a sparse, incrementally updated integer network read by an
+alpha-beta search on the CPU. The workspace crate `nnue` holds the evaluator, the search and
+`NnuePlayer: match::Player`; the Python package `nnue` (models/nnue/py) holds the features, the
+model, the quantisation-aware trainer, the exporter, the dataset importers, the labellers and the
+experiment runner. Rules and exact tactics come only from `engine`; the crate keeps no second
+implementation of moves, apply or terminal checks, and the Python side reaches the rules through the
+`engine` wheel. `bot` builds the player from `nnue:<path.nnue>`; the arena seat and the site binary
+change only by the user's decision.
 
-## Structure
+Two kinds of judgement, never mixed. A correctness or performance gate decides whether a change
+enters the code: parity fixtures (feature ids and integer accumulators equal exactly between the
+NumPy oracle and the Rust kernels, the scalar and SIMD kernels bit-identical, the Python and Rust
+f64 evaluations within 1e-12; incremental updates equal a refresh over recorded trajectories),
+identical fixed-node search signatures where the change claims to leave decisions unchanged, and a
+throughput floor measured from outside on a frozen binary. A strength decision decides whether a
+change is accepted or a network promoted: paired games through `bot eval` only, under a
+preregistered manifest, either a fixed count of pairs with the bootstrap interval or the sequential
+test of `bot eval --sprt`; the verdict is the runner's, from the recorded games. A candidate is in
+one of four states, and the documents say which: proposed, implemented, correctness-verified,
+strength-accepted.
 
-1. Package: the workspace crate `nnue` (evaluator, alpha-beta search,
-   `NnuePlayer: match::Player`) and the Python package `nnue` (features,
-   network, quantisation-aware training, export, dataset import, teacher
-   labelling, training, the experiment runner). Rules and exact tactics come
-   only from `engine`; the crate keeps no second implementation of moves,
-   apply or terminal checks. `nnue:<path.nnue>` builds the player in the
-   `bot` CLI. No native Python extension: features are NumPy over the same
-   integer cell coding, and rule checks go through the existing `engine`
-   wheel.
-2. Player: `choose` refreshes the root accumulator and searches under
-   `Clock::Time(d)` with a 20 ms overhead, or under `Clock::Sims(n)` for a
-   fixed budget of n x 2,500 nodes on one thread: the arena and `bot eval`
-   pair players at equal simulations, and 2,500 nodes is what one sq_g128
-   simulation costs in CPU time on the site's processor (32 simulations,
-   about 100 ms, against roughly 800k NNUE nodes per second per thread);
-   the constant is declared here so the comparison is honest, and item 3 is
-   the measurement at equal wall time. `new_game` clears the table and the
-   move heuristics. `MoveInfo` carries nodes, depth, score and the principal
-   variation in the fields that fit and leaves the search-only fields empty.
-3. Timed eval: `bot eval --move-ms N [--player-threads T]` plays the same
-   paired games under `Clock::Time` per move with T search threads per
-   player; the report gains complete-pair counts and a seeded opening-pair
-   bootstrap interval. The simulation mode stays the default for sq and conv.
-   Project.md's definition of the eval gains this timed variant (a workspace
-   change outside models/, listed here for approval).
-4. Migration control: the prototype's release network (format 3,
-   972 features, 512 hidden, 32 dense) is converted once to the new format
-   with zero clock rows and must give identical raw scores on 1,024 stored
-   positions; the new player must reproduce the prototype binary's fixed-node
-   decisions on 100 stored positions and run no more than 5 % slower at
-   equal nodes. This is a correctness check, not a strength claim.
+The deployed network is identified by its file hash and its sidecar (run, epoch, objective, config,
+datasets), never by a name; an unjudged candidate is not the incumbent. README owns the commands,
+the experiment manifests and verdicts own recipes and results, claude_notes.md is the session log;
+DESIGN states the contracts and the bounded findings that shaped them.
 
-## Evaluator (file formats RPSNNUE1 version 6 and 8)
+## 2. Evaluator and formats
 
-5. Features, 1,004 (format 6; format 8 conditions the piece-square rows
-   on the opponent's material, item 38): the prototype's 486 piece-square rows and 486
-   attacked-piece rows (a piece attacked by an adjacent enemy that beats
-   it), plus 16 elapsed-clock rows and 16 remaining-clock rows, one-hot over
-   the lower bounds 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128,
-   160 plies, shared by both perspectives. Two clock rows are active per
-   perspective; they change only when a bucket boundary is crossed or a
-   capture resets the clock. Clock limits 50-200 are supported; a position
-   without a clock context is rejected rather than defaulted.
-6. Transformer and head, migrated: two perspectives (the mover, and the
-   anti-diagonal reflection with colours swapped) sharing H int16 rows
-   (scale 255, H from the header, any multiple of 32; 512 by default, 768
-   costs 12 % more per node) into int32 accumulators; squared clipped ReLU; an int16
-   linear readout (scale 64); a 32-wide int8 dense residual with int32 bias
-   and int16 output; value tanh(raw); search score round(600 raw). Scalar
-   integer arithmetic with ties-to-even is the reference; AVX2 and VNNI
-   kernels are equivalents tested against it.
-7. Output buckets by total pieces on the board, 2-4, 5-8, 9-12 and 13-20:
-   a bucket-specific linear readout, residual output and bias, with the
-   transformer and the dense transform shared. Built as an ablation beside
-   item 5; kept if it passes the gauntlet. Measured: neither the clock rows
-   (82.5 % without them against the same control's 83.8 %) nor the buckets
-   (50.6 %) changed strength; the clock rows stay, the buckets were removed
-   from the trainer and the files on 2026-09-12 (one head, item 38).
-8. Deferred, each a separate design change when the data supports it: full
-   per-bucket residual heads, a deeper residual (1024 to 32 to 16 to 1),
-   width 768 or 1024, richer local features.
-9. Loss: the control is the prototype's tanh mean squared error plus a
-   0.02-weight bounded logit term; the ablation is soft cross-entropy with
-   logits 2 raw against (target + 1) / 2. An outcome term is off by default
-   and ablated at 10 % weight on verified played outcomes only. Sixfold
-   symmetry augmentation with a paired consistency loss of 0.2 in every
-   batch; no runtime ensemble. Quantisation-aware training throughout when
-   fine-tuning, after a float warm-up from scratch. Row filters: `--quiet`
-   drops rows where the mover can capture (41 % of the data), Stockfish's
-   quiet-position rule; the selection objective for `best.nnue` is the
-   validation loss over teacher and proof rows only, so a change in the
-   outcome-labelled share cannot move the selection.
-10. Exactness: the NumPy oracle over the file bytes, the Rust scalar kernel
-    and the SIMD kernels agree exactly (measured: zero error on 1,024
-    positions and every child); the PyTorch fake-quantised forward, which
-    accumulates in float32, agrees with them within 2e-6 raw (measured
-    1.9e-6 at worst); incremental updates equal a refresh over 1,000-move
-    trajectories with captures and clock-bucket boundaries.
+The evaluator uses two canonical perspectives: the side to move and its opponent. The opponent frame
+reflects squares across the anti-diagonal and swaps piece colours. Both halves share one feature
+table and bias. Engine owns board codes, legal transitions and attack predicates.
 
-## Search
+RPSNNUE1 is little endian and accepts versions 6 and 8 only. The 36-byte header contains the
+eight-byte magic, version, feature count F, hidden width H, QA=255, QB=64, f32 evaluation scale 600
+and head count 1. H is a multiple of 32 in 32..1024. Version 6 requires F=1,004; version 8 requires
+F=13,640. The payload is bias H i16, feature-major weights F*H i16, mover/opponent readout 2H i16,
+readout bias i32, dense width u32=32, dense weights 32*2H i8, dense biases 32 i32 and residual
+readout 32 i16. The total length is exactly 236 + H*(2F+70) bytes. Unsupported constants, truncation
+and trailing bytes are errors.
 
-11. Kept from the prototype: iterative deepening, principal variation search,
-    aspiration windows, a transposition table keyed on the board, the clock
-    counter and the clock limit, killers, history, late move reductions,
-    quiescence over captures and goal approaches with goal-threat evasions,
-    and lazy SMP over a shared table (four threads at the site). Iteration
-    stops when 72 % of the budget is spent.
+For an occupied square s with perspective-relative code t in 1..6, the piece-square index is
+81*(t-1)+s. Format 6 uses that row directly. Format 8 adds 486*c, where
+c=min(r,2)+3*min(p,2)+9*min(sci,2), using the perspective's opponent rock/paper/scissors counts.
+There are 27 contexts. Each perspective computes its own context; counts are not combined across
+colours. Captures 4->3 and 3->2 preserve the capped component; 2->1 and 1->0 change it.
 
-    Quiescence TT probe/store uses the existing board/capture-clock key and
-    table. Negative depth tags match the exact tactical budget and root ply
-    (the safety frontier); positive depths remain full-search bounds. Quiet
-    goal approaches require budget >=5, while goal evasions extend beyond
-    zero, so different horizons cannot share cutoffs. Stop, immediate wins
-    and the frontier precede probing; interrupted ancestors never store a
-    bound. Fail-soft bounds use the original window and normalised mate
-    distance. Hash moves only order the existing legal tactical subset.
-    Current-generation full-search entries survive quiescence stores; all
-    negative tags have equal replacement priority. No entry-size increase.
-    Unit tests cover bounds, horizons, clocks, evasions, interruption,
-    replacement and fixed-node signatures on the dense/race fixture nets.
-    Strength remains unmeasured; runs/nnue_gauntlets/c2_qtt/experiment.json
-    preregisters the 50-ms paired sequential test after the A1 compute lock
-    is released and the frozen-build/runner gates pass.
-12. Exact tactics from `engine::tactics`: wins at once and loses in two in
-    every move loop, wins in three at the root; mate scores are separate
-    from evaluation scores and a win precedes a clock draw; quiescence never
-    stands pat through a proved immediate loss.
-13. Improvements, in this order, each kept only if it passes the gauntlet of
-    item 16 with the same weights: (a) table and hot-loop efficiency (reused
-    buffers, cached static evaluation, Zobrist keys); (b) continuation and
-    capture history, then history-aware reductions; (c) a goal-threat and
-    single-evasion extension of one ply, at most two per path;
-    (d) reverse futility, then late quiet futility at non-PV depth 2 or
-    less with margins fitted on the evaluation scale, never pruning every
-    legal move; (e) time management and SMP tuning at 250 ms. Measured:
-    one at a time, only partial-root selection passed (59 %) and (a), (b)
-    and (d) scored 48-52 % on 64-160 games, below the stages' resolution;
-    as a bundle (a, history-aware reductions, both futility rules) over
-    1,000 games at 50 ms and 500 at 100 ms they scored 57.4 % (54.5-60.2)
-    and 55.7 % (51.8-59.5) against partial-root alone and are retained;
-    (c) and null move (item 14) scored 47-48 % and are not in the bundle.
-    Speed: quiescence proves stalemate (one legal move suffices) before
-    generating the move list, +14 % nodes per second, 53.6 % (50.8-56.4)
-    over 500 games; the sampled profile behind it (`nnue/profile` feature,
-    one call in 64 timed, in `bot nnue diagnose`) puts the accumulator
-    update at 24 %, the dense head at 19 %, move generation at 12 %,
-    ordering and the table at 5 % each on H512; batching the accumulator
-    adds and subs into AVX2 tiles gave no gain (49.5 %, reverted). (e) measured: four threads
-    at 250 ms score 61 % against one thread, doubled time 65 %; the
-    difference (-3.75 points, -11.25 to +4.00) is not a shortfall, so the
-    lazy SMP stays; `bot eval --reference-move-ms` gives the yardstick.
-14. Null-move pruning last and verified: non-PV nodes only, mobile
-    positions with enough pieces, far from the clock and from either goal;
-    no consecutive nulls; the null move is `engine::flip`, never a legal
-    action, and its leaves are never training data.
-15. The clock enters through item 5, not through score decay. A bounded
-    adjustment of the static score near the clock may be ablated later with
-    its own gauntlet; exact mate and draw scores are never scaled.
+Attacked-piece rows are unconditioned, at F-518 + 81*(t-1)+s, active exactly when
+engine::tactics::is_attacked holds for that occupied square. Two clock rows are active: one at F-32
+for since_capture and one at F-16 for max(capture_clock-since_capture,0). Each uses the greatest
+lower bound in [0,1,2,3,4,6,8,12,16,24,32,48,64,96,128,160]. Each perspective has 42 feature slots:
+up to 20 pieces, up to 20 attacked pieces, two clocks. Unused slots carry sentinel F and contribute
+zero; the sentinel is not stored in the served file.
 
-## Measurement
+Each accumulator is bias plus its active rows in i32, without saturation before the activation
+clamp. Concatenate mover and opponent lanes, and let x=clamp(acc,0,255). The main readout is
+sum(x*x*output)/(255*255*64) + output_bias/64, with an i64 sum. Dense input is nearest-integer
+x*x/255; an exact half tie is impossible. Dense activations are
+clamp(round_ties_even((dot(input,dense_weights)+dense_bias)/64),0,255). Add
+sum(dense_activation*residual_output)/(255*64) to obtain raw. The engine score is
+clamp(round_ties_even(600*raw),-28000,28000), below the mate-score band. Scalar, AVX2 and supported
+AVX-512/VNNI paths implement the same arithmetic. Accumulator and dense scratch buffers are reused.
 
-16. Gauntlet: candidate against the incumbent NNUE with frozen artifacts,
-    64 MiB table each, site rules, no repetition draw, wins 1, draws 0.5,
-    frozen eight-ply random openings deduplicated by symmetry orbit and
-    played with both colours, through `bot eval --move-ms`, or under a
-    fixed node budget (`--sims N`, N x 2,500 nodes) for evaluator-only
-    changes, which is independent of machine load and runs a stage in
-    minutes; a search change or a wider network is judged on the clock. Screen: 64
-    games at 50 ms, one thread each. Accept: 160 new games at 100 ms, one
-    thread each, at least 55 % with the bootstrap 95 % lower bound above
-    50 %. Confirm, for a claim at the site budget: 128 new games at 250 ms
-    with four threads each, one pair at a time; run for the candidate about
-    to be deployed and for an accept below 65 %, not for every change, since
-    a decisive accept at 100 ms has never been reversed at 250 ms here and
-    the stage costs an hour of four threads. Seeds are declared before
-    play; no early stopping and no best-of-seeds. Resolution: 160 games
-    bound a change to about +-8 %, so search changes worth 1-3 % each
-    (Stockfish's typical merge) are tested as a bundle over 1,000 games,
-    and per-change gauntlets only reject what is clearly worse.
-17. Final comparison: 16 games over 8 new paired openings at 250 ms for both
-    sides with four threads each against sq_g128g@60 (`sq:` player on the
-    deployed ONNX with the deployed search options; not the deployed
-    binary's bytes). Recorded with hashes, options, platform, timings and
-    failures. Eight pairs bound the gap; they are not an Elo estimate.
-    Measured 2026-09-09 with 50 pairs: invalid as a strength claim, because
-    the sq reference stopped searching after 31 games under the deadline
-    (a retained call-cost bound in the shared Gumbel search; reported, not
-    ours to fix); in the 20 healthy games sq had a median 33 simulations
-    and the NNUE scored 42.5 %. Every NNUE loss was by goal, seen by the
-    search 8-20 plies out while the static value stayed optimistic in
-    some goal races, which points at late-game race positions as the next
-    data target (item 35). Measured 2026-09-10 with `--reference-sims`
-    (sq searching every move, audited): the round-7 network at 250 ms
-    and four threads scores 63.5 % (55.5-71.0) against sq at 32
-    simulations, the arena's budget, and 39.5 % (31.5-47.5) against sq at
-    128. The arena seat plays at 32 x 2,500 nodes on one thread, so its
-    rating understates the site-budget strength. On a shared clock with
-    the repaired search (sq searching every move, audited per seat): the
-    round-7 network 58.0 % (48.5-67.0) and the round-11 network 65.0 %
-    (57.0-73.0) against sq at 250 ms and four threads each, 50 pairs.
-    The retained search itself holds at that budget: 58.5 % (53.3-63.5)
-    over partial-root alone with the same weights, 100 pairs.
+Conversion from format 6 to 8 repeats the 486 piece rows in every context and copies the bias,
+attacked/clock rows and entire head unchanged. Only version/feature-count header fields and the
+repeated table region differ. Both files therefore evaluate the same state identically. Training
+represents a contextual row as shared_base[i]+residual[c,i]; conversion initializes the residual to
+zero. Quantisation and range constraints apply to the served sum, which is flattened at export.
+Factorisation does not add a second inference representation or change the file layout.
 
-## Data
+## 3. Accumulator and search
 
-18. Shards (`runs/nnue_data/<set>/`): columnar NumPy arrays, memory-mapped:
-    board u8 (N, 81) in the canonical frame, since_capture u16, ply u16,
-    capture_clock u16, target f32 in [-1, 1] from the mover's view,
-    weight f32, kind u8 (played-root lambda return, candidate child minus
-    completed Q, exact proof, teacher search value, raw network), outcome
-    i8 with outcome_ok, source u8, game u32, orbit u64, split u8; plus
-    provenance.json (producer, run, window hashes, teacher, simulations,
-    rules, clock, shaping flags). Counters are exact, never averaged.
-19. Importer `python -m nnue.importer conv --run <dir> --out <set>`: one
-    adapter per window schema (conv schema 2 first, sq next),
-    reading plain or zstd windows through one handle, hashing the bytes and
-    validating shapes; unknown schemas fail. Labels: the played root gets
-    its lambda return at weight 0.25; each visited candidate's nonterminal
-    child, applied through the engine, gets minus its completed Q at weight
-    1; outcomes only on played rows with outcome_ok. Episodes are
-    reconstructed from the environment order across contiguous windows.
-    Exact (board, since_capture, clock) contexts are deduplicated with the
-    weight capped at 4. Splits 90/5/5 by episode and opening family, then
-    six-symmetry board orbits are excluded across splits.
-20. Two label domains kept apart: source-rule pretraining (the producer's
-    clocks and shaping, as recorded) and site-rule labels (clock 200, no
-    shaping) from fresh teacher searches; a training recipe names what it
-    mixes and at what share.
-21. Student collection `python -m nnue.collect`: per round 128 games over
-    64 opening families through `bot`, the current NNUE against itself and
-    against the previous one at 2k, 8k and 20k nodes, saving trajectories
-    and the leaves the search evaluated; 10k states per round sampled as
-    40 % played roots, 30 % evaluated leaves, 20 % legal alternatives
-    around value drops, 10 % targeted sparse, long-clock and race
-    positions.
-22. Teacher labelling `python -m nnue.label` through `bot analyse` with a
-    teacher profile (site rules, zero contempt, repetition penalty and
-    moves-left, seeded): 256 simulations per root, 512 for hard cases, 10 %
-    repeated at 1,024 to measure stability; exact proofs from the engine;
-    the chosen action's Q and the root value recorded separately. Measured:
-    sq_g128 at 128 simulations costs 150 ms per position per CPU thread.
-    `python -m nnue.gpu_label --teacher conv|sq` labels the same rows with
-    the batched Gumbel search of a training checkpoint when the GPU is free
-    (about 250 rows per second at 128 simulations, batch 4,096); the
-    teacher is chosen by arena rating. The two teachers agree (correlation
-    0.981, mean absolute difference 0.066 on a student round), and teacher
-    labels are the strongest lever measured: a fine-tune on 150k labelled
-    human positions scored 70 % against the data-only control.
-23. Training `python -m nnue.train --run <name>`: streaming shards, an
-    explicit batch mixture (at least half broad window data), a feature-id
-    cache per set (`python -m nnue.data encode <set>`, int16 (N, 2, 42))
-    so a batch is a gather rather than an encode (the CPU trainer's
-    bottleneck: 69 of 80 ms per step), the accumulation as a sparse CSR
-    product on the CPU (PyTorch's embedding bag was 64 % of the remaining
-    step; the product gives the same sums at a fifth of the cost, 24-29k
-    rows per second on 4-8 threads), `--device cuda` for 230k-340k rows
-    per second when the GPU is free (measured: continuing the fine-tuned
-    lineage for six passes over every source scored 61 % at node budget and
-    62 % on the clock over its parent, while nine passes from scratch
-    scored 46 % despite a lower validation loss, so passes on the proven
-    lineage count and validation loss alone does not select), AdamW with a
-    cosine schedule, exact resume (weights, optimizer, RNG, sampler cursor),
-    a thread flag, exports `<run>/best.nnue` with a JSON sidecar (hashes,
-    schema, metrics); output under `runs/<name>/`.
-24. Experiment order: migration control (item 4); a data-only 512-wide
-    control on the conv windows plus the prototype's data; clock features
-    (item 5); buckets (item 7); the search items of 13 with frozen weights;
-    one student round (items 21-22); the final comparison (item 17).
-    Winners are combined and retested.
-25. Resources: below-normal priority throughout; the thread count follows
-    the machine's headroom measured against the live GPU run's process
-    (it needs little CPU: 30 % of 32 logical cores were busy with 12
-    threads of ours), so labelling, the bottleneck, runs on eight workers
-    when the load allows; CUDA hidden from every Python process; the live
-    run's process and directory untouched except for reading its windows,
-    configuration and exports.
+Exact material counts and clocks travel independently of deferred accumulator vectors. A pending
+child records its before/after FeatureStates and the board/move needed for materialisation. A move
+swaps the material sides and decrements the captured type on the new mover's side. A pending chain
+obtains its parent state from the parent's pending after-state; it does not read an unresolved
+accumulator's old state.
 
-## Process (how the deployed network was made, and how to make the next)
+On evaluation, each half resolves independently. Its source is the parent's opposite half. In format
+8, a changed capped context refreshes only that half from the bias and every active row family on
+the child's board, without resolving its ancestors. An unchanged half resolves its source and
+applies piece, capture, attacked-piece and clock-row differences. Format 6 uses this incremental
+path for both halves. Ready bits prevent duplicate resolution; the child's FeatureState is committed
+when both halves are ready. Replacing a pending sibling or finishing a search discards unresolved
+work. Root refresh and refreshed child halves write into allocated buffers rather than allocating a
+vector per node.
 
-26. Lineage. Every accepted network is a fine-tune of the previous one;
-    the chain is migration control (the prototype's weights converted)
-    -> data-only control on the conv windows and the prototype's data
-    -> teacher labels on human positions -> student rounds -> a many-pass
-    continuation on every source. From-scratch runs never passed. Keep the
-    chain: initialise from the incumbent (`--init`), never from random.
-27. Sources, in order of measured value: (a) positions labelled by a
-    stronger teacher's search (human games, the student's own games; the
-    largest gains); (b) the producer's replay windows with its own search
-    values (volume; the late windows are already close to the strongest
-    teacher, correlation 0.95); (c) played outcomes (no measurable gain on
-    their own; kept at weight 0.25 in the human import). Teacher labels
-    come from `nnue.gpu_label` when the GPU is free (250 rows/s) and from
-    `nnue.label` on the CPU otherwise (1-2 rows/s per thread with sq; far
-    faster with the NNUE's own search, item 30).
-28. One iteration: `nnue.collect` (the incumbent's games against its
-    parent under node budgets, roots, leaves, alternatives and targeted
-    positions) -> label -> `nnue.data encode` -> `nnue.train --init
-    <incumbent>` on a mixture with about half window data -> gauntlet at
-    `--sims 8` (evaluator-only, minutes) -> timed accept with the
-    deployed search binary -> arena seat (`arena/upload.sh ... --replace`,
-    then restart `arena`). Every command and seed is in the run's
-    provenance or sidecar; the gauntlet verdict records the binary.
-29. Search changes are tested separately from evaluator changes, with
-    frozen weights on both seats, and bundled when each is small
-    (item 13). A bundle needs 1,000 games at 50 ms and 500 at 100 ms to
-    resolve a few per cent.
+Search uses iterative deepening, aspiration windows, principal-variation search, ordered moves,
+late-move reductions and tactical quiescence. Rule outcomes and exact goal/evasion predicates come
+from engine. Terminal move outcomes take precedence over a child's static evaluation. The quiescence
+budget and MAX_PLY frontier bound tactical continuation; the evaluator does not supply separate race
+or rule logic. A node count includes quiescence nodes; qnodes is a subset, not additional work to
+add to nodes.
 
-## Future work (not built; in the order Claude and Astra would take it)
+The retained mechanisms are two killers per ply, quiet-move history with bounded updates,
+history-aware reductions, reverse futility and late quiet futility at non-PV depth at most two with
+tactical safety checks, partial-root selection, stalemate-first quiescence, and lazy SMP over a
+shared table. Quiet futility requires an already searched move; it cannot prune every legal move.
+Iterative deepening stops starting another iteration after 72% of the time budget has elapsed. This
+build has no continuation history, capture history, null move, one-ply extensions, margin-based lazy
+evaluation or shortened quiescence horizon.
 
-30. Self-rescoring (built 2026-09-09 evening): `bot analyse --engine
-    nnue:<file>` exposes the static evaluation as the network head (child
-    static values as Q, no policy) and a node-budget search, so
-    `nnue.label --engine nnue:<file> --sims 40` labels the student's
-    positions with the incumbent's own search at 100k nodes (120 ms per
-    row per worker) and rounds no longer wait for the teacher. Stockfish's
-    data is made this way. Measured: a 10k-row round was unresolved
-    (52-54 %); a 100k-row round (1,280 games, 26 minutes of labelling on
-    eight workers) scored 59.7 % over 500 games at node budget and 57.2 %
-    over 500 games at 50 ms against its parent, a full acceptance step
-    with no teacher. The loop is now: collect 640 families, label with the
-    incumbent at 40 simulations, fine-tune 12 epochs at 30 % share,
-    resolve over 500 games. `nnue.label --quiet-best` is Stockfish's
-    generation filter (drop rows whose best move is a capture); measured
-    on the same 30k rows it dropped 18 % and scored 50.7 % (46.8-54.5)
-    against the unfiltered labels, so the loop stays unfiltered. Label depth: the same 30k rows at 160
-    simulations against 40 scored 48.8 % (44.9-52.5), so the loop keeps
-    40 and spends the time on rows. Recipe checks on the same data: 24 epochs
-    scored 50.8 % against 12 (no change), a 50 % self share scored 44.8 %
-    against 30 % (worse; the window and teacher rows anchor the network),
-    learning rates 2e-4 and 5e-5 scored 51-53 % against 1e-4, the late
-    windows alone 50 %, and no windows at all 44.7 %, so the recipe
-    stands and the windows stay in every mixture. Volume: a round of
-    195k rows scored 55.0 % against its parent, a round of 100k rows from
-    the same parent 55.1 %, so rows per round do not raise the gain.
-    Depth: two node-budget promotions of 55 % each summed to 53.7 % at
-    50 ms, and 160-simulation labels did not transfer better than
-    40-simulation ones on the clock (48.8 %), so the loop's acceptance
-    runs on the clock (500 games at 50 ms) and the site-budget gap is
-    measured against sq at fixed simulations (item 17). Rounds vary: 6 scored 51 % and 7, from the same
-    parent with a new seed, 56 %, so one flat round is not saturation.
-    Saturation did come: from ft_self11 (three promotions deep) plain
-    rounds 14, 15 and 16 scored 48.8, 49.0 and 48.6 % at 50 ms. Diversity
-    is what moved: the same round with two random moves injected in half
-    the families (`nnue.collect --random-moves 2`, Stockfish's random
-    opening moves in data generation) scored 53.3 % (49.6-57.1) against
-    the same incumbent, so from round 17 every round injects. The outcome
-    mix (Stockfish's lambda, `--outcome_weight 0.1` on the self rows)
-    scored 52.4 % (48.5-56.3) and 48.8 % (44.9-52.6) on two tests, null,
-    and is not used. Acceptance for small gains: a 500-game bar of LB >
-    50 % needs 54 % observed, which +2-3 % candidates almost never
-    reach, so from round 17 promotion is 1,000 games at 50 ms with at
-    least 52.5 % observed (a null candidate passes 5 % of the time, a
-    true +3 % about 63 %); deployment keeps LB > 50 % at 100 ms against
-    the deployed network, so the arena changes only when chained
-    promotions add up.
-31. Retrain when the teacher is clearly stronger: import the new windows
-    (`nnue.importer conv --run runs/conv_g128 ...`), relabel the human
-    and student sets with the new checkpoint through `nnue.gpu_label`,
-    continue the lineage (item 26) for tens of passes on the GPU
-    (`--device cuda`, 20-60 epochs of 1,000 steps at batch 8,192 take
-    15-45 minutes), then the gauntlets of item 28. Expect the evaluator to
-    track the teacher's mid-game judgement, which is where the losses
-    against sq were. Measured 2026-09-10 with conv@150 (about +60 Elo over
-    conv@40 in the arena): relabelling gave nothing. The continuation
-    trained on the conv@150 human labels scored 63.8 % (61.3-66.3) over
-    1,000 games at 50 ms against its parent, the control with the old
-    conv@40 human labels 65.4 % (62.9-67.9), and the student rounds
-    relabelled by conv@150 in place of the self-labels 61.6 % (59.0-64.2).
-    Relabelling existing sets with a stronger teacher is off the list;
-    importing the teacher's new windows stays (data volume, item 27).
-32. Passes: the many-pass continuation was still improving at its best
-    epoch (18 of 20); 60-150 epochs on the GPU are the next evaluator test.
-    Measured 2026-09-10: the recipe `--init <incumbent> --device cuda
-    --batch 8192 --steps_per_epoch 1000 --epochs 20 --lr 0.0003
-    --warmup_steps 200 --qat_start_epoch 0 --patience 8` on the broad
-    mixture (human labels 0.25, conv windows 0.25, the last seven student
-    rounds and the sq set 0.5) took ft_self11, a plateaued self-rescoring
-    lineage, to 63.8 % against itself over 1,000 games at 50 ms and 62.1 %
-    (58.6-65.6) at 100 ms; it is deployed as ft_gpu150a. A second
-    continuation chained on the first scored 52.5 % (49.9-55.0), so the
-    passes are a step, not a ladder; 60 epochs and the padded 768 (item 33)
-    wait for the next GPU window. The trainer must not page: the sampler
-    gathers only the columns a batch needs (`Mixture(..., fields)`).
-33. Width 768 only after the passes are in place: it costs 12 % per node
-    and its from-scratch run lost; a 768-wide continuation needs the
-    lineage widened rather than random: `NNUE.widen_hidden` pads a 512-wide
-    network to 768 so it evaluates identically at first (every new column
-    gets its own small seeded feature rows, the initial bias and zero
-    readout and dense columns), and `--init <512.nnue> --hidden 768`
-    applies it; judged on the clock, never at node budget. Measured: the
-    padded 768 fine-tuned on round 5's data scored 43.7 % (39.7-47.5)
-    over 500 games at 50 ms against the 512 it started from. That padding
-    started every new column identical (zero rows, one bias), so the new
-    columns received identical gradients and never differentiated; the
-    seeded columns (2026-09-12) remove that defect, and the width question
-    is open again (step_plan_final.md A3).
-34. Search: multithreading worth at four threads against doubled time, and
-    the evaluator's cost per node (profile and SIMD work), both under
-    measurement by Astra; then time management at 250 ms. Sequential
-    testing uses `bot eval --sprt <journal>`: pentanomial expectation MLE,
-    score hypotheses .50/.52, alpha=beta=.05, checks every 16 pairs from
-    128 through the 3,008-pair cap; invalid forfeits and hash-bound resume.
-    Rust agrees with the independent reference on 20 likelihood values and
-    265 trajectory checks; simulated-distribution calibration is maintained
-    in `match/tests/sprt_calibration.rs`. Protocol and measured calibration
-    are recorded in `runs/nnue_plan/astra_status20.md`. Since 2026-09-10 the arena seat plays under a wall clock
-    (`bot rpsi --movetime 100` overrides the host's `go sims 32`), so
-    nodes per second count in the arena as well as in the timed matches;
-    the speed work (a `znver4` target for both Zen 4 machines, staged move
-    generation, evaluation skipped where the search never reads it, the
-    dense head and readout on AVX-512) is Astra's turn 15, and only
-    changes that keep fixed-node decisions identical enter without a
-    gauntlet. Measured (turn 15, 2026-09-10): the retained bundle is
-    +35 % nodes per second on one thread (1.06 M to 1.38 M on the 100
-    benchmark positions, all 100 fixed-node search results identical);
-    the pieces were the znver4 target +6.6 %, staged move generation with
-    compact legal-origin masks +12.2 %, deferred accumulators +7.8 %,
-    table prefetch +4.4 %, AVX-512 readout +2.5 %, a cheaper attack-status
-    update +4.1 %; an exact evaluation cache lost 4 %, a wider accumulator
-    kernel and quiescence target masks gained nothing, and skipping the
-    unused stand-pat evaluation changed 8 of 100 results through table
-    side effects. With frozen weights the new search scored 58.8 %
-    (56.3-61.3) at 50 ms over 1,000 games and 57.5 % (54.0-60.9) at 100 ms
-    over 500 against the previous one. The dense head is now the largest
-    cost (25 %); lazy evaluation with a margin and a cheaper quiescence
-    change decisions and had their own gauntlets in turn 16, where both
-    failed: lazy evaluation with a margin of 1,152 units (the residual's
-    99.5th percentile; a safe margin skips 0.4 % of dense heads) 50.5 % at
-    50 ms and 47.7 % at 100 ms, a quiescence horizon of 2 instead of 6
-    49.35 % at 50 ms. Kept from turn 16: a seat's own `--movetime` budget
-    is searched in full (the 20 ms reserve serves a host deadline only;
-    56.2 % (53.1-59.5) at 100 ms, +25 % nodes per move) and terminal checks
-    proved by the caller are not repeated (+2-5 %). Scaling at 100 ms with
-    frozen weights: two threads 56.1 % (52.9-59.4) against one at 1.97x the
-    nodes, four threads 67.0 % (64.0-70.0) at 4.05x; a versioned atomic
-    shared table, a shared-entry prefetch and scratch alignment were within
-    noise. An adaptive stop (turn 14: stable move and score over three
-    depths) scored 49.8 % at 50 ms, as expected under a fixed movetime.
-    Arena, 2026-09-10 17:00: ft_gpu150a on two threads at 100 ms settled at
-    +97 (29.9) with the best conv checkpoint at +34 and sq at 0.
-35. The race blind spot: of 78 goal losses against sq, 59 were runner or
-    tempo races and 19 capture or escort sequences; the static value was
-    optimistic twelve plies out in 13, nine of them races. Built
-    2026-09-10 (Astra: engine query and the Rust side, Claude: the Python
-    side) as format 7: per side, the bucketed goal distance (1-8, none) of
-    the best runner that passes a piece-type and tempo interception filter
-    (`engine::race::race_buckets`, a geometric hint that ignores clocks,
-    moving barriers and wins elsewhere), 18 rows after the clock rows, two
-    active per perspective (own side, other side; the pair is queried once
-    on the actual mover's board and swapped for the other perspective, so
-    the tempo is the real one). Python encodes 44 slots for both formats
-    and a format 6 model masks the race ids; `widen_features` pads the
-    lineage with zero rows, and the widened ft_self11 searches identically
-    on the Rust side. Measured cost at H512, one thread: 390 ns per query,
-    about 28-30 % of search throughput (1.06 M to 0.74 M nodes/s on the
-    benchmark positions), so on the clock the feature must be worth about
-    seven points of score before it breaks even (a doubling of time is
-    worth 15 %). Astra then deferred the query to the nodes that are
-    actually evaluated (about half of the visited nodes) and added early
-    outs, which brought format 7 to 91 % of format 6 throughput with
-    identical search outputs. Measured value: ft_race16, the incumbent
-    fine-tuned with the rows for seven epochs on round 16's mixture,
-    scored 52.5 % (48.6-56.3) against ft_self11 at 8 simulations (fixed
-    nodes, the arena's setting) and 42.7 % (38.8-46.6) at 50 ms on the
-    eager binary; with the 9 % cost the clock result would be about even.
-    A residual analysis explains why: on 60k self-labelled rows the
-    incumbent's error grouped by race bucket is at most 0.046 in value, a
-    per-bucket-pair correction removes 0.8 % of the residual variance,
-    and a runner within three moves exists in 4 % of rows, so the
-    piece-square rows already read races as well as 40-simulation labels
-    can teach them (the optimism the loss study saw is twelve plies out,
-    beyond the labels' horizon). Format 7 was removed with format 8
-    (item 38); a race term returns only through the C3 proof of
-    runs/nnue_plan/step_plan_final.md (a measured race error that stays
-    with deeper labels), never as a feature added on its own.
-    Also: teacher disagreement rounds at 512 simulations on the rows
-    where student and teacher differ most.
-36. Not worth repeating (measured null or negative): clock rows, output
-    buckets, the quiet-position filter, human outcome labels alone,
-    doubling the windows alone, null move, one-ply extensions, exact
-    tactics beyond the current rule, relabelling existing sets with a
-    stronger teacher (item 31), a second many-pass continuation chained on
-    the first (item 32).
-37. Controlled gen3 data comparison: independently continue frozen mb_b on
-    gen1a+gen2 and on gen1a+gen2+gen3, holding nominal self-play/replay shares
-    at 70/30, historical source allocation and the 20-epoch CPU recipe fixed.
-    Both arms meet mb_b and each other in paired eval at 50 and 100 ms.
-    The direct match measures the new data's benefit; promotion separately
-    requires beating mb_b at both budgets. The schedule and decision rules
-    are in runs/nnue_plan/selfplay_plan_final.md, exact arguments and seeds
-    in runs/nnue_gauntlets/gen3_controlled/experiment.json. Measured on
-    one seed: no gain (53.3 % at 50 ms, 50.3 % at 100 ms against the
-    control), a bounded finding, unresolved across seeds; the
-    self-play loop was paused and the step-change programme of
-    runs/nnue_plan/step_plan_final.md agreed with Astra on 2026-09-12.
-38. Format 8, the agreed contract (runs/nnue_plan/format8_contract.md): the
-    piece-square rows are conditioned on the perspective's opponent
-    material, c = min(r, 2) + 3 min(p, 2) + 9 min(s, 2) over the opponent's
-    rock, paper and scissors counts, 27 contexts, rows 486 c + 81 (code - 1)
-    + square; the attacked and clock rows follow unconditioned: 13,640
-    features, version 8 in the format 6 header and payload order, 42 slots
-    per perspective, the H512 file 14,003,436 bytes, no race rows. Trained
-    factorised (Stockfish's feature factorisation): W[c, i] = base[i] +
-    delta[c, i] with the residuals zero at the start and quantisation and the
-    range constraint on the sum; a format 6 `--init` becomes the shared
-    factor (`widen_contexts`, byte-identical to `nnue.export convert`), so
-    a format 8 run starts from the incumbent's evaluation. Measured
-    2026-09-12: the factorised step costs 13 % more than format 6 (393-401
-    against 348-350 ms per 8,192-row step on eight threads); over 2 M gen3
-    rows the full context (two or more of each type) holds 40.6 % of the
-    perspectives and seven contexts fall under 0.5 %, which the shared
-    factor covers. Rust reads versions 6/8 with shared strict validation.
-    Exact counts travel through pending states; halves resolve independently
-    only to their last context change, refreshing from bias and active rows
-    into reused vectors. Diagnose reports materialisations, context changes,
-    updates, discarded halves and timed row work with explicit denominators.
-    Shared parity fixtures in tests/fixtures/format8_* cover 512 positions
-    and 2,986 legal plies, kept in step by py/tests/test_fixtures.py. The
-    throughput gate (at least 95 % of format 6 nodes/s) remains required.
+The transposition key includes the canonical board and capture-clock state. Bound entries
+distinguish exact/lower/upper scores and retain a legal ordering move; static evaluation is
+separately valid. Mate-distance scores are normalised when stored/retrieved. Interrupted ancestors
+and frontier-only results do not establish reusable search bounds. The single-thread path uses its
+local table; multiple search workers share a table with coherent, nonblocking entry access. A
+contended shared entry is a miss.
+
+> Conditional on C2: keep the following QTT paragraph only on acceptance; otherwise remove it at the gate 6 freeze.
+
+QTT contract: negative depth tags identify the exact remaining quiescence budget and root-relative
+ply; positive depths identify full search. A bound can cut off quiescence only at the matching tag.
+Full-search and quiescence bounds do not substitute for one another. A legal tactical hash move can
+order quiescence moves independently of bound compatibility. Bound type uses the original alpha/beta
+window, including stand-pat exits. Current-generation positive-depth entries are protected from
+quiescence replacement, and negative tags have equal replacement priority. The tag is an identity,
+not a numerical depth ranking.
+
+NnuePlayer refreshes the root and searches under its supplied budget. A simulation budget means at
+most 2,500 nodes per simulation on one search thread, with a 120-second safety limit. A timed
+external host deadline reserves 20 ms; a seat's own --movetime budget uses the full time through
+choose_self_timed. Result depth denotes the last completed iteration; partial identifies an improved
+playing choice from an unfinished iteration. Completed-root labels use the last completed iteration,
+independently of that partial choice. Newgame clears search state. Analyser searches start with
+cleared TT state.
+
+Diagnose exposes exact-count transitions, capped-context changes, full and half refreshes,
+incremental updates, row additions/removals and discarded pending work. materializations counts
+halves, including two per full root refresh. The accounting identities are materializations =
+2*full_refreshes + half_refreshes + incremental_updates and 2*prepared_edges + 2*full_refreshes =
+materializations + pending_halves_discarded after pending cleanup. A partly resolved node can
+contribute both materialised and discarded halves; pending_nodes_discarded is not a count of wholly
+unevaluated nodes. Refresh/update timers are enabled only for diagnostic accounting and include
+their measurement overhead. Performance acceptance uses the same frozen unprofiled binary, identical
+roots/budgets and external elapsed/RSS observation. Correctness and speed do not establish playing
+strength.
+
+## 4. Data and trainer
+
+### 4.1 Datasets
+
+A dataset is one directory under runs/nnue_data/<set>/ of columnar NumPy arrays, memory-mapped when
+read, plus provenance.json. Every row is one position in the mover's frame with an exact clock
+context and one label: board u8 (N, 81) with codes 0 empty, 1-3 own rock, paper, scissors, 4-6
+enemy; since_capture u16; ply u16; capture_clock u16 (the game's clock); target f32 in [-1, 1] from
+the mover's view; weight f32; kind u8; outcome i8 with outcome_ok; source u8; game u32 (episode
+within the set); orbit u64 (the board's symmetry-orbit hash); split u8. Kinds: 0 a played root
+labelled with its lambda return, 1 the child of a visited candidate labelled minus the candidate's
+completed Q, 2 an exact proof (1, -1 or 0), 3 a teacher search value, 4 a raw network value, 5 a
+prototype replay row with averaged counters. Splits 0 train, 1 validation, 2 test, assigned by
+episode first, with no symmetry orbit across splits. Sources 1 conv windows, 2 and 3 the prototype's
+replay and searched arrays, 4 student positions, 5 human games, 6 the searched roots of `bot
+selfplay`.
+
+provenance.json records the producer and its inputs (the window hashes, the teacher engine, binary
+and network hashes, simulations, rules, clock, sampling seed and selection); its hash is the
+dataset's identity everywhere else (the trainer's inputs, the runner's pinned identities, the id
+cache). A dataset is immutable once written; that is the contract, not a check: arrays changed under
+an unchanged provenance file go undetected, a labeller that skips an existing output has not
+compared its content, and the runner refuses only a provenance file whose hash moved. The optional
+cache ids8.npy holds the format-8 feature ids of every row (int16, (N, 2, 42)) so a batch is a
+gather rather than an encode; ids8.json binds it to the encoder's signature (the ids of 64 fixed
+boards), the row count and the provenance hash, and a cache that is not this dataset's under the
+current encoder is refused. `python -m nnue.data encode <set>` writes it.
+
+### 4.2 Importers
+
+`python -m nnue.importer conv --run <dir> --out <set> [--iterations a-b] [--children 16]` reads the
+replay windows of a conv run (schema 2; plain or zstd; the bytes hashed, the shapes validated, any
+other schema refused). The played root gets its lambda return (kind 0, weight 0.25); every visited
+candidate's nonterminal child, applied through the engine, gets minus that candidate's completed Q
+(kind 1, weight 1); outcomes stay on played rows. Episodes are recovered from the environment order
+across contiguous windows; exact (board, since_capture, clock) contexts are merged with the weight
+capped at 4. `nnue.importer human --file <export> --out <set>` gives every played root of a finished
+site game its outcome (kind 0, weight 0.25, outcome recorded), merged the same way. `nnue.importer
+selfplay --records <files> --out <set> [--min-ply]` imports the searched roots of `bot selfplay`
+records with the values their searches completed (source 6). The two label domains stay apart:
+producer-rule rows as recorded, site-rule rows (clock 200, no shaping) from fresh searches; a recipe
+names what it mixes and at what share.
+
+### 4.3 Labelling
+
+`python -m nnue.label --input <set> --out <set> --engine <spec> [--sims N] [--workers W] [--rows N]
+[--seed S] [--select <set>]` gives every row an exact proof from the engine (a win at once is 1,
+every move losing in two is -1; kind 2) or the root value of `bot analyse` under the named engine
+and `sims` (kind 3), with the chosen line's Q kept beside the root value in the provenance
+statistics. The output keeps the input's boards, counters, games, orbits and splits and records the
+site clock, under which the teacher searched. `--rows N` labels a seeded sample; `--select
+<shallow>` labels instead the N rows whose input label differs most from their label in a shallow
+pass over a sample of the same input (the largest disagreements between the two labels, which do not
+say which side misjudged the position; the seeded sample is the control). Selection refuses a
+shallow set that is not a subset of the input, duplicates on either side, non-finite gaps and too
+few rows.
+
+Roots are searched one `bot analyse` process per chunk, the answers matched by request id. A root
+whose search fails, or whose process died before answering, is searched once more under the same
+budget, never replaced by another root; roots still failing after the retry are dropped. Provenance
+records the engine (spec, binary hash, network hash), the input set's provenance hash, the sample
+(rows, seed), the selection set, `retries`, `errors`, and `cost`: the request slots submitted (a
+slot behind a crashing row never starts), the processes, their wall seconds, the nodes the answers
+report (a lower bound on the search done) and the attempts whose node count is unknown. A
+preregistered step names rows requested and rows usable (the count after the retry it accepts), and
+the verdict reports the final counts.
+
+`python -m nnue.gpu_label --input <set> --out <set> --ckpt <checkpoint> [--teacher conv|sq] [--sims
+128] [--batch 4096]` labels the same rows in bulk with conv's (or sq's) batched Gumbel search from a
+training checkpoint when the GPU is free: the exact proofs of the next set are computed on the CPU
+while the GPU searches the current one, several input/output pairs share one loaded teacher, the
+teacher's repetition rule is recorded. It is not in the test suite. GPU use is the user's decision.
+
+### 4.4 Model
+
+One network, whose integer evaluation, rounding, clamping and file layout are section 2's: feature
+tables of int16 rows shared by both perspectives (the mover, and the anti-diagonal reflection with
+colours swapped), H hidden (a multiple of 32 in 32..1024; 512 in the lineage), squared clipped ReLU,
+one int16 readout, one 32-wide int8 dense residual; value tanh(raw), search score round(600 raw).
+Version 6 has 1,004 rows (486 piece-square, 486 attacked-piece, 16 elapsed-clock and 16
+remaining-clock rows over the bounds 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160
+plies); version 8 has 13,640 (the piece-square rows repeated in 27 opponent-material contexts c =
+min(r, 2) + 3 min(p, 2) + 9 min(s, 2), then the same attacked and clock rows). The encoder and the
+trainer fill 42 slots per perspective (20 pieces, 20 attacked pieces, two clock rows); an unused
+slot carries the sentinel id F, which contributes nothing and is not a row of the served file.
+
+Training keeps float parameters that the exporter rounds: the piece, attacked and clock tables
+clamped to [-8, 8], the readout and residual to their int16 or int8 ranges, and constrained after
+every step. A format 8 model is factorised (Stockfish's feature factorisation): W[c, i] = base[i] +
+delta[c, i] with the residuals zero at the start and the clamp applied to the sum by moving the
+residual, so a format 6 `--init` becomes the shared factor (`widen_contexts`, byte-identical to
+`nnue.export convert`, which repeats the piece rows into every context and copies every other byte)
+and a format 8 run starts from the incumbent's evaluation. `widen_hidden` pads a narrower network to
+a wider one that evaluates identically at first: every new column gets its own small seeded feature
+rows, the initial bias and zero readout and dense columns (the earlier zero-row padding left the new
+columns identical and undifferentiated, item 33). The PyTorch fake-quantised forward agrees with the
+file's integer evaluation within 2e-6 raw; the NumPy oracle over the file bytes and the Rust kernels
+agree exactly on feature ids and integer accumulators and within 1e-12 on the f64 value, the scalar
+and SIMD kernels bit-identically (section 2).
+
+### 4.5 Training
+
+`python -m nnue.train --run <name> --data <set>:<share> [...] [--<field> value]`; every field of
+`Config` is a flag and runs/<name>/config.json records the values used: hidden 512, batch 2048,
+steps_per_epoch 500, epochs 20, lr 3e-4, weight_decay 1e-5, warmup_steps 200, lr_floor 0.15,
+qat_start_epoch 0, raw_weight 0.02, symmetry_weight 0.2, version 8, threads 4, device cpu, seed 0,
+val_rows 8192, grad_clip 5, patience 6, init, resume, stop_epoch. Batches are drawn from the named
+datasets by fixed shares with replacement (the shares normalised, each count rounded and at least
+one row, the residual of the batch going to the last dataset), gathering only the columns a batch
+needs when every set has an id cache. Every batch is augmented by a random one of the six board
+symmetries and paired with a second view; the loss is the tanh mean squared error against the target
+plus raw_weight times a bounded logit term, plus symmetry_weight times the squared difference of the
+two views' values. Quantisation-aware training (fake quantisation of every table in the forward) is
+on from qat_start_epoch; AdamW with linear warmup and a cosine schedule to lr_floor of the rate;
+gradients clipped; a non-finite loss or gradient stops the run.
+
+Validation after every epoch, per dataset and under all six symmetries at qat: error statistics
+overall and by stratum (pieces at most 4, 5-12, over 12; since_capture over 100), the symmetry
+spread, and the selection stratum, every row whose kind is not 0 (a hard game outcome is -1, 0 or 1
+and a lambda return may lie between; either is one draw from the value, whose error floor would
+swamp the rest). The selection objective is the share-weighted validation MSE over the selection
+strata, every kind-0 row excluded wherever the stratum exists and a dataset whose validation rows
+are all kind 0 contributing its overall MSE; `best.pt` and `best.nnue` (with a sidecar: run, epoch,
+objective, config, datasets, hash) follow it; patience stops a run after that many epochs without
+improvement; stop_epoch pauses after N epochs with the schedule unchanged. `latest.pt` is written
+atomically after every epoch with the weights, the optimizer, the torch and augmentation RNG states,
+the sampler state, the epoch, the step, the best objective, the config and the run's inputs (the
+data parts, every dataset's provenance hash, the init file's hash). `--resume` restores all of it
+and refuses other settings, another init or other datasets; log.csv is truncated to the checkpoint's
+epochs before the run continues, so the checkpoint, never the log, says how far a run got. `--init`
+takes a .nnue file (widened to the run's hidden and version as above) or a .pt checkpoint's weights.
+
+## 5. Measurement and experiment runner
+
+### 5.1 C1 paired measurement contract
+
+bot eval is the strength authority. Each opening produces two games with candidate/reference seats
+swapped. Budgets follow the player, not its colour. The independent sampling unit is the complete
+opening pair. Candidate pair scores are 0, 0.25, 0.5, 0.75 or 1; the five counts form the
+pentanomial sample. Equal display names are permitted: pair order and frozen artifact provenance
+identify the roles.
+
+Sequential evaluation compares expected pair score s0=.50 with s1=.52 using constrained pentanomial
+maximum likelihood, alpha=beta=.05 and log-likelihood boundaries +/-log(19). The likelihood applies
+a 0.001 count to empty cells. Results retire in opening order in batches of 16 pairs, with the first
+decision at 128 and a cap of 3,008. A boundary crossing accepts/rejects; reaching the cap without
+crossing is inconclusive. Forfeit, PlyCap or Interrupted invalidates the test. Both colours and the
+current batch finish before a stop; a resumed incomplete batch is completed under the same rule. A
+malformed protocol or complete journal record is an error.
+
+The journal starts with protocol and protocol_digest, then numbered pair records with the two
+GameRecords. The protocol binds settings, generated opening sequence, coordinator/build/network
+identities, player thread count and logical process affinity. Resume requires equality, reconstructs
+the stopping state and ignores/truncates only an unterminated final record. A terminal complete
+journal reconstructs a report without constructing players. Ordinary --resume can continue a running
+journal; it is not a general read-only inspection command.
+
+The report's sequential object contains protocol, protocol_digest, counts, llr, stop_reason, error
+and intervals_descriptive_only directly. Stop names are running/accept/reject/inconclusive/invalid.
+End names are Goal/Elimination/Stalemate/CaptureClock/Forfeit/PlyCap/Interrupted. Winner 0/1 means
+the game's first/second player; null means a draw or censorship as distinguished by End. For valid
+games the first four endings apply. Complete pair counts exclude invalid pairs.
+
+Fixed-count comparisons use paired uncertainty under their preregistered rule. Sequential-stop
+bootstrap intervals are descriptive and cannot supply a fixed-count confirmatory lower-bound
+decision. Calibration uses simulated pair distributions and an independent likelihood/trajectory
+reference; scripted journal fixtures test serialization, pair accounting and terminal replay, not
+model strength. Search changes use identical frozen weights in both external build seats; network
+comparisons use the same frozen search implementation. Exact commands, seeds, hashes and decision
+rules belong to the experiment manifest, with outcomes in its verdict.
+
+The runner audits C1's report against its bound protocol and game records before using its stopping
+result in the experiment verdict. A fixed-count match preregisters either lower_bound_above (the
+paired bootstrap interval's lower endpoint strictly exceeds the threshold) or score_at_least (the
+observed score is at least the threshold).
+
+### 5.2 Experiment runner
+
+`python -m nnue.experiment pin <experiment.json>`, `run <experiment.json> [--only train|match]` and
+`verdict <experiment.json> [--audit]` run one preregistered experiment from one manifest (schema 2)
+in its own directory under runs/nnue_gauntlets/<name>/: the frozen `bot`, the shared `network`, the
+CPU `affinity`, `identities`, `arms`, `matches`, `rules`. `pin` hashes every fixed input (the bot,
+the network, every `.exe` and `.nnue` side, every arm's init, every dataset's provenance file) into
+`identities` before anything runs; `run` and `verdict` refuse a file that differs. The manifest is
+written before the first game and not amended after a result is seen; a change of protocol is a new
+manifest.
+
+Arms train through `nnue.train` with the arm's config, init and data; `stops` are epoch counts at
+which training pauses, the checkpoint is retained as epoch<N>.pt (its own epoch count checked) and
+resumed exactly; endpoints (`latest@N`, `latest`, `best`) are exported from those checkpoints. An
+existing endpoint is reused only when its sidecar hashes the file and carries the epoch its source
+names and, for an arm the runner trains, the arm's config, data shares, dataset hashes and init hash
+(an arm that names an existing run binds to the file, epoch and config); there is no fallback for an
+unbound endpoint: a missing file, a missing, unreadable or malformed sidecar or one that does not
+match is a broken endpoint, and a match that used one is invalid. CUDA exposure is experiment-wide:
+the runner hides the GPU from every process it starts unless any arm names cuda, in which case
+device 0 is exposed to all of them, and an environment that already sets CUDA_VISIBLE_DEVICES (to -1
+included) overrides either; paired arms that are compared declare the same device (the trainer alone
+hides CUDA by default).
+
+A match names its candidate and reference as `<run>:<endpoint>`, a `.nnue` path or a `.exe` path,
+the clock (`move_ms`), the seed, the opening plies (8), the concurrent pairs (8) and the player
+threads (1). Network sides play under the frozen `bot`; `.exe` sides are search builds seated
+through `rpsi:<exe> rpsi --player nnue:<network> --threads T` on both sides, so the process overhead
+is equal and the weights are the experiment's shared network; a seat path with whitespace is
+refused. A fixed-count match plays `pairs` seeded openings with the colours swapped and records
+every game; a sequential match (`sprt`) runs C1's test with a journal that is resumed when it exists
+and stopped by its own rule, streamed so the runner records each invocation's timing, finished,
+failed or interrupted (launch time; pairs before and committed after, null when the journal could
+not be read; process, startup, play, active and finish seconds kept apart as diagnostics; new pairs
+per active second; per-batch occupancy and the idle share over complete batches; the aggregate is
+committed pairs over summed active seconds and over summed process seconds, never paused time, and
+is null beside the known count and the number of unknown invocations when any count is unknown),
+written before the report is cached.
+
+A played match is bound to its manifest entry, the affinity, the hashes of the files it used and the
+hashes of its own report and journal or records (`<tag>.match.json`); `run` plays a match whose
+report is not bound again (resuming a sequential journal) and `verdict` judges such a report
+invalid; neither keeps an unbound report as a result. The verdict audits every match's recorded
+games against its report: for a sequential test the journal header's protocol and digest must equal
+the report's, the protocol's settings (seed, clock, opening plies, workers, player threads) must
+match the manifest and its provenance hashes (coordinator, each side's binary and network) the
+pinned identities; every pair must hold two games of one opening with the seats swapped and endings
+among Goal, Elimination, Stalemate and CaptureClock (C1 censors Forfeit, PlyCap and Interrupted);
+pairs, complete pairs, the pentanomial counts and the candidate's wins, draws and losses must equal
+the report's; forfeits or an error on a completed test invalidate it; and, only for a journal that
+exists, is bound and passed that audit, C1 itself replays it (`bot eval --sprt <journal> --resume`,
+which plays nothing once the test has stopped) and its report must agree, so the verdict can never
+start or continue a test. A fixed-count match is reconciled the same way from its records. A
+malformed journal or record is a structured problem of its match, never an exception, and a journal
+that cannot be read gives an unknown pair count in the timing, never a fabricated one. The verdict
+records, per match, the numbers, the descriptive counts (endings, the first mover's score, distinct
+openings, mean plies), the problems and validity; per rule (`lower_bound_above` and `score_at_least`
+for fixed-count matches, `sprt_accept` for sequential ones) whether it is complete and met; a
+sequential test's bootstrap interval is descriptive only.
+
+Every `bot eval` runs inside a Windows job object (created suspended, assigned, then resumed, so
+every seat inherits it) that is terminated when the invocation ends, however it ends: an
+interruption or a reader error kills the tree, a coordinator that exits abruptly leaves no seat
+behind, one that closes its output without exiting is killed after a grace period, and the job's
+member list names any survivor. Every cleanup step checks its result; a step that cannot be proved
+(a failed termination, query or handle close, a reader still holding the pipe) is recorded and keeps
+the reservation like a survivor; that invocation ends with an error, its result discarded and its
+timing kept, and nothing is launched again while the failure or a surviving member stands. One heavy
+phase at a time: the runner takes the compute lock (runs/nnue_plan/compute_lock, created atomically,
+never taken from a live owner) for the whole run, its final verdict included, at below-normal
+priority on the declared CPUs, and releases it only when no child of its own, no job member and no
+unproved cleanup remains; otherwise it keeps the lock and `lock release experiment <pid>` frees it
+once they are accounted for. The standalone `verdict` takes the lock the same way for C1's replays;
+`--audit` judges without launching anything and needs no lock. A manual holder (`lock acquire
+<owner> <phase> [<mask>]`, `lock release <owner> <pid>`) does the same by hand.
+
+## 6. Numbered measurement history (short, bounded, with artifacts)
+
+Numbers are the old item numbers where source comments or README cite them; each entry is one
+finding with its recipe, control, budget, size, estimate and artifact. Nothing here is a standing
+prohibition. Entries 30-33 carry the numbers of the earlier numbered record; they were not
+re-derived from their artifacts for this rewrite, and an entry whose report cannot be named cites
+that record.
+
+4. Migration control (2026-09-09): the prototype's release network converted to format 6 with zero
+   clock rows gave identical raw scores on 1,024 stored positions and reproduced the prototype's
+   fixed-node decisions on 100. Artifact: runs/nnue_migration/ (control.nnue, clock_validate.jsonl).
+7. Clock rows and output buckets, bounded historical findings, each arm against a common opponent
+   and not head-to-head: the data-only retrain ctrl_data scored .8375 (130/8/22) against
+   nnue_migration/control and the retrain without clock rows ctrl_noclock .825 (121/22/17) against
+   that same network, 80 pairs each at 100 ms with one player thread but under different search
+   builds (clock_a.exe for the first, partial_root.exe for the second), so this is not a controlled
+   isolation of the clock rows; the bucketed head ft_buckets scored .506 (69/24/67) against
+   ctrl_data (80 pairs, partial_root.exe). The clock rows stay, the buckets were removed (one head).
+   Artifacts: runs/nnue_gauntlets/ctrl_data_vs_control/accept.json,
+   ctrl_noclock_vs_control/accept.json, ft_buckets_vs_ctrl_data/accept.json.
+13. Search stages, frozen weights, one at a time at 64-160 games: partial-root selection 59 %; table
+    and hot-loop efficiency, history, futility 48-52 % (below resolution); the bundle (efficiency,
+    history-aware reductions, both futility rules) 57.4 % (54.5-60.2) over 1,000 games at 50 ms and
+    55.7 % (51.8-59.5) over 500 at 100 ms against partial-root alone, retained; one-ply extensions
+    and null move 47-48 %, not retained; stalemate-first quiescence +14 % nodes/s, 53.6 %
+    (50.8-56.4) over 500 games. Artifacts: runs/nnue_gauntlets/astra_partial_root, astra_efficiency,
+    astra_history, astra_history_lmr, astra_quiet_futility, astra_reverse_futility,
+    astra_extensions, astra_null_move, astra_exact_tactics.
+16. Resolution: in the measured samples, 160 games gave paired intervals about +-8 % wide, so search
+    changes worth 1-3 % were bundled and confirmed over 1,000 games; from 2026-09-12 C1's sequential
+    test screens single search patches, and a fixed-count confirmation of the accepted bundle at 100
+    ms stays in the plan.
+17. Against the SQ teacher weights@66 (weights/sq_g128.onnx, f720705d...0f58071) at the site budget
+    (250 ms per move, sq searching every move, audited): ft_self7 .580 [.485, .670] (51/14/35) over
+    50 pairs, and ft_self11 .650 [.570, .730] (59/12/29) over 50 pairs with four player threads; the
+    2026-09-09 attempt was invalid (the sq seat stopped searching under the deadline). The old
+    reports' bootstrap intervals are margin intervals; the score endpoints are (margin + 1)/2.
+    Artifacts: runs/nnue_final/ft_self7_vs_sq_250ms_fixed.json and .games.jsonl;
+    runs/nnue_turn9/teacher.report, teacher.command and teacher.audit .json with
+    teacher.games.jsonl; runs/nnue_turn9/previous_fixed_audit.json (the per-seat SQ-health audit).
+30. Self-rescoring loop (the incumbent's own search at 40 x 2,500 nodes labels its games): a
+    100k-row round 59.7 % at node budget and 57.2 % at 50 ms over 500 games against its parent; the
+    quiet-best filter 50.7 % (46.8-54.5), 160-simulation labels 48.8 % (44.9-52.5), 24 epochs 50.8
+    %, a 50 % self share 44.8 %, no windows 44.7 %, 195k rows 55.0 % against 100k rows 55.1 %;
+    rounds 14-16 from ft_self11 48.6-49.0 % (no resolved gain under that protocol); two random
+    opening moves in half the families 53.3 % (49.6-57.1); the outcome mix 52.4 % and 48.8 % (null);
+    each comparison's opponent is in its directory name or the record. Evidence: the historical
+    numbered record (item 30 of the previous DESIGN) and runs/nnue_gauntlets/ft_self5_500 to
+    ft_self18_1000 (one report and one games file per round), quietbest_vs_shallow_500,
+    ft_lambda15_vs_self15, ft_lambda16_500_timed, ft_lr2e4_500, ft_lr5e5_500, ft_nowindows_500,
+    ft_latewindows_500, ft_self5_share50_500, ft_self5_long_500, ft_random15_500_timed.
+31. Relabelling existing sets with the stronger conv@150 teacher, three arms each against a common
+    opponent (ft_gpu_labels or ctrl_data, as the directory names say), not each other: the
+    continuation on conv@150 human labels 63.8 % (61.3-66.3) over 1,000 games at 50 ms against its
+    parent, the control on conv@40 labels 65.4 % (62.9-67.9), the student rounds relabelled 61.6 %
+    (59.0-64.2): no resolved gain from relabelling under that protocol; new windows stay in the
+    mixture. Artifacts: runs/nnue_gauntlets/ft_round2_vs_ft_gpu_labels,
+    ft_round3_vs_ft_gpu_labels_sims8, ft_round3_vs_ft_gpu_labels_timed, ft_gpu_all_vs_ctrl_data,
+    ft_gpu_labels_vs_ctrl_data, ft_human_vs_ctrl_data, nnue_ft_all_vs_ft_gpu_labels_timed.
+32. GPU passes: 20 epochs of 1,000 steps at batch 8,192 on the broad mixture took the plateaued
+    ft_self11 to 63.8 % over 1,000 games at 50 ms and 62.1 % (58.6-65.6) at 100 ms (deployed as
+    ft_gpu150a); a second continuation chained on it 52.5 % (49.9-55.0). Artifacts:
+    runs/nnue_gauntlets/ft_gpu150a_50ms, ft_gpu150b_50ms, ft_gpu150d_50ms, ft_gpu40c_50ms,
+    ft_gpu150a_sims32. Whether 60 epochs beat 20 is A1 (runs/nnue_gauntlets/long_training), pending.
+33. Width 768 padded from 512 with identical zero columns scored 43.7 % (39.7-47.5) over 500 games
+    at 50 ms against the 512 it started from; the padding defect (identical columns, identical
+    gradients) is fixed by seeded columns and the width question is open (A3). Artifact:
+    runs/nnue_gauntlets/ft_self5_w768_500_timed.
+34. Search speed and threads (Astra, turns 15-16): a 35.24 % median paired speed-up on one thread
+    (each benchmark pass over the same 100 fixed-node roots; the ratio of the median aggregate
+    throughputs is 29.7 %, 1,062,227 to 1,377,801 nodes/s), all 100 results identical; the stages
+    (znver4, staged move generation, deferred accumulators, prefetch, the AVX-512 readout, cheaper
+    attack status) were each measured against their recorded comparator, several against the same
+    baseline, and their gains do not add to the total. With frozen weights 58.8 % (56.3-61.3) at 50
+    ms over 1,000 games and 57.5 % (54.0-60.9) at 100 ms over 500; four threads against one at 100
+    ms .670 (.640-.700) over 250 pairs; lazy evaluation with a margin and a shorter quiescence
+    horizon failed their gauntlets, as did the adaptive stop (.498 [.472, .5245] over 500 pairs at
+    50 ms; runs/nnue_turn14/time50.command, report and audit .json), whereas the seat-owned
+    time-budget fix was accepted (.562 [.531, .595] over 250 pairs at 100 ms;
+    runs/nnue_turn16/budget100.command, report and audit .json) beside the retained 72 %
+    iteration-admission threshold. C1's calibration: .043 is the largest wrong-boundary rate
+    observed among the calibrated endpoint cases, not a bound proved by the 130k trials. Artifacts:
+    runs/nnue_turn15/final_comparison.json, provenance.json, gauntlet50.audit.json and
+    gauntlet100.audit.json with their command and report files;
+    runs/nnue_turn16/scaling4_100.audit.json and the lazy50, lazy100, q2_50 and q2_100 command,
+    audit and report files, accepted_parity.json and provenance.json binding the retained code;
+    runs/nnue_turn20/c1_calibration/experiment.json and verdict.json.
+35. Race rows (format 7): 390 ns per query; a 28-30 % throughput loss with eager evaluation, about
+    91 % of the baseline throughput deferred; ft_race16 52.5 % (48.6-56.3) at 8 simulations and 42.7
+    % (38.8-46.6) at 50 ms against ft_self11; on 60k self-labelled rows the error grouped by race
+    bucket is at most 0.046 and a per-bucket correction removes 0.8 % of the residual variance.
+    Removed with format 8; a race term returns only through the C3 proof. Artifacts:
+    runs/nnue_gauntlets/ft_race16_500_movems50, ft_race16_500_sims8.
+36. Measured null or negative, bounded, not standing prohibitions: clock-row removal, output
+    buckets, the quiet-best filter, human outcome labels alone, doubling the windows alone, null
+    move, one-ply extensions, exact tactics beyond the current rule, relabelling with a stronger
+    teacher (31), a second chained continuation (32).
+37. Controlled gen3 data comparison (one seed): 53.3 % at 50 ms and 50.3 % at 100 ms against the
+    control; no resolved gain under that protocol, one seed only. Artifact:
+    runs/nnue_gauntlets/gen3_controlled/.
+38. Format 8: the contract (runs/nnue_plan/format8_contract.md), gates 1-5 passed (parity on 512
+    positions and 2,996 trajectory states under both H32 nets, ids and accumulators exact and the
+    f64 value within 1e-12, scalar/AVX2/VNNI bit-identical, mb_b and mb_b8 fixed-node signatures
+    identical on 64 roots); the factorised step costs 13 % more than format 6 on the CPU trainer;
+    over 2 M gen3 rows the full context holds 40.6 % of the perspectives and seven contexts fall
+    under 0.5 %. Gate 6 (throughput and RSS from outside, at least 95 % of format 6 in both modes)
+    is preregistered in runs/nnue_gauntlets/format8/experiment.json and pending.
+
+## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
+
+The state of each is written next to it: proposed, implemented, correctness-verified or
+strength-accepted for code; preregistered, running or judged for an experiment.
+
+- A1, duration: 60 epochs against 20 from the same init on the same mixture, two seeds and a
+  20-epoch control; runs/nnue_gauntlets/long_training, running (seed 3 training, then its matches;
+  the verdict is joint).
+- C2, search patches by sequential test: the quiescence transposition table (f528f22) implemented
+  and correctness-verified, strength pending; runs/nnue_gauntlets/c2_qtt preregistered, to run under
+  the merged runner. Acceptance alone carries it into the gate 6 freeze; a rejected, inconclusive or
+  invalid test keeps the baseline mechanism.
+- D, labels: selected roots (the largest disagreement between the source label and a shallow one;
+  the deeper pilot labels are obtained afterwards) against a seeded random sample, the same
+  requested roots and node budget per arm at 1 M nodes with the actual cost recorded;
+  runs/nnue_gauntlets/d_pilot preregistered, unrun.
+- B, format 8: the Rust side correctness-verified; gate 6 (throughput and RSS from outside, at least
+  95 % of format 6 in both modes) preregistered, unrun; then the training arm against the format 6
+  control on identical data, schedule and seed, a seed-2 pilot first and, only on its result, a
+  separately preregistered seed-3 confirmation.
+- A3, H1024 with the corrected widening (distinct small seeded new columns, zero outgoing columns,
+  integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart,
+  only after A1's verdict; C3, a race term only through a measured race error that stays with deeper
+  labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter matched
+  controls justify it. All proposed.
+- Exit condition, met by nothing above: at least 65 % against frozen mb_a at 100 ms over 500 games,
+  confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
+  a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
+  deployment is the user's decision.
