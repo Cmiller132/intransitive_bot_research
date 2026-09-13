@@ -587,6 +587,10 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   the high-lr restart, open; C3, a race term only through a measured race error that stays with
   deeper labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter
   matched controls justify it. A2, C3 and A4 proposed.
+- Arena: nnue_2 = long60_s2:epoch60 (ed00ddf9..., the network that met the arena bar in the
+  promotion test of item 39's lineage) deployed 2026-09-13 19:53 on the user's decision as a second
+  NNUE seat at a fixed 200k nodes per move beside nnue_1 = mb_a; the accepted capture-history patch
+  is not in the arena binary.
 - Exit condition, met by nothing above: at least 65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
