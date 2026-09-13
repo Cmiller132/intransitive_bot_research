@@ -798,6 +798,23 @@ def test_launch_takes_the_report_event_of_a_streamed_run(tmp_path, monkeypatch):
     assert [e["event"] for _, e in events] == ["start", "end"]
 
 
+def test_launch_takes_the_pretty_printed_report_of_a_fixed_count_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    script = (
+        "import json; "
+        "print(json.dumps({'event': 'start', 'pair': 0, 'game': 0})); "
+        "print(json.dumps({'event': 'end', 'pair': 0, 'game': 0})); "
+        "print(json.dumps({'pairs': 1, 'wins': 1, 'sequential': None}, indent=2))"
+    )
+    with (tmp_path / "err").open("w") as err:
+        report, events, code = experiment.launch([sys.executable, "-c", script], err)
+    assert code == 0 and report == {"pairs": 1, "wins": 1, "sequential": None}
+    assert [e["event"] for _, e in events] == ["start", "end"]
+    torn = "print('{'); print('  \"pairs\": 1,')"
+    with (tmp_path / "err").open("w") as err, pytest.raises(ValueError, match="ended inside"):
+        experiment.launch([sys.executable, "-c", torn], err)
+
+
 def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     pid_file = tmp_path / "grandchild"
@@ -809,7 +826,7 @@ def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
         "print('not json', flush=True)\n"
         "time.sleep(60)\n"
     )
-    with (tmp_path / "err").open("w") as err, pytest.raises(ValueError, match="Expecting value"):
+    with (tmp_path / "err").open("w") as err, pytest.raises(ValueError, match="bot eval printed"):
         experiment.launch([sys.executable, "-c", script], err)
     grandchild = int(pid_file.read_text())
     assert not psutil.pid_exists(grandchild) or psutil.Process(grandchild).status() == psutil.STATUS_DEAD
