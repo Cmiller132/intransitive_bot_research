@@ -444,7 +444,7 @@ that record.
     ft_self11 to 63.8 % over 1,000 games at 50 ms and 62.1 % (58.6-65.6) at 100 ms (deployed as
     ft_gpu150a); a second continuation chained on it 52.5 % (49.9-55.0). Artifacts:
     runs/nnue_gauntlets/ft_gpu150a_50ms, ft_gpu150b_50ms, ft_gpu150d_50ms, ft_gpu40c_50ms,
-    ft_gpu150a_sims32. Whether 60 epochs beat 20 is A1 (runs/nnue_gauntlets/long_training), pending.
+    ft_gpu150a_sims32. Whether 60 epochs beat 20 was A1, judged in item 39.
 33. Width 768 padded from 512 with identical zero columns scored 43.7 % (39.7-47.5) over 500 games
     at 50 ms against the 512 it started from; the padding defect (identical columns, identical
     gradients) is fixed by seeded columns and the width question is open (A3). Artifact:
@@ -516,7 +516,7 @@ The state of each is written next to it: proposed, implemented, correctness-veri
 strength-accepted for code; preregistered, running or judged for an experiment.
 
 - A1, duration: 60 epochs against 20 from the same init on the same mixture, two seeds and a
-  20-epoch control; runs/nnue_gauntlets/long_training, judged (item 39): no benefit from extending
+  20-epoch control; runs/nnue_gauntlets/long_training, judged (item 39): no demonstrated benefit from extending
   the stretched schedule from epoch 20 to 60, and the recipe rule not met for either seed; both
   60-epoch arms qualify for the mb_a gate, runs/nnue_gauntlets/a1_promotion (score at least .575 at
   100 ms over 250 pairs per arm under the frozen C1 build; preregistered, running; deployment is the
