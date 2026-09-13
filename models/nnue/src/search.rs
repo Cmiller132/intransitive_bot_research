@@ -20,8 +20,6 @@ const NO_MOVE: u16 = u16::MAX;
 
 #[cfg(test)]
 mod accumulator_tests;
-#[cfg(test)]
-mod qtt_tests;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -145,18 +143,18 @@ impl Table {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Table);
         let replace = |slot: &mut Entry, shared: bool| {
-            if slot.key == entry.key
+            if shared
+                && slot.key == entry.key
                 && slot.generation == entry.generation
-                && slot.depth.max(0) > entry.depth.max(0)
+                && slot.depth > entry.depth
                 && slot.bound != 0
-                && (shared || entry.depth < 0)
             {
                 return;
             }
             if slot.bound == 0
                 || slot.key == entry.key
                 || slot.generation != entry.generation
-                || entry.depth.max(0) >= slot.depth.max(0) - 2
+                || entry.depth >= slot.depth - 2
             {
                 *slot = entry;
             }
@@ -935,31 +933,16 @@ impl Searcher {
             return self.frontier(model, state, ply);
         }
         let threatened = enemy_goal_threat(&state.board);
-        let alpha_orig = alpha;
-        let key = position_key(self.hashes[ply][0], state.since_capture);
-        let depth = quiescence_depth(ply, remaining);
-        let entry = self.tt.get(key);
-        let matched = entry.key == key && entry.bound != 0;
-        if matched && entry.depth == depth {
-            let score = from_tt(entry.score, ply);
-            if entry.bound == 1
-                || (entry.bound == 2 && score >= beta)
-                || (entry.bound == 3 && score <= alpha)
-            {
-                return score;
-            }
-        }
         let stand = self.static_eval(model, state, ply);
-        if self.stopped {
-            return 0;
-        }
         let mut best = if threatened { -INF } else { stand };
         if !threatened {
-            if stand >= beta || remaining <= 0 {
-                self.store_quiescence(key, depth, ply, stand, stand, NO_MOVE, alpha_orig, beta);
+            if stand >= beta {
                 return stand;
             }
             alpha = alpha.max(stand);
+            if remaining <= 0 {
+                return stand;
+            }
         }
         let mut all = std::mem::take(&mut self.move_buffers[ply]);
         all.clear();
@@ -978,13 +961,7 @@ impl Searcher {
                         || (state.board[80].is_enemy()
                             && engine::tactics::can_capture(state.board[from], state.board[80]))))
         });
-        self.order(
-            state,
-            &mut all,
-            if matched { entry.action } else { NO_MOVE },
-            ply,
-        );
-        let mut best_action = NO_MOVE;
+        self.order(state, &mut all, NO_MOVE, ply);
         for &action in &all {
             let (child, terminal) = apply_position(state, action);
             let score = if terminal != Outcome::Ongoing {
@@ -1000,48 +977,15 @@ impl Searcher {
                 self.move_buffers[ply] = all;
                 return 0;
             }
-            if score > best {
-                best = score;
-                best_action = action;
-            }
+            best = best.max(score);
             alpha = alpha.max(score);
             if alpha >= beta {
-                break;
+                self.move_buffers[ply] = all;
+                return best;
             }
         }
         self.move_buffers[ply] = all;
-        self.store_quiescence(key, depth, ply, best, stand, best_action, alpha_orig, beta);
         best
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn store_quiescence(
-        &mut self,
-        key: u64,
-        depth: i16,
-        ply: usize,
-        score: i32,
-        stand: i32,
-        action: u16,
-        alpha: i32,
-        beta: i32,
-    ) {
-        self.tt.store(Entry {
-            key,
-            depth,
-            score: to_tt(score, ply),
-            static_eval: stand,
-            static_valid: true,
-            action,
-            bound: if score >= beta {
-                2
-            } else if score <= alpha {
-                3
-            } else {
-                1
-            },
-            generation: self.generation,
-        });
     }
 
     // At the recursion safety limit, still prove immediate wins and forced losses;
@@ -1244,12 +1188,6 @@ impl Searcher {
 
 fn history_update(value: &mut i32, bonus: i32) {
     *value += bonus - *value * bonus.abs() / 16384;
-}
-
-/// Negative TT tags identify both the tactical horizon and the safety frontier.
-fn quiescence_depth(ply: usize, remaining: i32) -> i16 {
-    debug_assert!(ply < MAX_PLY && (-(MAX_PLY as i32)..=6).contains(&remaining));
-    -1 - ((6 - remaining) * (MAX_PLY as i32 + 1) + ply as i32) as i16
 }
 #[inline]
 fn to_tt(score: i32, ply: usize) -> i32 {
@@ -1695,5 +1633,50 @@ mod generation_tests {
             signature(searcher.search(&model, &State::initial(), None, limits)),
             expected
         );
+    }
+    #[test]
+    fn fixture_fixed_node_signatures_are_repeatable() {
+        const DENSE: &[u8] = include_bytes!("../tests/fixtures/h768_dense.nnue");
+        let golden = [vec![
+            (Some(604), 29, 2, 4000, 3643, Some((516, 36, 2))),
+            (Some(576), -39, 3, 4000, 3543, Some((576, -39, 3))),
+            (Some(348), -41, 2, 4000, 3841, Some((348, -41, 2))),
+            (Some(588), 13, 2, 4000, 3660, Some((507, -42, 2))),
+        ]];
+        for (bytes, golden) in [DENSE].into_iter().zip(golden) {
+            let model = Model::from_bytes(bytes).unwrap();
+            let mut signatures = Vec::new();
+            for line in include_str!("../tests/fixtures/h768_positions.jsonl")
+                .lines()
+                .take(4)
+            {
+                let position: crate::diagnostic::Position = serde_json::from_str(line).unwrap();
+                let state = position.state().unwrap();
+                let mut search = Searcher::new(1);
+                let limits = Limits {
+                    nodes: 4000,
+                    time: Duration::MAX,
+                    ..Limits::default()
+                };
+                let signature = |r: SearchResult| {
+                    (
+                        r.action,
+                        r.score,
+                        r.depth,
+                        r.nodes,
+                        r.qnodes,
+                        r.completed_root(),
+                    )
+                };
+                let expected = signature(search.search(&model, &state, None, limits));
+                search.clear();
+                assert_eq!(
+                    signature(search.search(&model, &state, None, limits)),
+                    expected
+                );
+                signatures.push(expected);
+            }
+            assert_eq!(signatures, golden);
+        }
     }
 }

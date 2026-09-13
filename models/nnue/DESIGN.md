@@ -110,16 +110,6 @@ and frontier-only results do not establish reusable search bounds. The single-th
 local table; multiple search workers share a table with coherent, nonblocking entry access. A
 contended shared entry is a miss.
 
-> Conditional on C2: keep the following QTT paragraph only on acceptance; otherwise remove it at the gate 6 freeze.
-
-QTT contract: negative depth tags identify the exact remaining quiescence budget and root-relative
-ply; positive depths identify full search. A bound can cut off quiescence only at the matching tag.
-Full-search and quiescence bounds do not substitute for one another. A legal tactical hash move can
-order quiescence moves independently of bound compatibility. Bound type uses the original alpha/beta
-window, including stand-pat exits. Current-generation positive-depth entries are protected from
-quiescence replacement, and negative tags have equal replacement priority. The tag is an identity,
-not a numerical depth ranking.
-
 NnuePlayer refreshes the root and searches under its supplied budget. A simulation budget means at
 most 2,500 nodes per simulation on one search thread, with a 120-second safety limit. A timed
 external host deadline reserves 20 ms; a seat's own --movetime budget uses the full time through
@@ -507,10 +497,10 @@ strength-accepted for code; preregistered, running or judged for an experiment.
 - A1, duration: 60 epochs against 20 from the same init on the same mixture, two seeds and a
   20-epoch control; runs/nnue_gauntlets/long_training, running (seed 3 training, then its matches;
   the verdict is joint).
-- C2, search patches by sequential test: the quiescence transposition table (f528f22) implemented
-  and correctness-verified, strength pending; runs/nnue_gauntlets/c2_qtt preregistered, to run under
-  the merged runner. Acceptance alone carries it into the gate 6 freeze; a rejected, inconclusive or
-  invalid test keeps the baseline mechanism.
+- C2, search patches by sequential test: the quiescence transposition table candidate (f528f22) is
+  correctness-verified; runs/nnue_gauntlets/c2_qtt owns its strength judgement. The engine uses the
+  baseline quiescence without a transposition table. Acceptance alone permits carrying the candidate
+  into the gate 6 freeze; a rejected, inconclusive or invalid test keeps the baseline mechanism.
 - D, labels: selected roots (the largest disagreement between the source label and a shallow one;
   the deeper pilot labels are obtained afterwards) against a seeded random sample, the same
   requested roots and node budget per arm at 1 M nodes with the actual cost recorded;
