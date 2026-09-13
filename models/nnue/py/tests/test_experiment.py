@@ -21,6 +21,15 @@ from nnue import experiment, export, paths, train
 from .test_train import synthetic
 
 
+@pytest.fixture(autouse=True)
+def fresh_cleanup_state():
+    experiment.SURVIVORS.clear()
+    experiment.CLEANUP_FAILURES.clear()
+    yield
+    experiment.SURVIVORS.clear()
+    experiment.CLEANUP_FAILURES.clear()
+
+
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
@@ -356,6 +365,10 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
     sidecar.write_text(json.dumps({**info, "epoch": 3}), encoding="utf-8")
     m50 = next(m for m in experiment.verdict(spec, directory, replays=False)["matches"] if m["tag"] == "m50")
     assert "reference endpoint: epoch 3, the endpoint needs 1" in m50["problems"]
+    sidecar.unlink()  # a missing sidecar is a broken endpoint too, not a silently accepted one
+    judged = experiment.verdict(spec, directory, replays=False)
+    m50 = next(m for m in judged["matches"] if m["tag"] == "m50")
+    assert "reference endpoint: no sidecar" in m50["problems"] and judged["arms"][0]["endpoints"]["epoch2"]["exists"]
     sidecar.write_text(json.dumps(info), encoding="utf-8")
 
     # A cached report that C1's replay of the journal contradicts is invalid; so is one bound to another affinity.
@@ -411,6 +424,8 @@ def test_journal_pairs_reject_malformed_lines(tmp_path):
     assert len(experiment.journal_pairs(journal)[1]) == 1
     for text in (
         header + "{torn}\n" + pair + "\n",
+        header + "null\n",
+        header + "[1, 2]\n",
         '{"other": 1}\n' + pair + "\n",
         '{"protocol": {}}\n' + pair + "\n",
         pair + "\n",
@@ -652,7 +667,22 @@ def test_an_interrupted_invocation_keeps_its_timing_and_the_resume_continues_it(
     assert resumed["pairs"] == 16 and resumed["sequential"]["stop_reason"] == "accept"
     timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
     assert len(timing["invocations"]) == 2 and timing["invocations"][1]["initial_pairs"] == 16
-    assert timing["committed_pairs"] == 16
+    assert timing["committed_pairs"] == 16 and timing["unknown_invocations"] == 0
+
+    # An invocation whose journal cannot be read keeps its timing with an unknown count; the aggregate says so.
+    def unreadable(command, err, events=None):
+        journal = Path(command[command.index("--sprt") + 1])
+        journal.write_text("{torn", encoding="utf-8")  # interrupted while the header was being written
+        raise RuntimeError("interrupted again")
+
+    monkeypatch.setattr(experiment, "launch", unreadable)
+    (directory / "q.json").unlink()
+    with pytest.raises(RuntimeError, match="interrupted again"):
+        experiment.play(spec, directory, match)
+    timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
+    assert timing["invocations"][2]["committed_pairs"] is None and timing["invocations"][2]["initial_pairs"] == 16
+    assert timing["committed_pairs"] is None and timing["known_committed_pairs"] == 16
+    assert timing["unknown_invocations"] == 1 and timing["pairs_per_second"] is None
 
 
 def test_launch_reaps_the_seats_of_a_coordinator_that_exits_abruptly(tmp_path, monkeypatch):
@@ -670,6 +700,58 @@ def test_launch_reaps_the_seats_of_a_coordinator_that_exits_abruptly(tmp_path, m
     orphan = int(pid_file.read_text())
     assert not psutil.pid_exists(orphan) or psutil.Process(orphan).status() == psutil.STATUS_DEAD
     assert orphan not in experiment.SURVIVORS
+
+
+def test_launch_raises_reader_errors_and_kills_a_coordinator_that_will_not_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    monkeypatch.setattr(experiment, "EXIT_GRACE", 1.0)
+    pid_file = tmp_path / "pid"
+    garbage = (
+        "import os, sys, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "sys.stdout.buffer.write(b'\\xff\\xfe\\n'); sys.stdout.flush(); time.sleep(60)\n"
+    )
+    with (tmp_path / "err").open("w") as err, pytest.raises(RuntimeError, match="could not be read"):
+        experiment.launch([sys.executable, "-c", garbage], err)
+    assert not experiment.running(int(pid_file.read_text())) and not experiment.CLEANUP_FAILURES
+    silent = (
+        "import os, sys, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "print('{\"pairs\": 0}', flush=True); os.close(1); time.sleep(60)\n"
+    )
+    with (tmp_path / "err").open("w") as err, pytest.raises(RuntimeError, match="did not exit"):
+        experiment.launch([sys.executable, "-c", silent], err)
+    assert not experiment.running(int(pid_file.read_text())) and not experiment.CLEANUP_FAILURES
+
+
+def test_a_cleanup_that_cannot_be_proved_keeps_the_reservation(workspace, monkeypatch):
+    spec = manifest(workspace)
+    monkeypatch.setattr(experiment, "nice", lambda mask: None)
+    command = [sys.executable, "-c", "print('{\"pairs\": 0}')"]
+
+    def failing(self):
+        raise OSError(5, "query failed")
+
+    def reserved_launch(broken: str | None):
+        original = getattr(experiment.Job, broken) if broken else None
+        if broken:
+            setattr(experiment.Job, broken, failing)
+        try:
+            with (workspace / "err").open("w") as err:
+                return experiment.reserved(spec, "test", lambda: experiment.launch(command, err))
+        finally:
+            if broken:
+                setattr(experiment.Job, broken, original)
+
+    for step in ("members", "terminate", "close"):
+        assert reserved_launch(step) == ({"pairs": 0}, [], 0)
+        assert experiment.CLEANUP_FAILURES == ["bot eval cleanup: [Errno 5] query failed"], step
+        held = experiment.lock_read()
+        assert held and held["owner"] == "experiment" and held["pid"] == os.getpid(), step
+        experiment.lock_release("experiment", os.getpid())
+        experiment.CLEANUP_FAILURES.clear()
+    assert reserved_launch(None) == ({"pairs": 0}, [], 0)
+    assert not experiment.CLEANUP_FAILURES and experiment.lock_read() is None
 
 
 def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):

@@ -6,7 +6,7 @@ priority on the declared logical CPUs, under the workspace's compute lock.
 
     python -m nnue.experiment pin <experiment.json>
     python -m nnue.experiment run <experiment.json> [--only train|match]
-    python -m nnue.experiment verdict <experiment.json>
+    python -m nnue.experiment verdict <experiment.json> [--audit]
     python -m nnue.experiment lock status | acquire <owner> <phase> [<mask>] | release <owner> [<pid>]
 
 The file (schema 2) sits in its experiment directory, where the match
@@ -67,8 +67,10 @@ results; how the games ended, the first mover's score, distinct openings,
 mean plies) and, for a finished, bound and audited sequential test, C1's
 own replay of the journal; a match whose records, binding or replay
 disagree is invalid. Every `bot eval` runs in a job object that is
-terminated when the invocation ends, however it ends; the runner keeps the
-lock when a member of a job survives its termination.
+terminated when the invocation ends, however it ends. `run` judges under its
+own reservation; `verdict` takes the lock for C1's replays unless `--audit`
+asks for the no-launch audit; the lock is kept when a member of a job
+survives its termination or a cleanup step could not be proved.
 """
 
 from __future__ import annotations
@@ -274,7 +276,12 @@ def endpoint_problem(arm: dict, name: str) -> str | None:
     sidecar = file.with_suffix(".nnue.json")
     if not sidecar.is_file():
         return "no sidecar"
-    info = json.loads(sidecar.read_text(encoding="utf-8"))
+    try:
+        info = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "unreadable sidecar"
+    if not isinstance(info, dict):
+        return "malformed sidecar"
     bound = ("data", "datasets", "init_sha256") if "train" in arm else ()  # an existing run has no spec to bind to
     for key in ("sha256", "epoch", "config", *bound):
         if key not in info:
@@ -454,7 +461,8 @@ def journal_pairs(journal: Path) -> tuple[dict, list[list[dict]]]:
         entry = json.loads(line)
         games = entry.get("games") if isinstance(entry, dict) else None
         if (
-            entry.get("pair") != n
+            not isinstance(entry, dict)
+            or entry.get("pair") != n
             or not isinstance(games, list)
             or len(games) != 2
             or not all(isinstance(g, dict) and {"winner", "end", "plies", "moves"} <= g.keys() for g in games)
@@ -464,9 +472,9 @@ def journal_pairs(journal: Path) -> tuple[dict, list[list[dict]]]:
     return header, pairs
 
 
-SURVIVORS: set[int] = (
-    set()
-)  # members of a coordinator's job that outlived its termination; the lock stays until they are gone
+SURVIVORS: set[int] = set()  # members of a coordinator's job that outlived its termination
+CLEANUP_FAILURES: list[str] = []  # cleanups whose outcome could not be proved; the lock stays while any is listed
+EXIT_GRACE = 30.0  # seconds a coordinator may take to exit after closing its output
 
 
 class IoCounters(ctypes.Structure):
@@ -510,12 +518,13 @@ class Job:
     """A Windows job object containing the coordinator and every descendant
     (the rpsi seats inherit it): terminating the job kills them all, whether
     or not their parent still lives, and the job's member list names what
-    survived without traversing a dead parent."""
+    survived without traversing a dead parent. A step whose outcome cannot be
+    proved is recorded in CLEANUP_FAILURES, which keeps the reservation."""
 
     KILL_ON_CLOSE, EXTENDED_LIMITS, PROCESS_IDS, CREATE_SUSPENDED = 0x2000, 9, 3, 0x4
 
     def __init__(self):
-        self.kernel = ctypes.windll.kernel32
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.kernel.CreateJobObjectW.restype = wintypes.HANDLE
         self.handle = self.kernel.CreateJobObjectW(None, None)
         if not self.handle:
@@ -525,16 +534,15 @@ class Job:
         if not self.kernel.SetInformationJobObject(
             wintypes.HANDLE(self.handle), self.EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)
         ):
-            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+            error = ctypes.get_last_error()
+            self.close()
+            raise OSError(error, "SetInformationJobObject failed")
 
     def assign(self, process: subprocess.Popen) -> None:
         if not self.kernel.AssignProcessToJobObject(
             wintypes.HANDLE(self.handle), wintypes.HANDLE(int(process._handle))
         ):
-            raise OSError(
-                ctypes.get_last_error(),
-                "AssignProcessToJobObject failed (is the runner in a job that forbids nesting?)",
-            )
+            raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed (a job that forbids nesting?)")
 
     def members(self) -> list[int]:
         """The pids still assigned to the job."""
@@ -547,29 +555,49 @@ class Job:
             raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
         return [int(record.ids[i]) for i in range(record.listed)]
 
+    def terminate(self) -> None:
+        if not self.kernel.TerminateJobObject(wintypes.HANDLE(self.handle), 1):
+            raise OSError(ctypes.get_last_error(), "TerminateJobObject failed")
+
+    def close(self) -> None:
+        if self.handle:
+            handle, self.handle = self.handle, None
+            if not self.kernel.CloseHandle(wintypes.HANDLE(handle)):
+                raise OSError(ctypes.get_last_error(), "CloseHandle failed")
+
     def reap(self, process: subprocess.Popen) -> list[int]:
         """Terminates the job and waits for its members; the pids that survived."""
-        self.kernel.TerminateJobObject(wintypes.HANDLE(self.handle), 1)
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=10)
-        deadline = time.monotonic() + 10
-        while (alive := [pid for pid in self.members() if pid != process.pid and running(pid)]) and (
-            time.monotonic() < deadline
-        ):
-            time.sleep(0.05)
-        self.kernel.CloseHandle(wintypes.HANDLE(self.handle))
+        alive: list[int] = []
+        try:
+            self.terminate()
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+            deadline = time.monotonic() + 10
+            while (alive := [pid for pid in self.members() if pid != process.pid and running(pid)]) and (
+                time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            CLEANUP_FAILURES.append(f"bot eval cleanup: {error}")
+        finally:
+            try:
+                self.close()
+            except OSError as error:
+                CLEANUP_FAILURES.append(f"bot eval cleanup: {error}")
         SURVIVORS.update(alive)
         return alive
 
 
 def read_lines(stream, lines: queue.Queue) -> None:
-    """Feeds a pipe's lines to a queue, then None (the pipe closed)."""
+    """Feeds a pipe's lines, each stamped at receipt, to a queue; then None
+    (the pipe closed) or the exception that ended the reading."""
     try:
         for line in stream:
-            lines.put(line)
-    except (OSError, ValueError):
-        pass
+            lines.put((time.monotonic(), line))
+    except Exception as error:  # noqa: BLE001 - whatever ended the reading is launch's to raise
+        lines.put(error)
+        return
     lines.put(None)
 
 
@@ -579,34 +607,39 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
     monotonic time of their receipt (appended to `events` as they come, so an
     interruption leaves them with the caller), and the exit code. However the
     run ends, the job is terminated: an exception kills the tree before it
-    propagates, and a coordinator that exits abruptly leaves no seat behind."""
+    propagates, a coordinator that exits abruptly leaves no seat behind, and
+    one that closes its output without exiting is killed after EXIT_GRACE."""
     events = [] if events is None else events
-    report = None
+    report, process, reader = None, None, None
     job = Job()
-    process = subprocess.Popen(
-        command,
-        cwd=workspace_root(),
-        stdout=subprocess.PIPE,
-        stderr=err,
-        text=True,
-        encoding="utf-8",
-        creationflags=Job.CREATE_SUSPENDED,  # assigned to the job before it runs, so every seat inherits it
-    )
     try:
+        process = subprocess.Popen(
+            command,
+            cwd=workspace_root(),
+            stdout=subprocess.PIPE,
+            stderr=err,
+            text=True,
+            encoding="utf-8",
+            creationflags=Job.CREATE_SUSPENDED,  # assigned to the job before it runs, so every seat inherits it
+        )
         job.assign(process)
         psutil.Process(process.pid).resume()
         assert process.stdout is not None
         lines: queue.Queue = queue.Queue()
-        threading.Thread(target=read_lines, args=(process.stdout, lines), daemon=True).start()
+        reader = threading.Thread(target=read_lines, args=(process.stdout, lines), daemon=True)
+        reader.start()
         while True:
             try:
-                line = lines.get(timeout=0.5)
+                item = lines.get(timeout=0.5)
             except queue.Empty:
                 if process.poll() is None:
                     continue
                 break  # the coordinator has exited; whatever still holds its pipe is an orphan for the reaper
-            if line is None:
+            if item is None:
                 break
+            if isinstance(item, BaseException):
+                raise RuntimeError("bot eval's output could not be read") from item
+            at, line = item
             if not line.strip():
                 continue
             entry = json.loads(line)
@@ -615,12 +648,25 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
             if "event" not in entry:
                 report = entry
             elif entry["event"] in ("start", "end"):
-                events.append((time.monotonic(), entry))
-        code = process.wait()
+                events.append((at, entry))
+        try:
+            code = process.wait(timeout=EXIT_GRACE)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("bot eval closed its output but did not exit") from None
     finally:
-        job.reap(process)
-        if process.stdout is not None:
-            process.stdout.close()
+        if process is None:
+            try:
+                job.close()
+            except OSError as error:
+                CLEANUP_FAILURES.append(f"bot eval cleanup: {error}")
+        else:
+            job.reap(process)
+            if reader is not None:
+                reader.join(timeout=5)
+            if process.stdout is not None and (reader is None or not reader.is_alive()):
+                process.stdout.close()
+            elif reader is not None:
+                CLEANUP_FAILURES.append("bot eval cleanup: the output pipe is still held by its reader")
     return report, events, code
 
 
@@ -659,32 +705,33 @@ def occupancy(events: list[tuple[float, dict]], batch: int, concurrent: int) -> 
 
 
 def committed_pairs(journal: Path) -> int | None:
-    """The complete pairs a journal holds: 0 without a journal, None when its header is unreadable."""
+    """The complete pairs a journal holds: 0 without a journal, None when it cannot be read or parsed."""
     if not journal.is_file():
         return 0
     try:
         return len(journal_pairs(journal)[1])
-    except ValueError:
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
         return None
 
 
 def record_timing(directory: Path, match: dict, report: dict | None, events: list, pairs: tuple, times: tuple, code):
     """Appends one invocation to `<tag>.timing.json`, finished, failed or
     interrupted: the launch time, pairs before, committed to the journal after
-    and reported; process, startup, play (first to last event), active (to
-    the process end when a game was still open) and finish seconds; new pairs
-    per active second; the batch occupancy (batch size from the journal
-    header); and the aggregate over every invocation, committed pairs over
-    summed active seconds and over summed process seconds, never paused
-    time. Written atomically."""
+    (null when the journal could not be read) and reported; process, startup,
+    play (first to last event), active (to the process end when a game was
+    still open) and finish seconds; new pairs per active second; the batch
+    occupancy (batch size from the journal header); and the aggregate over
+    every invocation: committed pairs over summed active seconds and over
+    summed process seconds, never paused time, null when any invocation's
+    count is unknown (the known count is kept apart). Written atomically."""
     initial, committed = pairs
     started, launched, ended = times
     journal = directory / f"{match['tag']}.jsonl"
     try:
         header = journal_pairs(journal)[0] if journal.is_file() else {}
-    except ValueError:
-        header = {}
-    batch = int(header.get("protocol", {}).get("test", {}).get("batch", 16))
+        batch = int(header["protocol"]["test"]["batch"])
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        batch = 16
     stamps = [at for at, _ in events]
     first, last = (min(stamps), max(stamps)) if stamps else (None, None)
     completed = code == 0 and report is not None
@@ -710,16 +757,19 @@ def record_timing(directory: Path, match: dict, report: dict | None, events: lis
     path = directory / f"{match['tag']}.timing.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"invocations": []}
     data["invocations"].append(entry)
-    counted = [i for i in data["invocations"] if i["committed_pairs"] is not None and i["initial_pairs"] is not None]
-    total = sum(i["committed_pairs"] - i["initial_pairs"] for i in counted)
+    known = [i for i in data["invocations"] if i["committed_pairs"] is not None and i["initial_pairs"] is not None]
+    total = sum(i["committed_pairs"] - i["initial_pairs"] for i in known)
+    complete = len(known) == len(data["invocations"])
     active_sum = sum(i["active_seconds"] or 0.0 for i in data["invocations"])
     process_sum = sum(i["process_seconds"] for i in data["invocations"])
     data.update(
-        committed_pairs=total,
+        committed_pairs=total if complete else None,
+        known_committed_pairs=total,
+        unknown_invocations=len(data["invocations"]) - len(known),
         active_seconds=active_sum,
         process_seconds=process_sum,
-        pairs_per_second=total / active_sum if active_sum > 0 else None,
-        pairs_per_process_second=total / process_sum if process_sum > 0 else None,
+        pairs_per_second=total / active_sum if complete and active_sum > 0 else None,
+        pairs_per_process_second=total / process_sum if complete and process_sum > 0 else None,
     )
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1015,15 +1065,16 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
         endpoints = {}
         for name in arm.get("endpoints", {}):
             file = endpoint_file(arm["run"], name)
-            sidecar = file.with_suffix(".nnue.json")
-            if sidecar.is_file():
-                info = json.loads(sidecar.read_text(encoding="utf-8"))
-                kept = {k: info[k] for k in ("sha256", "epoch", "objective") if k in info}
-                endpoints[name] = {"file": str(file), **kept, "problem": endpoint_problem(arm, name)}
-                if endpoints[name]["problem"]:
-                    broken[f"{arm['run']}:{name}"] = endpoints[name]["problem"]
-            else:
-                endpoints[name] = None
+            problem = endpoint_problem(arm, name) if file.is_file() else "no endpoint file"
+            info: dict = {}
+            try:
+                info = json.loads(file.with_suffix(".nnue.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            kept = {k: info[k] for k in ("sha256", "epoch", "objective") if isinstance(info, dict) and k in info}
+            endpoints[name] = {"file": str(file), "exists": file.is_file(), **kept, "problem": problem}
+            if problem:
+                broken[f"{arm['run']}:{name}"] = problem
         arms.append({"run": arm["run"], "epochs": epochs_done(arm["run"]), "endpoints": endpoints})
     matches = {}
     for match in experiment.get("matches", []):
@@ -1077,6 +1128,27 @@ def visible_devices(experiment: dict) -> str:
     return "0" if any(device.startswith("cuda") for device in devices) else "-1"
 
 
+def reserved(experiment: dict, phase: str, work):
+    """Runs `work()` under the compute lock at the experiment's affinity and
+    returns its result. The lock is released only when no child of this
+    process, no member of a bot eval job and no unproved cleanup remains;
+    otherwise it is kept for `lock release experiment <pid>` once they are
+    accounted for."""
+    nice(experiment.get("affinity", "16-31"))
+    lock_acquire("experiment", phase, experiment.get("affinity", "16-31"))
+    try:
+        return work()
+    finally:
+        survivors = sorted(
+            {p.pid for p in psutil.Process().children(recursive=True)} | {p for p in SURVIVORS if running(p)}
+        )
+        if survivors or CLEANUP_FAILURES:
+            kept = {"event": "lock_kept", "surviving_children": survivors, "cleanup_failures": list(CLEANUP_FAILURES)}
+            print(json.dumps(kept), flush=True)
+        else:
+            lock_release("experiment", os.getpid())
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[0] == "lock":
         if argv[1] == "status":
@@ -1103,15 +1175,18 @@ def main(argv: list[str]) -> int:
         print(json.dumps(experiment["identities"], indent=1))
         return 0
     if argv[0] == "verdict":
-        print(json.dumps(verdict(experiment, directory), indent=2))
+        if "--audit" in argv:
+            out = verdict(experiment, directory, replays=False)
+        else:
+            out = reserved(experiment, f"{experiment['name']} (verdict)", lambda: verdict(experiment, directory))
+        print(json.dumps(out, indent=2))
         return 0
     only = argv[argv.index("--only") + 1] if "--only" in argv else None
     for path in fixed_inputs(experiment):
         verify(experiment, path)
-    nice(experiment.get("affinity", "16-31"))
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", visible_devices(experiment))
-    lock_acquire("experiment", f"{experiment['name']} ({only or 'all'})", experiment.get("affinity", "16-31"))
-    try:
+
+    def work() -> dict:
         if only in (None, "train"):
             for arm in experiment.get("arms", []):
                 run_arm(experiment, arm)
@@ -1120,17 +1195,10 @@ def main(argv: list[str]) -> int:
             for match in experiment.get("matches", []):
                 summary = summarise(match, play(experiment, directory, match), directory, experiment)
                 print(json.dumps({"event": "match", **summary}), flush=True)
-    finally:
-        # The reservation outlives a failure that leaves a child (a seat's engine) alive: release it by hand
-        # once every child is gone (`lock release experiment <pid>`).
-        survivors = sorted(
-            {p.pid for p in psutil.Process().children(recursive=True)} | {p for p in SURVIVORS if running(p)}
-        )
-        if survivors:
-            print(json.dumps({"event": "lock_kept", "surviving_children": survivors}), flush=True)
-        else:
-            lock_release("experiment", os.getpid())
-    print(json.dumps({"event": "verdict", **{k: v for k, v in verdict(experiment, directory).items() if k == "rules"}}))
+        return verdict(experiment, directory)
+
+    out = reserved(experiment, f"{experiment['name']} ({only or 'all'})", work)
+    print(json.dumps({"event": "verdict", "rules": out["rules"]}))
     return 0
 
 
