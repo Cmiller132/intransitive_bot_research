@@ -83,7 +83,7 @@ python -m nnue.label --input <set> --out <set> [--engine sq:weights/sq_g128.onnx
 python -m nnue.gpu_label --input <set> --out <set> [--input <set> --out <set> ...] --ckpt runs/conv_g128/ckpt_000150.pt [--teacher conv|sq] [--sims 128] [--batch 4096] [--rows N] [--reuse-nodes K] [--repetition-draw false]
 python -m nnue.experiment pin runs/nnue_gauntlets/<name>/experiment.json    # hash every fixed input
 python -m nnue.experiment run runs/nnue_gauntlets/<name>/experiment.json [--only train|match]
-python -m nnue.experiment verdict runs/nnue_gauntlets/<name>/experiment.json
+python -m nnue.experiment verdict runs/nnue_gauntlets/<name>/experiment.json [--audit]   # --audit: no C1 replay, no lock
 ```
 
 The data loop is generate (self-play, below), import, train, label, train

@@ -69,8 +69,9 @@ own replay of the journal; a match whose records, binding or replay
 disagree is invalid. Every `bot eval` runs in a job object that is
 terminated when the invocation ends, however it ends. `run` judges under its
 own reservation; `verdict` takes the lock for C1's replays unless `--audit`
-asks for the no-launch audit; the lock is kept when a member of a job
-survives its termination or a cleanup step could not be proved.
+asks for the no-launch audit; an invocation whose cleanup could not be
+proved is an error, nothing is launched while that failure or a surviving
+job member stands, and the lock is kept.
 """
 
 from __future__ import annotations
@@ -608,9 +609,15 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
     interruption leaves them with the caller), and the exit code. However the
     run ends, the job is terminated: an exception kills the tree before it
     propagates, a coordinator that exits abruptly leaves no seat behind, and
-    one that closes its output without exiting is killed after EXIT_GRACE."""
+    one that closes its output without exiting is killed after EXIT_GRACE. A
+    cleanup that cannot be proved ends the invocation with an error, its
+    result discarded, and nothing is launched while such a failure or a
+    surviving job member stands."""
+    if CLEANUP_FAILURES or any(running(pid) for pid in SURVIVORS):
+        raise RuntimeError("bot eval is not launched: an earlier cleanup is unproved or a job member survives")
     events = [] if events is None else events
     report, process, reader = None, None, None
+    failures, alive = len(CLEANUP_FAILURES), []
     job = Job()
     try:
         process = subprocess.Popen(
@@ -660,13 +667,16 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
             except OSError as error:
                 CLEANUP_FAILURES.append(f"bot eval cleanup: {error}")
         else:
-            job.reap(process)
+            alive = job.reap(process)
             if reader is not None:
                 reader.join(timeout=5)
             if process.stdout is not None and (reader is None or not reader.is_alive()):
                 process.stdout.close()
             elif reader is not None:
                 CLEANUP_FAILURES.append("bot eval cleanup: the output pipe is still held by its reader")
+    unproved = CLEANUP_FAILURES[failures:] + [f"pid {pid} survived its job" for pid in alive]
+    if unproved:
+        raise RuntimeError("bot eval's cleanup could not be proved: " + "; ".join(unproved))
     return report, events, code
 
 

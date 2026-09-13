@@ -724,10 +724,11 @@ def test_launch_raises_reader_errors_and_kills_a_coordinator_that_will_not_exit(
     assert not experiment.running(int(pid_file.read_text())) and not experiment.CLEANUP_FAILURES
 
 
-def test_a_cleanup_that_cannot_be_proved_keeps_the_reservation(workspace, monkeypatch):
+def test_a_cleanup_that_cannot_be_proved_stops_the_run_and_keeps_the_reservation(workspace, monkeypatch):
     spec = manifest(workspace)
     monkeypatch.setattr(experiment, "nice", lambda mask: None)
     command = [sys.executable, "-c", "print('{\"pairs\": 0}')"]
+    real_job = experiment.Job
 
     def failing(self):
         raise OSError(5, "query failed")
@@ -744,14 +745,43 @@ def test_a_cleanup_that_cannot_be_proved_keeps_the_reservation(workspace, monkey
                 setattr(experiment.Job, broken, original)
 
     for step in ("members", "terminate", "close"):
-        assert reserved_launch(step) == ({"pairs": 0}, [], 0)
+        with pytest.raises(RuntimeError, match="cleanup could not be proved"):
+            reserved_launch(step)
         assert experiment.CLEANUP_FAILURES == ["bot eval cleanup: [Errno 5] query failed"], step
         held = experiment.lock_read()
         assert held and held["owner"] == "experiment" and held["pid"] == os.getpid(), step
+        # Nothing is launched again while the failure stands: no job is even created.
+        monkeypatch.setattr(experiment, "Job", lambda: pytest.fail("launched after an unproved cleanup"))
+        with (workspace / "err").open("w") as err, pytest.raises(RuntimeError, match="not launched"):
+            experiment.launch(command, err)
+        monkeypatch.setattr(experiment, "Job", real_job)
         experiment.lock_release("experiment", os.getpid())
         experiment.CLEANUP_FAILURES.clear()
     assert reserved_launch(None) == ({"pairs": 0}, [], 0)
     assert not experiment.CLEANUP_FAILURES and experiment.lock_read() is None
+
+    # Through `run`: the sequential match's report is not cached, its timing is kept, the final verdict
+    # (whose replay would be a second launch) is not reached, the lock is kept.
+    spec["arms"], spec["rules"], spec["matches"] = [], [], [spec["matches"][2]]
+    spec["identities"] = experiment.identities(spec)
+    directory = workspace / "runs" / "nnue_gauntlets" / "tiny"
+    directory.mkdir(parents=True)
+    file = directory / "experiment.json"
+    file.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(experiment, "command_of", lambda e, d, m: command)
+    launches = []
+    real_launch = experiment.launch
+    monkeypatch.setattr(experiment, "launch", lambda *a, **k: (launches.append(a), real_launch(*a, **k))[1])
+    monkeypatch.setattr(experiment.Job, "members", failing)
+    with pytest.raises(RuntimeError, match="cleanup could not be proved"):
+        experiment.main(["run", str(file), "--only", "match"])
+    assert len(launches) == 1
+    assert not (directory / "q.json").exists() and not (directory / "q.match.json").exists()
+    timing = json.loads((directory / "q.timing.json").read_text(encoding="utf-8"))
+    assert timing["invocations"][0]["interrupted"] and timing["invocations"][0]["reported_pairs"] is None
+    held = experiment.lock_read()
+    assert held and held["owner"] == "experiment" and experiment.CLEANUP_FAILURES
+    experiment.lock_release("experiment", os.getpid())
 
 
 def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
