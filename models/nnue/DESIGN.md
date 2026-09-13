@@ -488,6 +488,27 @@ that record.
     over 2 M gen3 rows the full context holds 40.6 % of the perspectives and seven contexts fall
     under 0.5 %. Gate 6 (throughput and RSS from outside, at least 95 % of format 6 in both modes)
     is preregistered in runs/nnue_gauntlets/format8/experiment.json and pending.
+39. A1, training duration (2026-09-13; runs/nnue_gauntlets/long_training, verdict.json a01c89a2...,
+    the runner's original kept as verdict.runner.json): from mb_b on the new70 mixture, two seeds.
+    Epoch 60 against epoch 20 of the same stretched schedule .541 [.500, .581] and .443 [.395, .493]
+    (seed 2 at 50 and 100 ms), .503 [.464, .540] and .522 [.480, .563] (seed 3); the stretched
+    60-epoch run against the conventional 20-epoch run .494 [.454, .535] and .517 [.472, .560] (seed
+    2), .510 [.470, .550] and .542 [.497, .585] (seed 3): the four duration rules (paired lower
+    bound above .5 at both budgets) not met. Both 60-epoch arms against mb_b .568 [.529, .608] and
+    .552 [.510, .593] (seed 2), .554 [.511, .596] and .568 [.527, .612] (seed 3): the two promotion
+    rules met; the conventional 20-epoch seed-3 run against mb_b .564 [.524, .605] at 50 ms and .525
+    [.482, .568] at 100 ms (explanatory). 200 pairs at 50 ms and 150 at 100 ms per match, 5,600
+    games, all valid under the audit and Astra's independent audit. Failure of the superiority rules
+    is not evidence of equivalence, and the comparisons do not isolate the mixture as the cause of
+    the gains over mb_b. Provenance: the endpoint and match bindings were written after the fact
+    (the checkpoints retain the data shares and the init name, not dataset or init hashes).
+40. C2, the quiescence transposition table (2026-09-13; runs/nnue_gauntlets/c2_qtt; f528f22 against
+    a46a1ed on the shared mb_b at 50 ms, one player thread, C1's sequential test): rejected at 192
+    pairs, LLR -3.107 against the bound -2.944, pentanomial counts [35, 43, 66, 32, 16], 106/123/155
+    over 384 games, descriptive score interval about [.394, .478]; audited by the runner and
+    replayed by C1 itself; the mechanism was removed from master before the gate 6 freeze (8b60c32).
+    Timing: .351 pairs per active second with eight concurrent pairs, idle share .236 over twelve
+    complete batches.
 
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
@@ -495,12 +516,15 @@ The state of each is written next to it: proposed, implemented, correctness-veri
 strength-accepted for code; preregistered, running or judged for an experiment.
 
 - A1, duration: 60 epochs against 20 from the same init on the same mixture, two seeds and a
-  20-epoch control; runs/nnue_gauntlets/long_training, running (seed 3 training, then its matches;
-  the verdict is joint).
-- C2, search patches by sequential test: the quiescence transposition table candidate (f528f22) is
-  correctness-verified; runs/nnue_gauntlets/c2_qtt owns its strength judgement. The engine uses the
-  baseline quiescence without a transposition table. Acceptance alone permits carrying the candidate
-  into the gate 6 freeze; a rejected, inconclusive or invalid test keeps the baseline mechanism.
+  20-epoch control; runs/nnue_gauntlets/long_training, judged (item 39): no benefit from extending
+  the stretched schedule from epoch 20 to 60, and the recipe rule not met for either seed; both
+  60-epoch arms qualify for the mb_a gate, runs/nnue_gauntlets/a1_promotion (score at least .575 at
+  100 ms over 250 pairs per arm under the frozen C1 build; preregistered, running; deployment is the
+  user's decision).
+- C2, search patches by sequential test: the quiescence transposition table candidate (f528f22) was
+  rejected (item 40); the engine uses the baseline quiescence without a transposition table. Further
+  search patches are screened the same way, one at a time under C1, and an accepted bundle is
+  confirmed at 100 ms over a fixed count.
 - D, labels: selected roots (the largest disagreement between the source label and a shallow one;
   the deeper pilot labels are obtained afterwards) against a seeded random sample, the same
   requested roots and node budget per arm at 1 M nodes with the actual cost recorded;
@@ -510,8 +534,7 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   control on identical data, schedule and seed, a seed-2 pilot first and, only on its result, a
   separately preregistered seed-3 confirmation.
 - A3, H1024 with the corrected widening (distinct small seeded new columns, zero outgoing columns,
-  integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart,
-  only after A1's verdict; C3, a race term only through a measured race error that stays with deeper
+  integer parity at the start, channel differentiation verified), after A1; A2, the high-lr restart, open now that A1 is judged; C3, a race term only through a measured race error that stays with deeper
   labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter matched
   controls justify it. All proposed.
 - Exit condition, met by nothing above: at least 65 % against frozen mb_a at 100 ms over 500 games,
