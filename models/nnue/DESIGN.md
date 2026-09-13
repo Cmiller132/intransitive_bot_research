@@ -514,6 +514,18 @@ that record.
     replayed by C1 itself; the mechanism was removed from master before the gate 6 freeze (8b60c32).
     Timing: .351 pairs per active second with eight concurrent pairs, idle share .236 over twelve
     complete batches.
+41. D, deep labels on selected roots (2026-09-13; runs/nnue_gauntlets/d_pilot; pinned manifest
+    5cfbbeef..., verdict.json 8efd8548..., the runner's original kept as verdict.runner.json): from
+    mb_b on the A1 mixture plus 5 % of 20,000 fresh 1 M-node labels (the frozen build e4e0d5ff... on
+    mb_b), the 20,000 roots of a 200,000-root pool whose 2,500-node label differed most from the
+    source label (gap mean .197 against the pool's .039) against a seeded random 20,000 of the same
+    pool (overlap 1,988 positions); 20 epochs, seed 2. Selected against random .470 [.428, .513] at
+    50 ms and .508 [.463, .553] at 100 ms: the selection rule not met. Against mb_b: selected .574
+    [.533, .615] and .540 [.497, .583], random .534 [.494, .574] and .535 [.492, .578]: neither
+    promotion rule met. 200 pairs at 50 ms and 150 at 100 ms per match, 2,100 games, all valid.
+    Cost: 39.0 G nodes and 11.8 process-hours for the two deep arms, 0.5 G nodes for the screen.
+    Failure of the rules is not evidence that selection has no value at a larger share or count, and
+    no arm isolates whether 1 M-node labels beat the 100k-node source labels.
 
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
@@ -530,10 +542,8 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   rejected (item 40); the engine uses the baseline quiescence without a transposition table. Further
   search patches are screened the same way, one at a time under C1, and an accepted bundle is
   confirmed at 100 ms over a fixed count.
-- D, labels: selected roots (the largest disagreement between the source label and a shallow one;
-  the deeper pilot labels are obtained afterwards) against a seeded random sample, the same
-  requested roots and node budget per arm at 1 M nodes with the actual cost recorded;
-  runs/nnue_gauntlets/d_pilot preregistered, unrun.
+- D, labels: the pilot judged (item 41), the selection not supported at this size; a larger share or
+  a label-depth arm would need its own preregistration.
 - B, format 8: the Rust side correctness-verified and gate 6 passed (item 38); next the training arm
   against the format 6 control on identical data, schedule and seed, a seed-2 pilot first and, only
   on its result, a separately preregistered seed-3 confirmation.
