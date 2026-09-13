@@ -1,6 +1,7 @@
 //! `bot`: eval, play, rpsi and analyse over every model crate.
 
 mod selfplay;
+mod sequential;
 
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
@@ -40,8 +41,11 @@ enum Command {
         /// The named eval reference, relative to the workspace root.
         #[arg(long, default_value = "sq:weights/sq_g128.onnx")]
         reference: String,
-        #[arg(long, default_value_t = 32)]
-        pairs: usize,
+        /// Fixed-count mode defaults to 32; sequential mode fixes its own cap.
+        #[arg(long)]
+        pairs: Option<usize>,
+        #[command(flatten)]
+        sequential: sequential::Args,
         #[arg(long, conflicts_with = "move_ms")]
         sims: Option<u32>,
         #[arg(long)]
@@ -255,6 +259,7 @@ fn main() -> Result<()> {
             candidate,
             reference,
             pairs,
+            sequential,
             sims,
             move_ms,
             reference_move_ms,
@@ -270,7 +275,11 @@ fn main() -> Result<()> {
             ensure!(player_threads > 0, "player-threads must be positive");
             let config = EvalConfig {
                 rules: Rules::SITE,
-                pairs,
+                pairs: pairs.unwrap_or(if sequential.sprt.is_some() {
+                    r#match::sprt::CAP
+                } else {
+                    32
+                }),
                 sims: sims.unwrap_or(32),
                 move_ms,
                 reference_move_ms,
@@ -279,6 +288,7 @@ fn main() -> Result<()> {
                 seed,
                 threads,
                 stream,
+                sequential: sequential.config(&candidate, &reference, player_threads)?,
             };
             let per_thread = player_threads;
             let candidate_factory: Box<PlayerFactory> =

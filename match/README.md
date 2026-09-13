@@ -69,8 +69,35 @@ matches, and the site adapter all go through it. It knows the engine and the
   Optional `info json` telemetry is forwarded to game records and cleared
   before every move and new game; engines without it have no recorded stats.
 
-Game records are written as JSON lines when a path is given; nothing else is
-persisted.
+Fixed-count game records are written as JSON lines when a path is given.
+
+`EvalConfig.sequential` enables the fixed paired SPRT (requires `pairs=3008`
+and at most 16 workers). It supplies a journal path, resume flag and artifact
+provenance from the caller; the CLI hashes the actual engine/network files.
+The protocol fixes score hypotheses .50/.52, alpha=beta=.05, ±log(19) likelihood
+bounds, a first check at 128 pairs and subsequent 16-pair batches. The
+expectation-constrained multinomial MLE replaces zero counts by .001. Every
+batch finishes both colours and retires in opening-id order before stopping.
+The shared runner holds at most one batch of full game records in memory.
+
+The sequential journal starts with the protocol and its SHA256, followed by
+`{"pair": id, "games": [candidate_first, reference_first]}` records. An exclusive
+file lock prevents concurrent writers. Resume verifies the full protocol and
+contiguous opening ids, replays the stopping rule, retains complete lines and
+truncates only a torn final line. Settings, opening hash and provenance must
+match. A terminal journal cannot be extended; forfeits/censored games and
+numerical failures report invalid, and a cap without crossing reports
+inconclusive. No forfeit is silently discarded from the report. The optional
+`Report.sequential` contains the protocol/digest, five complete-pair counts,
+LLR, stop reason and error. Bootstrap intervals at sequential stops are marked
+descriptive; fixed-count reporting remains unchanged.
+
+The likelihood follows [Fishtest's expectation-constrained calculation](https://github.com/official-stockfish/fishtest/blob/master/server/fishtest/stats/LLRcalc.py).
+Independent vectors and stopping trajectories are frozen in
+`tests/fixtures/sprt.json`. Run the maintained empirical calibration explicitly
+with `cargo test -p match --release --test sprt_calibration -- --ignored --nocapture`;
+its nominal error-rate checks cover specified simulated distributions, not a
+universal finite-sample guarantee.
 
 ## Random moves for data generation
 

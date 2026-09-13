@@ -2,8 +2,8 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use anyhow::{ensure, Context, Result};
 use engine::Rules;
@@ -12,11 +12,31 @@ use serde::Serialize;
 
 use crate::game::{play_observed_clocks, GameRecord, Opening};
 use crate::player::{Clock, Player};
+use crate::sprt::{self, Stop};
+
+mod journal;
 
 pub type PlayerFactory = dyn Fn() -> Result<Box<dyn Player>> + Sync;
 
 /// Both games of one opening: candidate first, then reference first.
 type Pair = (GameRecord, GameRecord);
+
+#[derive(Clone, Debug)]
+pub struct Sequential {
+    pub journal: PathBuf,
+    pub resume: bool,
+    /// Model-agnostic artifact identities supplied and hashed by the CLI.
+    pub provenance: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SequentialReport {
+    pub protocol: serde_json::Value,
+    pub protocol_digest: String,
+    #[serde(flatten)]
+    pub state: sprt::State,
+    pub intervals_descriptive_only: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct EvalConfig {
@@ -33,6 +53,7 @@ pub struct EvalConfig {
     pub threads: usize,
     /// Print every game's start, moves and end as JSON lines on stdout.
     pub stream: bool,
+    pub sequential: Option<Sequential>,
 }
 
 impl Default for EvalConfig {
@@ -48,6 +69,7 @@ impl Default for EvalConfig {
             seed: 0,
             threads: 4,
             stream: false,
+            sequential: None,
         }
     }
 }
@@ -136,6 +158,8 @@ pub struct Report {
     /// 95 % interval of the margin over pairs.
     pub interval: (f64, f64),
     pub mean_plies: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequential: Option<SequentialReport>,
 }
 
 /// Evaluate `candidate` against `reference`. `records` optionally receives
@@ -174,102 +198,194 @@ pub fn eval(
         config.reference_sims.is_none() || config.reference_move_ms.is_none(),
         "reference-sims conflicts with reference-move-ms"
     );
+    ensure!(
+        config.sequential.is_none()
+            || (config.pairs == sprt::CAP && config.threads <= sprt::BATCH && records.is_none()),
+        "sequential eval requires 3008 pairs, at most 16 workers and its own journal"
+    );
     let mut rng = StdRng::seed_from_u64(config.seed);
     let openings: Vec<Opening> = (0..config.pairs)
         .map(|_| Opening::random(&config.rules, config.opening_plies, &mut rng))
         .collect();
-    let next = Arc::new(Mutex::new(0usize));
-    let games: Arc<Mutex<Vec<Option<Pair>>>> = Arc::new(Mutex::new(vec![None; config.pairs]));
-    let threads = config.threads.max(1).min(config.pairs.max(1));
-    let mut names: Option<(String, String)> = None;
-    std::thread::scope(|scope| -> Result<()> {
-        let mut handles = Vec::new();
-        for _ in 0..threads {
-            let (next, games, openings) = (Arc::clone(&next), Arc::clone(&games), &openings);
-            handles.push(scope.spawn(move || -> Result<(String, String)> {
-                let mut a = candidate()?;
-                let mut b = reference()?;
-                ensure!(
-                    a.supports_clock(clock(config)) && b.supports_clock(reference_clock(config)),
-                    "player rejects simulation budgets; use --move-ms"
-                );
-                let names = (a.name().to_owned(), b.name().to_owned());
-                loop {
-                    let pair = {
-                        let mut guard = next.lock().expect("pair counter");
-                        let pair = *guard;
-                        *guard += 1;
-                        pair
-                    };
-                    if pair >= openings.len() {
-                        return Ok(names);
-                    }
-                    let played = play_pair(config, &mut *a, &mut *b, pair, &openings[pair]);
-                    games.lock().expect("games")[pair] = Some(played);
-                }
-            }));
-        }
-        for handle in handles {
-            let pair = handle.join().expect("eval thread")?;
-            names.get_or_insert(pair);
-        }
-        Ok(())
-    })?;
-    let (candidate, reference) = names.unwrap_or_default();
-    let games = Arc::try_unwrap(games)
-        .expect("threads joined")
-        .into_inner()
-        .expect("games");
-    let (mut wins, mut draws, mut losses) = (0u32, 0u32, 0u32);
-    let mut pair_scores = Vec::with_capacity(config.pairs);
-    let mut plies = 0u64;
-    let mut forfeits = 0u32;
-    let mut complete_pairs = 0usize;
-    let mut writer = match records {
-        Some(path) => Some(BufWriter::new(
-            File::create(path).with_context(|| format!("creating {}", path.display()))?,
-        )),
-        None => None,
+    let batch = if config.sequential.is_some() {
+        sprt::BATCH
+    } else {
+        config.threads.max(sprt::BATCH)
     };
-    for pair in games.into_iter().flatten() {
-        if pair.0.end != crate::game::End::Forfeit && pair.1.end != crate::game::End::Forfeit {
-            complete_pairs += 1;
-        }
-        let mut score = 0.0;
-        // In the first game the candidate moved first; in the second, the reference did.
-        for (game, candidate_index) in [(&pair.0, 0u8), (&pair.1, 1u8)] {
-            forfeits += u32::from(game.end == crate::game::End::Forfeit);
-            match game.winner {
-                Some(w) if w == candidate_index => {
-                    wins += 1;
-                    score += 1.0;
-                }
-                Some(_) => {
-                    losses += 1;
-                    score -= 1.0;
-                }
-                None => draws += 1,
+    let mut summary = Summary::new(config.sequential.is_some());
+    let protocol = serde_json::json!({
+        "schema": 1,
+        "test": {"method":"pentanomial_expectation_mle", "scores":sprt::SCORES,
+            "s0":sprt::S0,"s1":sprt::S1,"alpha":0.05,"beta":0.05,
+            "lower_bound":-sprt::BOUND,"upper_bound":sprt::BOUND,
+            "zero_cell":0.001,"batch":sprt::BATCH,"first_check":sprt::FIRST_CHECK,"cap":sprt::CAP},
+        "settings": {"capture_clock":config.rules.capture_clock,"pairs":config.pairs,
+            "sims":config.sims,"move_ms":config.move_ms,"reference_move_ms":config.reference_move_ms,
+            "reference_sims":config.reference_sims,"workers":config.threads,
+            "seed":config.seed,"opening_plies":config.opening_plies,"stream":config.stream},
+        "openings_sha256":journal::digest(&serde_json::json!(openings.iter().map(|o| &o.plies).collect::<Vec<_>>()))?,
+        "provenance":config.sequential.as_ref().map(|s| &s.provenance),
+    });
+    let mut journal = if let Some(sequential) = &config.sequential {
+        Some(journal::Journal::open(
+            &sequential.journal,
+            sequential.resume,
+            &protocol,
+            |id, games| {
+                ensure!(
+                    id == summary.scores.len() && id < openings.len(),
+                    "noncontiguous journal pair id"
+                );
+                ensure!(
+                    !id.is_multiple_of(sprt::BATCH) || summary.running(),
+                    "journal continues after a stopping batch"
+                );
+                let tokens = openings[id].tokens();
+                ensure!(
+                    games.0.moves.starts_with(&tokens) && games.1.moves.starts_with(&tokens),
+                    "journal opening differs"
+                );
+                summary.retire(games)
+            },
+        )?)
+    } else {
+        None
+    };
+    let mut writer = records
+        .map(|path| {
+            File::create(path)
+                .map(BufWriter::new)
+                .with_context(|| format!("creating {}", path.display()))
+        })
+        .transpose()?;
+    if summary.needs_pairs(batch) && summary.scores.len() < config.pairs {
+        let workers = config.threads.min(config.pairs).min(batch);
+        std::thread::scope(|scope| -> Result<()> {
+            let (results_tx, results_rx) = mpsc::channel();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let mut senders = Vec::with_capacity(workers);
+            let mut handles = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let (jobs_tx, jobs_rx) = mpsc::channel::<(usize, Opening)>();
+                senders.push(jobs_tx);
+                let results = results_tx.clone();
+                let ready = ready_tx.clone();
+                handles.push(scope.spawn(move || {
+                    let initialized =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<_> {
+                            let a = candidate()?;
+                            let b = reference()?;
+                            ensure!(
+                                a.supports_clock(clock(config))
+                                    && b.supports_clock(reference_clock(config)),
+                                "player rejects simulation budgets; use --move-ms"
+                            );
+                            Ok((a, b))
+                        }))
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("player factory panicked")));
+                    let (mut a, mut b) = match initialized {
+                        Ok(players) => players,
+                        Err(error) => {
+                            let _ = ready.send(Err(error));
+                            return;
+                        }
+                    };
+                    if ready
+                        .send(Ok((a.name().to_owned(), b.name().to_owned())))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    for (id, opening) in jobs_rx {
+                        let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            play_pair(config, &mut *a, &mut *b, id, &opening)
+                        }))
+                        .map_err(|_| anyhow::anyhow!("eval player panicked at pair {id}"));
+                        if results.send((id, played)).is_err() {
+                            break;
+                        }
+                    }
+                }));
             }
-            plies += game.plies as u64;
-            if let Some(writer) = writer.as_mut() {
-                serde_json::to_writer(&mut *writer, game)?;
-                writer.write_all(b"\n")?;
+            drop(results_tx);
+            drop(ready_tx);
+            let result = (|| -> Result<()> {
+                for _ in 0..workers {
+                    let (a, b) = ready_rx.recv().context("player factory disconnected")??;
+                    summary.names(&a, &b)?;
+                }
+                while summary.needs_pairs(batch) && summary.scores.len() < config.pairs {
+                    let start = summary.scores.len();
+                    let end = ((start / batch + 1) * batch).min(config.pairs);
+                    for id in start..end {
+                        senders[id % workers].send((id, openings[id].clone()))?;
+                    }
+                    let mut pending: Vec<Option<Pair>> = vec![None; end - start];
+                    for _ in start..end {
+                        let (id, played) =
+                            results_rx.recv().context("eval workers disconnected")?;
+                        ensure!(
+                            (start..end).contains(&id) && pending[id - start].is_none(),
+                            "invalid worker pair id"
+                        );
+                        pending[id - start] = Some(played?);
+                    }
+                    for (offset, pair) in pending.into_iter().enumerate() {
+                        let pair = pair.expect("all batch results received");
+                        if let Some(journal) = &mut journal {
+                            journal.append(start + offset, &pair)?;
+                        }
+                        if let Some(writer) = &mut writer {
+                            for game in [&pair.0, &pair.1] {
+                                serde_json::to_writer(&mut *writer, game)?;
+                                writer.write_all(b"\n")?;
+                            }
+                        }
+                        summary.retire(pair)?;
+                    }
+                    if let Some(journal) = &journal {
+                        journal.sync()?;
+                    }
+                    if let Some(writer) = &mut writer {
+                        writer.flush()?;
+                    }
+                }
+                Ok(())
+            })();
+            drop(senders);
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("eval worker panicked"))?;
             }
-        }
-        pair_scores.push(score / 2.0);
+            result
+        })?;
     }
-    let n = pair_scores.len().max(1) as f64;
-    let margin = pair_scores.iter().sum::<f64>() / n;
-    let variance = pair_scores
+    let n = summary.scores.len().max(1) as f64;
+    let margin = summary.scores.iter().sum::<f64>() / n;
+    let variance = summary
+        .scores
         .iter()
         .map(|s| (s - margin).powi(2))
         .sum::<f64>()
-        / (n - 1.0).max(1.0);
+        / (n - 1.).max(1.);
     let half_width = 1.96 * (variance / n).sqrt();
+    let sequential = summary
+        .sequential
+        .map(|state| -> Result<SequentialReport> {
+            Ok(SequentialReport {
+                protocol_digest: journal::digest(&protocol)?,
+                protocol,
+                state,
+                intervals_descriptive_only: true,
+            })
+        })
+        .transpose()?;
     Ok(Report {
-        candidate,
-        reference,
-        pairs: pair_scores.len(),
+        candidate: summary.candidate,
+        reference: summary.reference,
+        pairs: summary.scores.len(),
+        complete_pairs: summary.complete,
         sims: if config.move_ms.is_some() {
             0
         } else {
@@ -277,23 +393,108 @@ pub fn eval(
         },
         move_ms: config.move_ms,
         reference_move_ms: match reference_clock(config) {
-            Clock::Time(duration) => Some(duration.as_millis() as u64),
+            Clock::Time(time) => Some(time.as_millis() as u64),
             Clock::Sims(_) => None,
         },
         reference_sims: match reference_clock(config) {
-            Clock::Sims(sims) => Some(sims),
+            Clock::Sims(n) => Some(n),
             Clock::Time(_) => None,
         },
-        complete_pairs,
-        forfeits,
-        bootstrap_interval: bootstrap(&pair_scores, config.seed),
-        wins,
-        draws,
-        losses,
+        forfeits: summary.forfeits,
+        wins: summary.wins,
+        draws: summary.draws,
+        losses: summary.losses,
+        bootstrap_interval: bootstrap(&summary.scores, config.seed),
         margin,
         interval: (margin - half_width, margin + half_width),
-        mean_plies: plies as f64 / (2.0 * n),
+        mean_plies: summary.plies as f64 / (2. * n),
+        sequential,
     })
+}
+
+/// Compact statistics; full game records are retired to the journal each batch.
+#[derive(Default)]
+struct Summary {
+    candidate: String,
+    reference: String,
+    scores: Vec<f64>,
+    complete: usize,
+    wins: u32,
+    draws: u32,
+    losses: u32,
+    forfeits: u32,
+    plies: u64,
+    sequential: Option<sprt::State>,
+}
+
+impl Summary {
+    fn new(sequential: bool) -> Self {
+        Self {
+            sequential: sequential.then(sprt::State::default),
+            ..Self::default()
+        }
+    }
+    fn running(&self) -> bool {
+        self.sequential
+            .as_ref()
+            .is_none_or(|s| s.stop_reason == Stop::Running)
+    }
+    fn needs_pairs(&self, batch: usize) -> bool {
+        self.running() || !self.scores.len().is_multiple_of(batch)
+    }
+    fn names(&mut self, candidate: &str, reference: &str) -> Result<()> {
+        if self.candidate.is_empty() && self.reference.is_empty() {
+            self.candidate = candidate.into();
+            self.reference = reference.into();
+        }
+        ensure!(
+            self.candidate == candidate && self.reference == reference,
+            "player identities differ between pairs"
+        );
+        Ok(())
+    }
+    fn retire(&mut self, pair: Pair) -> Result<()> {
+        self.names(&pair.0.first, &pair.0.second)?;
+        self.names(&pair.1.second, &pair.1.first)?;
+        let mut cell = 0;
+        let mut valid = true;
+        for (game, candidate) in [(&pair.0, 0u8), (&pair.1, 1u8)] {
+            ensure!(
+                game.winner.is_none_or(|w| w <= 1),
+                "invalid winner in pair record"
+            );
+            let forfeit = game.end == crate::game::End::Forfeit;
+            self.forfeits += u32::from(forfeit);
+            valid &= !forfeit
+                && !matches!(
+                    game.end,
+                    crate::game::End::PlyCap | crate::game::End::Interrupted
+                );
+            match game.winner {
+                Some(w) if w == candidate => {
+                    self.wins += 1;
+                    cell += 2;
+                }
+                Some(_) => self.losses += 1,
+                None => {
+                    self.draws += 1;
+                    cell += 1;
+                }
+            }
+            self.plies += game.plies as u64;
+        }
+        self.complete += usize::from(valid);
+        self.scores.push(cell as f64 / 2. - 1.);
+        if let Some(state) = &mut self.sequential {
+            if valid {
+                state.counts[cell] += 1;
+            } else {
+                state.invalidate("forfeit or censored game in opening pair");
+            }
+            state.check(self.scores.len());
+        }
+        Ok(())
+    }
 }
 
 /// Reference budget, defaulting to the candidate budget.
@@ -333,6 +534,176 @@ mod tests {
     use super::*;
     use crate::{player::Clock, History};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct TempJournal(PathBuf);
+    impl TempJournal {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "paired-sprt-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir.join("pairs.jsonl"))
+        }
+    }
+    impl Drop for TempJournal {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            std::fs::remove_dir(self.0.parent().unwrap()).unwrap();
+        }
+    }
+
+    fn sequential_config(path: &Path) -> EvalConfig {
+        EvalConfig {
+            pairs: sprt::CAP,
+            threads: 2,
+            opening_plies: 2,
+            sequential: Some(Sequential {
+                journal: path.into(),
+                resume: false,
+                provenance: serde_json::json!({"test":"fixture"}),
+            }),
+            ..EvalConfig::default()
+        }
+    }
+
+    #[test]
+    fn sequential_batches_stop_and_resume_a_torn_partial_batch() {
+        let path = TempJournal::new();
+        let mut config = sequential_config(&path.0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let factory = move || {
+            Ok(Box::new(BudgetPlayer {
+                calls: Arc::clone(&factory_calls),
+                expected: Clock::Sims(32),
+            }) as Box<dyn Player>)
+        };
+        let report = eval(&config, &factory, &factory, None).unwrap();
+        assert_eq!(report.pairs, sprt::FIRST_CHECK);
+        assert_eq!(
+            report.sequential.as_ref().unwrap().state.stop_reason,
+            Stop::Reject
+        );
+        assert_eq!(
+            report.sequential.as_ref().unwrap().state.counts,
+            [0, 0, 128, 0, 0]
+        );
+        let original = std::fs::read_to_string(&path.0).unwrap();
+        let lines: Vec<&str> = original.lines().collect();
+        for (id, line) in lines[1..].iter().enumerate() {
+            let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(entry["pair"], id);
+            assert_eq!(entry["games"].as_array().unwrap().len(), 2);
+        }
+        // Retain 117 complete pairs and a torn next record.
+        let mut partial = lines[..118].join("\n");
+        partial.push_str("\n{\"pair\":117,\"games\":[");
+        std::fs::write(&path.0, partial).unwrap();
+        config.sequential.as_mut().unwrap().resume = true;
+        let resumed = eval(&config, &factory, &factory, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(&resumed).unwrap(),
+            serde_json::to_value(&report).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&path.0).unwrap(), original);
+        // A stopped journal requires no player construction.
+        let stopped = eval(
+            &config,
+            &|| panic!("already stopped"),
+            &|| panic!("already stopped"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(stopped.pairs, 128);
+        // Refuse a changed protocol without trimming or appending anything.
+        config.seed += 1;
+        assert!(eval(&config, &factory, &factory, None).is_err());
+        assert_eq!(std::fs::read_to_string(&path.0).unwrap(), original);
+    }
+
+    struct ForfeitPlayer;
+    impl Player for ForfeitPlayer {
+        fn new_game(&mut self) {}
+        fn choose(&mut self, _: &engine::State, _: &History, _: Clock) -> engine::Action {
+            0
+        }
+        fn forfeited(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &str {
+            "forfeit-test"
+        }
+    }
+
+    #[test]
+    fn forfeit_finishes_both_colours_and_invalidates_the_first_batch() {
+        let path = TempJournal::new();
+        let mut config = sequential_config(&path.0);
+        let factory = || Ok(Box::new(ForfeitPlayer) as Box<dyn Player>);
+        let report = eval(&config, &factory, &factory, None).unwrap();
+        assert_eq!(report.pairs, 16);
+        assert_eq!(report.forfeits, 32);
+        assert_eq!(report.complete_pairs, 0);
+        let sequential = report.sequential.unwrap();
+        assert_eq!(sequential.state.stop_reason, Stop::Invalid);
+        assert_eq!(sequential.state.counts, [0; 5]);
+        config.sequential.as_mut().unwrap().resume = true;
+        let resumed = eval(
+            &config,
+            &|| panic!("invalid journal"),
+            &|| panic!("invalid journal"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.sequential.unwrap().state.stop_reason, Stop::Invalid);
+        // A crash after journalling a forfeit must still finish that batch on resume.
+        let original = std::fs::read_to_string(&path.0).unwrap();
+        let partial = original.lines().take(4).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&path.0, partial).unwrap();
+        let resumed = eval(&config, &factory, &factory, None).unwrap();
+        assert_eq!(resumed.pairs, 16);
+        assert_eq!(resumed.forfeits, 32);
+        assert_eq!(resumed.sequential.unwrap().state.stop_reason, Stop::Invalid);
+        assert_eq!(std::fs::read_to_string(&path.0).unwrap(), original);
+    }
+
+    #[test]
+    fn factory_failure_closes_waiting_workers() {
+        let config = EvalConfig {
+            pairs: 2,
+            threads: 2,
+            ..EvalConfig::default()
+        };
+        assert!(eval(
+            &config,
+            &|| anyhow::bail!("factory failure"),
+            &|| panic!("unused"),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn journal_has_one_writer_and_rejects_a_complete_corrupt_line() {
+        let path = TempJournal::new();
+        let protocol = serde_json::json!({"schema":1});
+        let first = journal::Journal::open(&path.0, false, &protocol, |_, _| Ok(())).unwrap();
+        assert!(journal::Journal::open(&path.0, true, &protocol, |_, _| Ok(())).is_err());
+        drop(first);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path.0)
+            .unwrap();
+        file.write_all(b"not-json\n").unwrap();
+        drop(file);
+        let bytes = std::fs::read(&path.0).unwrap();
+        assert!(journal::Journal::open(&path.0, true, &protocol, |_, _| Ok(())).is_err());
+        assert_eq!(std::fs::read(&path.0).unwrap(), bytes);
+    }
 
     struct BudgetPlayer {
         calls: Arc<AtomicUsize>,

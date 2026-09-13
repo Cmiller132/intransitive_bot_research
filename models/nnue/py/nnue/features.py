@@ -3,50 +3,82 @@
 A position is a board of 81 cell codes in the mover's frame (0 empty, 1-3 own
 rock/paper/scissors, 4-6 enemy), the plies since the last capture and the
 game's capture clock. Both perspectives (the mover; the opponent after the
-anti-diagonal reflection with colours swapped) index the same feature table:
+anti-diagonal reflection with colours swapped) index one feature table whose
+row layout is the file version's (`Layout`):
 
-- 0-485: piece-square, `(piece - 1) * 81 + square`;
-- 486-971: the piece on the square is attacked by an adjacent enemy that
-  beats it, `486 + (piece - 1) * 81 + square`;
-- 972-987: elapsed-clock bucket of `since_capture`;
-- 988-1003: remaining-clock bucket of `clock - since_capture`;
-- 1004-1012: race bucket of the perspective's own side (format 7, item 36);
-- 1013-1021: race bucket of the perspective's other side;
-- 1022: padding (an all-zero row).
+- piece-square rows `486 c + 81 (code - 1) + square`, where `c` is the
+  perspective's opponent-material context: format 8 has 27 contexts,
+  `min(r, 2) + 3 min(p, 2) + 9 min(s, 2)` over the opponent's rock, paper and
+  scissors counts in that perspective's frame; format 6 has the one context 0;
+- attacked-piece rows `attack_base + 81 (code - 1) + square`: the piece on
+  the square is attacked by an adjacent enemy that beats it;
+- 16 elapsed-clock rows (bucket of `since_capture`) and 16 remaining-clock
+  rows (bucket of `clock - since_capture`), shared by both perspectives;
+- one padding row after the last feature.
 
-Every perspective has 44 slots: 20 pieces, 20 attacked pieces, 2 clock rows
-and 2 race rows. The race buckets come from the engine's shared query
-`engine.race_buckets(board) -> (mover, opponent)` on the actual mover's
-board: 0-7 mean that side's fastest unstoppable-looking runner reaches its
-goal in 1-8 of its own moves, 8 means none. The pair is queried once and
-swapped for the opponent's perspective (querying the flipped board would
-change whose move it is and so the interception tempo). Format 6 files
-(1,004 features) never use the race rows: the model masks them to padding.
-The Rust crate indexes the same rows; `tests/test_features.py` checks the
-encoder against a slow enumeration and the perspective exchange.
+Every perspective has 42 slots: 20 pieces, 20 attacked pieces and the two
+clock rows. `feature_ids` encodes format 8; `Layout.rows` maps its ids onto
+a format-6 table, so one id cache serves both. The Rust crate indexes the
+same rows (runs/nnue_plan/format8_contract.md is the shared contract);
+`tests/test_features.py` checks the encoder against a slow enumeration and
+the perspective exchange.
 """
 
 from __future__ import annotations
 
+import functools
+import hashlib
+from dataclasses import dataclass
+
 import numpy as np
 
 PIECE_ROWS = 6 * 81
-ATTACK_BASE = PIECE_ROWS
+CONTEXTS = 27
 CLOCK_BOUNDS = np.array([0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160], dtype=np.int64)
 CLOCK_BUCKETS = len(CLOCK_BOUNDS)
-ELAPSED_BASE = 2 * PIECE_ROWS
-REMAINING_BASE = ELAPSED_BASE + CLOCK_BUCKETS
-RACE_BASE = REMAINING_BASE + CLOCK_BUCKETS
-RACE_BUCKETS = 9
-FORMAT6_FEATURES = RACE_BASE  # the feature count of format 6 files (no race rows)
-FEATURES = RACE_BASE + 2 * RACE_BUCKETS
-PAD = FEATURES
 MAX_PIECES = 20
-SLOTS = 2 * MAX_PIECES + 4
+SLOTS = 2 * MAX_PIECES + 2
 
-# Bucket boundaries of the output heads by total pieces (DESIGN item 7).
-BUCKET_BOUNDS = np.array([0, 5, 9, 13], dtype=np.int64)
-BUCKETS = len(BUCKET_BOUNDS)
+
+@dataclass(frozen=True)
+class Layout:
+    """The row bases of one file version's feature table."""
+
+    version: int
+    contexts: int
+
+    @property
+    def attack_base(self) -> int:
+        return self.contexts * PIECE_ROWS
+
+    @property
+    def elapsed_base(self) -> int:
+        return self.attack_base + PIECE_ROWS
+
+    @property
+    def remaining_base(self) -> int:
+        return self.elapsed_base + CLOCK_BUCKETS
+
+    @property
+    def features(self) -> int:
+        return self.remaining_base + CLOCK_BUCKETS
+
+    @property
+    def pad(self) -> int:
+        return self.features
+
+    def rows(self, ids: np.ndarray) -> np.ndarray:
+        """This layout's ids from format-8 ids (`feature_ids`): a format-6
+        table drops the context and shifts the attacked, clock and padding rows."""
+        if self.contexts == CONTEXTS:
+            return ids
+        ids = np.asarray(ids)
+        return np.where(ids < FORMAT8.attack_base, ids % PIECE_ROWS, ids - (FORMAT8.attack_base - self.attack_base))
+
+
+FORMAT6 = Layout(6, 1)
+FORMAT8 = Layout(8, CONTEXTS)
+LAYOUTS = {6: FORMAT6, 8: FORMAT8}
 
 # Anti-diagonal reflection (the opponent's frame), the diagonal reflection
 # (a board symmetry) and the colour swap of cell codes.
@@ -69,12 +101,6 @@ def clock_bucket(plies: np.ndarray) -> np.ndarray:
     return np.searchsorted(CLOCK_BOUNDS, np.maximum(np.asarray(plies, dtype=np.int64), 0), side="right") - 1
 
 
-def piece_bucket(board: np.ndarray) -> np.ndarray:
-    """Output bucket of every board by its total piece count."""
-    pieces = np.count_nonzero(np.asarray(board).reshape(-1, 81), axis=1)
-    return np.searchsorted(BUCKET_BOUNDS, pieces, side="right") - 1
-
-
 def attacked(board: np.ndarray) -> np.ndarray:
     """(N, 81) bool: the piece on the square is attacked by an adjacent enemy that beats it."""
     piece = np.asarray(board, dtype=np.int16).reshape(-1, 81)
@@ -84,60 +110,50 @@ def attacked(board: np.ndarray) -> np.ndarray:
     return (piece > 0) & np.any(enemy & beats, axis=-1)
 
 
-def race_buckets(board: np.ndarray) -> np.ndarray:
-    """(N, 2) uint8: the engine's race buckets (mover, opponent) of every
-    board in the mover's frame."""
-    import engine
+def perspectives(board: np.ndarray) -> np.ndarray:
+    """(2N, 81): every board in the mover's frame followed by its opponent's frame."""
+    board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
+    return np.stack((board, SWAP[board[:, ANTI]]), axis=1).reshape(-1, 81)
 
+
+def context(board: np.ndarray) -> np.ndarray:
+    """(N, 2) int64 opponent-material context of both perspectives: the
+    capped rock, paper and scissors counts of the enemy pieces in each
+    perspective's own frame (the mover's perspective counts codes 4-6 of
+    the board, the opponent's perspective codes 1-3)."""
+    frames = perspectives(board)
+    capped = np.stack([np.minimum(np.count_nonzero(frames == code, axis=1), 2) for code in (4, 5, 6)], axis=1)
+    return (capped @ np.array([1, 3, 9])).reshape(-1, 2)
+
+
+def feature_ids(board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray) -> np.ndarray:
+    """(N, 2, 42) int64 format-8 feature ids of every position, padded with
+    `FORMAT8.pad`; `Layout.rows` maps them onto a format-6 table."""
     board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
     if np.any(board > 6):
         raise ValueError("cell codes must be 0..6")
-    out = np.empty((len(board), 2), dtype=np.uint8)
-    for i, row in enumerate(board):
-        out[i] = engine.race_buckets(row.tobytes())
-    return out
-
-
-def feature_ids(
-    board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray, race: np.ndarray | None = None
-) -> np.ndarray:
-    """(N, 2, 44) int64 feature ids of every position, padded with `PAD`;
-    `race` is the (N, 2) result of `race_buckets` (queried when omitted)."""
-    board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
-    if np.any(board > 6):
-        raise ValueError("cell codes must be 0..6")
-    if race is None:
-        race = race_buckets(board)
-    race = np.asarray(race, dtype=np.int64).reshape(-1, 2)
-    if len(race) != len(board) or np.any(race < 0) or np.any(race >= RACE_BUCKETS):
-        raise ValueError("one (mover, opponent) race bucket pair in 0..8 per board")
     since = np.asarray(since_capture, dtype=np.int64).reshape(-1)
     clock = np.asarray(clock, dtype=np.int64).reshape(-1)
     if len(since) != len(board) or len(clock) != len(board):
         raise ValueError("one since_capture and one clock per board")
     if np.any(clock <= 0) or np.any(since < 0):
         raise ValueError("every position needs a positive clock and a non-negative since_capture")
-    both = np.stack((board, SWAP[board[:, ANTI]]), axis=1).reshape(-1, 81)
+    both = perspectives(board)
     row, sq = np.nonzero(both)
     count = np.count_nonzero(both, axis=1)
     if count.max(initial=0) > MAX_PIECES:
         raise ValueError("a position holds at most the original 20 pieces")
-    ids = np.full((len(both), SLOTS), PAD, dtype=np.int64)
+    ids = np.full((len(both), SLOTS), FORMAT8.pad, dtype=np.int64)
     col = np.arange(len(row)) - np.repeat(np.cumsum(count) - count, count)
-    ids[row, col] = (both[row, sq].astype(np.int64) - 1) * 81 + sq
+    ids[row, col] = PIECE_ROWS * context(board).reshape(-1)[row] + (both[row, sq].astype(np.int64) - 1) * 81 + sq
     hit = attacked(both)
     tr, ts = np.nonzero(hit)
     tc = np.count_nonzero(hit, axis=1)
     tcol = np.arange(len(tr)) - np.repeat(np.cumsum(tc) - tc, tc)
-    ids[tr, MAX_PIECES + tcol] = ATTACK_BASE + (both[tr, ts].astype(np.int64) - 1) * 81 + ts
+    ids[tr, MAX_PIECES + tcol] = FORMAT8.attack_base + (both[tr, ts].astype(np.int64) - 1) * 81 + ts
     ids = ids.reshape(-1, 2, SLOTS)
-    ids[:, :, 2 * MAX_PIECES] = (ELAPSED_BASE + clock_bucket(since))[:, None]
-    ids[:, :, 2 * MAX_PIECES + 1] = (REMAINING_BASE + clock_bucket(clock - since))[:, None]
-    # The mover's perspective sees (own = mover, other = opponent); the opponent's the swap.
-    ids[:, 0, 2 * MAX_PIECES + 2] = RACE_BASE + race[:, 0]
-    ids[:, 0, 2 * MAX_PIECES + 3] = RACE_BASE + RACE_BUCKETS + race[:, 1]
-    ids[:, 1, 2 * MAX_PIECES + 2] = RACE_BASE + race[:, 1]
-    ids[:, 1, 2 * MAX_PIECES + 3] = RACE_BASE + RACE_BUCKETS + race[:, 0]
+    ids[:, :, 2 * MAX_PIECES] = (FORMAT8.elapsed_base + clock_bucket(since))[:, None]
+    ids[:, :, 2 * MAX_PIECES + 1] = (FORMAT8.remaining_base + clock_bucket(clock - since))[:, None]
     return ids
 
 
@@ -155,19 +171,23 @@ def transform_board(board: np.ndarray, symmetry: int) -> np.ndarray:
     return b
 
 
-def symmetry_table() -> np.ndarray:
-    """(6, FEATURES + 1) permutation of feature ids under every symmetry; it
-    commutes with both perspectives, so `table[k, ids]` are the ids of the
-    transformed position. Clock, race and padding rows map to themselves (the
-    race query is invariant under the diagonal reflection and type renaming)."""
-    table = np.tile(np.arange(FEATURES + 1), (6, 1))
-    f = np.arange(2 * PIECE_ROWS)
-    group, rest = divmod(f, PIECE_ROWS)
+def symmetry_table(layout: Layout = FORMAT8) -> np.ndarray:
+    """(6, features + 1) permutation of the layout's feature ids under every
+    symmetry; it commutes with both perspectives, so `table[k, ids]` are the
+    ids of the transformed position. A type renaming also renames the
+    context's counts; clock and padding rows map to themselves."""
+    table = np.tile(np.arange(layout.features + 1), (6, 1))
+    f = np.arange(layout.elapsed_base)
+    base = np.where(f < layout.attack_base, 0, layout.attack_base)
+    c, rest = divmod(f - base, PIECE_ROWS)
     piece, square = divmod(rest, 81)
     side, kind = divmod(piece, 3)
+    counts = np.stack([c % 3, c // 3 % 3, c // 9])
     for k in range(6):
+        m = k % 3
         sq = DIAG[square] if k // 3 else square
-        table[k, f] = group * PIECE_ROWS + (side * 3 + (kind + k % 3) % 3) * 81 + sq
+        renamed = counts[(0 - m) % 3] + 3 * counts[(1 - m) % 3] + 9 * counts[(2 - m) % 3]
+        table[k, f] = base + PIECE_ROWS * renamed + (side * 3 + (kind + m) % 3) * 81 + sq
     return table
 
 
@@ -187,3 +207,17 @@ def orbit_hash(board: np.ndarray, seed: int = 20260909) -> np.ndarray:
     z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
     z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
     return z ^ (z >> np.uint64(31))
+
+
+@functools.cache
+def signature() -> str:
+    """A hash of the encoder's ids on a fixed set of boards; an id cache
+    carries it, so a changed encoder invalidates every cache."""
+    rng = np.random.default_rng(20260912)
+    boards = np.zeros((64, 81), dtype=np.uint8)
+    for board in boards:
+        pieces = int(rng.integers(1, MAX_PIECES + 1))
+        board[rng.choice(81, pieces, replace=False)] = rng.integers(1, 7, pieces)
+    clock = rng.integers(1, 201, len(boards))
+    since = (rng.random(len(boards)) * clock).astype(np.int64)
+    return hashlib.sha256(feature_ids(boards, since, clock).tobytes()).hexdigest()[:16]

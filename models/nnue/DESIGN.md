@@ -19,8 +19,8 @@ unchanged, everything around them is rebuilt.
 
 1. Package: the workspace crate `nnue` (evaluator, alpha-beta search,
    `NnuePlayer: match::Player`) and the Python package `nnue` (features,
-   network, quantisation-aware training, export, dataset import, student
-   collection, teacher labelling, training). Rules and exact tactics come
+   network, quantisation-aware training, export, dataset import, teacher
+   labelling, training, the experiment runner). Rules and exact tactics come
    only from `engine`; the crate keeps no second implementation of moves,
    apply or terminal checks. `nnue:<path.nnue>` builds the player in the
    `bot` CLI. No native Python extension: features are NumPy over the same
@@ -49,9 +49,10 @@ unchanged, everything around them is rebuilt.
    decisions on 100 stored positions and run no more than 5 % slower at
    equal nodes. This is a correctness check, not a strength claim.
 
-## Evaluator (file format RPSNNUE1 version 6)
+## Evaluator (file formats RPSNNUE1 version 6 and 8)
 
-5. Features, 1,004: the prototype's 486 piece-square rows and 486
+5. Features, 1,004 (format 6; format 8 conditions the piece-square rows
+   on the opponent's material, item 38): the prototype's 486 piece-square rows and 486
    attacked-piece rows (a piece attacked by an adjacent enemy that beats
    it), plus 16 elapsed-clock rows and 16 remaining-clock rows, one-hot over
    the lower bounds 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128,
@@ -72,7 +73,8 @@ unchanged, everything around them is rebuilt.
    transformer and the dense transform shared. Built as an ablation beside
    item 5; kept if it passes the gauntlet. Measured: neither the clock rows
    (82.5 % without them against the same control's 83.8 %) nor the buckets
-   (50.6 %) changed strength; the format keeps both, trained or zeroed.
+   (50.6 %) changed strength; the clock rows stay, the buckets were removed
+   from the trainer and the files on 2026-09-12 (one head, item 38).
 8. Deferred, each a separate design change when the data supports it: full
    per-bucket residual heads, a deeper residual (1024 to 32 to 16 to 1),
    width 768 or 1024, richer local features.
@@ -365,18 +367,26 @@ unchanged, everything around them is rebuilt.
 33. Width 768 only after the passes are in place: it costs 12 % per node
     and its from-scratch run lost; a 768-wide continuation needs the
     lineage widened rather than random: `NNUE.widen_hidden` pads a 512-wide
-    network to 768 (new rows zero, new bias 0.15, head columns zero) so it
-    evaluates identically at first, and `--init <512.nnue> --hidden 768`
+    network to 768 so it evaluates identically at first (every new column
+    gets its own small seeded feature rows, the initial bias and zero
+    readout and dense columns), and `--init <512.nnue> --hidden 768`
     applies it; judged on the clock, never at node budget. Measured: the
     padded 768 fine-tuned on round 5's data scored 43.7 % (39.7-47.5)
-    over 500 games at 50 ms against the 512 it started from; the extra
-    rows do not earn their cost in one fine-tune, so width stays 512 until
-    a many-pass GPU continuation can try it.
+    over 500 games at 50 ms against the 512 it started from. That padding
+    started every new column identical (zero rows, one bias), so the new
+    columns received identical gradients and never differentiated; the
+    seeded columns (2026-09-12) remove that defect, and the width question
+    is open again (step_plan_final.md A3).
 34. Search: multithreading worth at four threads against doubled time, and
     the evaluator's cost per node (profile and SIMD work), both under
-    measurement by Astra; then time management at 250 ms; sequential
-    testing (SPRT) in `bot eval` if a paired-outcome likelihood is added
-    cleanly. Since 2026-09-10 the arena seat plays under a wall clock
+    measurement by Astra; then time management at 250 ms. Sequential
+    testing uses `bot eval --sprt <journal>`: pentanomial expectation MLE,
+    score hypotheses .50/.52, alpha=beta=.05, checks every 16 pairs from
+    128 through the 3,008-pair cap; invalid forfeits and hash-bound resume.
+    Rust agrees with the independent reference on 20 likelihood values and
+    265 trajectory checks; simulated-distribution calibration is maintained
+    in `match/tests/sprt_calibration.rs`. Protocol and measured calibration
+    are recorded in `runs/nnue_plan/astra_status20.md`. Since 2026-09-10 the arena seat plays under a wall clock
     (`bot rpsi --movetime 100` overrides the host's `go sims 32`), so
     nodes per second count in the arena as well as in the timed matches;
     the speed work (a `znver4` target for both Zen 4 machines, staged move
@@ -442,8 +452,10 @@ unchanged, everything around them is rebuilt.
     and a runner within three moves exists in 4 % of rows, so the
     piece-square rows already read races as well as 40-simulation labels
     can teach them (the optimism the loss study saw is twelve plies out,
-    beyond the labels' horizon). Format 7 stays supported and unused;
-    it would earn its place only with deeper labels or at fixed nodes.
+    beyond the labels' horizon). Format 7 was removed with format 8
+    (item 38); a race term returns only through the C3 proof of
+    runs/nnue_plan/step_plan_final.md (a measured race error that stays
+    with deeper labels), never as a feature added on its own.
     Also: teacher disagreement rounds at 512 simulations on the rows
     where student and teacher differ most.
 36. Not worth repeating (measured null or negative): clock rows, output
@@ -452,3 +464,34 @@ unchanged, everything around them is rebuilt.
     tactics beyond the current rule, relabelling existing sets with a
     stronger teacher (item 31), a second many-pass continuation chained on
     the first (item 32).
+37. Controlled gen3 data comparison: independently continue frozen mb_b on
+    gen1a+gen2 and on gen1a+gen2+gen3, holding nominal self-play/replay shares
+    at 70/30, historical source allocation and the 20-epoch CPU recipe fixed.
+    Both arms meet mb_b and each other in paired eval at 50 and 100 ms.
+    The direct match measures the new data's benefit; promotion separately
+    requires beating mb_b at both budgets. The schedule and decision rules
+    are in runs/nnue_plan/selfplay_plan_final.md, exact arguments and seeds
+    in runs/nnue_gauntlets/gen3_controlled/experiment.json. Measured on
+    one seed: no gain (53.3 % at 50 ms, 50.3 % at 100 ms against the
+    control), a bounded finding, unresolved across seeds; the
+    self-play loop was paused and the step-change programme of
+    runs/nnue_plan/step_plan_final.md agreed with Astra on 2026-09-12.
+38. Format 8, the agreed contract (runs/nnue_plan/format8_contract.md): the
+    piece-square rows are conditioned on the perspective's opponent
+    material, c = min(r, 2) + 3 min(p, 2) + 9 min(s, 2) over the opponent's
+    rock, paper and scissors counts, 27 contexts, rows 486 c + 81 (code - 1)
+    + square; the attacked and clock rows follow unconditioned: 13,640
+    features, version 8 in the format 6 header and payload order, 42 slots
+    per perspective, the H512 file 14,003,436 bytes, no race rows. Trained
+    factorised (Stockfish's feature factorisation): W[c, i] = base[i] +
+    delta[c, i] with the residuals zero at the start and quantisation and the
+    range constraint on the sum; a format 6 `--init` becomes the shared
+    factor (`widen_contexts`, byte-identical to `nnue.export convert`), so
+    a format 8 run starts from the incumbent's evaluation. Measured
+    2026-09-12: the factorised step costs 13 % more than format 6 (393-401
+    against 348-350 ms per 8,192-row step on eight threads); over 2 M gen3
+    rows the full context (two or more of each type) holds 40.6 % of the
+    perspectives and seven contexts fall under 0.5 %, which the shared
+    factor covers. The Rust reader, the context refresh and the gate (at
+    least 95 % of format 6 nodes per second) are Astra's; parity fixtures
+    in tests/fixtures/format8_*, kept in step by py/tests/test_fixtures.py.

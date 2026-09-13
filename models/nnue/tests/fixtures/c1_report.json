@@ -1,0 +1,115 @@
+{
+  "candidate": "intransitive_bot",
+  "reference": "intransitive_bot",
+  "pairs": 128,
+  "complete_pairs": 128,
+  "move_ms": 50,
+  "reference_move_ms": 50,
+  "reference_sims": null,
+  "sims": 0,
+  "forfeits": 0,
+  "bootstrap_interval": [
+    0.02734375,
+    0.078125
+  ],
+  "wins": 13,
+  "draws": 243,
+  "losses": 0,
+  "margin": 0.05078125,
+  "interval": [
+    0.024512776144663746,
+    0.07704972385533626
+  ],
+  "mean_plies": 195.9765625,
+  "sequential": {
+    "protocol": {
+      "openings_sha256": "49379ddf8833db7fcaa00e718b7d51c52f3e601b7c187a35ddb5eabffa3f8a82",
+      "provenance": {
+        "candidate": {
+          "binary": {
+            "path": "\\\\?\\D:\\intransitive_bot_research\\.claude\\worktrees\\astra15\\target\\release\\deps\\c1_fixture-24428ede3c2504b8.exe",
+            "sha256": "f98039240b1fcf614c0dc7acd964d810e7285ed64337a52d9241a6d120ff2a38"
+          },
+          "network": {
+            "path": "\\\\?\\D:\\intransitive_bot_research\\.claude\\worktrees\\astra15\\models\\nnue\\tests\\fixtures\\format8_h32.nnue",
+            "sha256": "8c30fc8a3aba6f0b5e468e8e694619b018d1ab01407911452dc905ae6cdfd732"
+          },
+          "spec": "scripted:first-except-every-sixteenth-game-last"
+        },
+        "coordinator": {
+          "path": "\\\\?\\D:\\intransitive_bot_research\\.claude\\worktrees\\astra15\\target\\release\\deps\\c1_fixture-24428ede3c2504b8.exe",
+          "sha256": "f98039240b1fcf614c0dc7acd964d810e7285ed64337a52d9241a6d120ff2a38"
+        },
+        "fixture": "Scripted legal-index players; network files identify real fixture artifacts, are never evaluated, and imply no model strength result.",
+        "logical_cpus": [
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "player_threads": 1,
+        "reference": {
+          "binary": {
+            "path": "\\\\?\\D:\\intransitive_bot_research\\.claude\\worktrees\\astra15\\target\\release\\deps\\c1_fixture-24428ede3c2504b8.exe",
+            "sha256": "f98039240b1fcf614c0dc7acd964d810e7285ed64337a52d9241a6d120ff2a38"
+          },
+          "network": {
+            "path": "\\\\?\\D:\\intransitive_bot_research\\.claude\\worktrees\\astra15\\models\\nnue\\tests\\fixtures\\format6_h32.nnue",
+            "sha256": "831e3bee64cc7f814d01d8ff231269e418b623a8ab9903d4156d1fbf711fec83"
+          },
+          "spec": "scripted:first"
+        },
+        "version": "scripted-c1-fixture-v1"
+      },
+      "schema": 1,
+      "settings": {
+        "capture_clock": 200,
+        "move_ms": 50,
+        "opening_plies": 2,
+        "pairs": 3008,
+        "reference_move_ms": null,
+        "reference_sims": null,
+        "seed": 2026091225,
+        "sims": 32,
+        "stream": false,
+        "workers": 1
+      },
+      "test": {
+        "alpha": 0.05,
+        "batch": 16,
+        "beta": 0.05,
+        "cap": 3008,
+        "first_check": 128,
+        "lower_bound": -2.9444389791664403,
+        "method": "pentanomial_expectation_mle",
+        "s0": 0.5,
+        "s1": 0.52,
+        "scores": [
+          0.0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "upper_bound": 2.9444389791664403,
+        "zero_cell": 0.001
+      }
+    },
+    "protocol_digest": "f1177c0ce12d1fb1cbee54768ed6582a64609a0644cb051f7360f84c9acd9ef9",
+    "counts": [
+      0,
+      0,
+      115,
+      13,
+      0
+    ],
+    "llr": 4.887524360359544,
+    "stop_reason": "accept",
+    "error": null,
+    "intervals_descriptive_only": true
+  }
+}
