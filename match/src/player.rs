@@ -78,11 +78,6 @@ pub trait Player {
         true
     }
 
-    /// Enable model-specific leaf collection; unsupported players reject it.
-    fn set_leaves(&mut self, _path: &std::path::Path) -> anyhow::Result<()> {
-        anyhow::bail!("this player cannot collect leaves")
-    }
-
     /// Additional search telemetry for algorithms without Gumbel visits.
     fn search_details(&self) -> Option<serde_json::Value> {
         None
@@ -122,9 +117,6 @@ pub trait Player {
 impl Player for Box<dyn Player> {
     fn supports_clock(&self, clock: Clock) -> bool {
         (**self).supports_clock(clock)
-    }
-    fn set_leaves(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
-        (**self).set_leaves(path)
     }
     fn search_details(&self) -> Option<serde_json::Value> {
         (**self).search_details()

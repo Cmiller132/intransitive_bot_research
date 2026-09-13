@@ -158,7 +158,6 @@ fn rules_hash() -> String {
         include_bytes!("../../engine/src/rules.rs").as_slice(),
         include_bytes!("../../engine/src/board.rs"),
         include_bytes!("../../engine/src/tactics.rs"),
-        include_bytes!("../../engine/src/race.rs"),
         include_bytes!("../../engine/src/notation.rs"),
     ] {
         let source = String::from_utf8_lossy(source).replace("\r\n", "\n");

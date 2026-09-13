@@ -10,18 +10,14 @@ pub enum Zone {
     Movegen,
     Ordering,
     Table,
-    RaceQuery,
-    RaceRows,
 }
-const NAMES: [&str; 8] = [
+const NAMES: [&str; 6] = [
     "accumulator_update",
     "dense_head",
     "linear_readout",
     "move_generation",
     "move_ordering",
     "table",
-    "race_query",
-    "race_rows",
 ];
 #[derive(Clone, Copy, Default)]
 struct Counter {
@@ -30,7 +26,7 @@ struct Counter {
     nanos: u128,
 }
 thread_local! {
-    static COUNTERS: RefCell<[Counter; 8]> = const { RefCell::new([Counter { calls: 0, samples: 0, nanos: 0 }; 8]) };
+    static COUNTERS: RefCell<[Counter; 6]> = const { RefCell::new([Counter { calls: 0, samples: 0, nanos: 0 }; 6]) };
 }
 
 /// Times one call in 64, avoiding a clock read on the other calls.

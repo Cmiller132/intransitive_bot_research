@@ -104,6 +104,22 @@ unchanged, everything around them is rebuilt.
     quiescence over captures and goal approaches with goal-threat evasions,
     and lazy SMP over a shared table (four threads at the site). Iteration
     stops when 72 % of the budget is spent.
+
+    Quiescence TT probe/store uses the existing board/capture-clock key and
+    table. Negative depth tags match the exact tactical budget and root ply
+    (the safety frontier); positive depths remain full-search bounds. Quiet
+    goal approaches require budget >=5, while goal evasions extend beyond
+    zero, so different horizons cannot share cutoffs. Stop, immediate wins
+    and the frontier precede probing; interrupted ancestors never store a
+    bound. Fail-soft bounds use the original window and normalised mate
+    distance. Hash moves only order the existing legal tactical subset.
+    Current-generation full-search entries survive quiescence stores; all
+    negative tags have equal replacement priority. No entry-size increase.
+    Unit tests cover bounds, horizons, clocks, evasions, interruption,
+    replacement and fixed-node signatures on the dense/race fixture nets.
+    Strength remains unmeasured; runs/nnue_gauntlets/c2_qtt/experiment.json
+    preregisters the 50-ms paired sequential test after the A1 compute lock
+    is released and the frozen-build/runner gates pass.
 12. Exact tactics from `engine::tactics`: wins at once and loses in two in
     every move loop, wins in three at the root; mate scores are separate
     from evaluation scores and a win precedes a clock draw; quiescence never
@@ -492,6 +508,11 @@ unchanged, everything around them is rebuilt.
     against 348-350 ms per 8,192-row step on eight threads); over 2 M gen3
     rows the full context (two or more of each type) holds 40.6 % of the
     perspectives and seven contexts fall under 0.5 %, which the shared
-    factor covers. The Rust reader, the context refresh and the gate (at
-    least 95 % of format 6 nodes per second) are Astra's; parity fixtures
-    in tests/fixtures/format8_*, kept in step by py/tests/test_fixtures.py.
+    factor covers. Rust reads versions 6/8 with shared strict validation.
+    Exact counts travel through pending states; halves resolve independently
+    only to their last context change, refreshing from bias and active rows
+    into reused vectors. Diagnose reports materialisations, context changes,
+    updates, discarded halves and timed row work with explicit denominators.
+    Shared parity fixtures in tests/fixtures/format8_* cover 512 positions
+    and 2,986 legal plies, kept in step by py/tests/test_fixtures.py. The
+    throughput gate (at least 95 % of format 6 nodes/s) remains required.

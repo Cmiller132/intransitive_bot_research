@@ -18,6 +18,9 @@ pub struct Position {
     pub ply: u32,
     pub clock: u32,
     pub raw: Option<f64>,
+    pub raw6: Option<f64>,
+    pub context: Option<[usize; 2]>,
+    pub ids: Option<[Vec<usize>; 2]>,
 }
 
 impl Position {
@@ -65,6 +68,7 @@ pub fn run(
     #[cfg(feature = "profile")]
     let profile_timer_ns = crate::profile::calibrate();
     let mut search = SearchPool::new(64, threads);
+    search.enable_accumulator_metrics();
     let mut count = 0;
     for (row, line) in input.lines().enumerate() {
         let request: Position =
@@ -72,9 +76,62 @@ pub fn run(
         let state = request.state().with_context(|| format!("row {row}"))?;
         let acc = model.refresh(&state.board, state.since_capture, request.clock);
         let raw = model.raw(&acc);
-        if let Some(expected) = request.raw {
+        let contexts = acc.contexts();
+        let ids = model.feature_ids(&state.board, state.since_capture, request.clock);
+        if let Some(expected) = request.context {
+            ensure!(expected == contexts, "context mismatch at row {row}");
+        }
+        if let Some(expected) = &request.ids {
+            for side in 0..2 {
+                ensure!(
+                    expected[side].len() == 42,
+                    "expected 42 feature slots at row {row}"
+                );
+                ensure!(
+                    expected[side].iter().all(|&id| id <= 13640),
+                    "invalid feature id at row {row}"
+                );
+                let mut expected: Vec<_> = expected[side]
+                    .iter()
+                    .copied()
+                    .filter(|&id| id != 13640)
+                    .collect();
+                expected.sort_unstable();
+                ensure!(
+                    expected.windows(2).all(|v| v[0] != v[1]),
+                    "duplicate feature at row {row}"
+                );
+                let mut actual: Vec<_> = ids[side]
+                    .iter()
+                    .copied()
+                    .filter(|&id| id != model.features)
+                    .map(|id| {
+                        if model.features == 1004 {
+                            if id < 486 {
+                                id + 486 * contexts[side]
+                            } else {
+                                id + 12636
+                            }
+                        } else {
+                            id
+                        }
+                    })
+                    .collect();
+                actual.sort_unstable();
+                ensure!(
+                    actual == expected,
+                    "feature ids mismatch at row {row}, half {side}"
+                );
+            }
+        }
+        let expected = if model.features == 1004 {
+            request.raw6.or(request.raw)
+        } else {
+            request.raw
+        };
+        if let Some(expected) = expected {
             ensure!(
-                expected.is_finite() && (raw - expected).abs() <= 1e-6,
+                expected.is_finite() && (raw - expected).abs() <= 1e-12,
                 "reference raw mismatch at row {row}: {raw} != {expected}"
             );
         }
@@ -101,7 +158,7 @@ pub fn run(
                 children += 1;
             }
         }
-        let mut response = serde_json::json!({"row":row,"raw":raw,"score":model.evaluate(&acc),"incremental_children":children});
+        let mut response = serde_json::json!({"row":row,"raw":raw,"score":model.evaluate(&acc),"context":contexts,"ids":ids.map(|ids| ids.to_vec()),"incremental_children":children});
         if let Some(nodes) = nodes {
             ensure!(
                 request.clock == 200,
@@ -130,6 +187,7 @@ pub fn run(
             response["depth"] = serde_json::json!(r.depth);
             response["nodes"] = serde_json::json!(r.nodes);
             response["qnodes"] = serde_json::json!(r.qnodes);
+            response["accumulator"] = serde_json::to_value(search.accumulator_metrics())?;
             response["elapsed_ms"] = serde_json::json!(r.elapsed.as_secs_f64() * 1000.);
             response["aborted"] = serde_json::json!(r.aborted);
             response["partial"] = serde_json::json!(r.partial);

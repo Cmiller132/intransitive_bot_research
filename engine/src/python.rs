@@ -94,12 +94,5 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(legal_mask, m)?)?;
     m.add_function(wrap_pyfunction!(apply, m)?)?;
     m.add_function(wrap_pyfunction!(tactics, m)?)?;
-    m.add_function(wrap_pyfunction!(race_buckets, m)?)?;
     Ok(())
-}
-
-/// Mover/opponent runner distance buckets: 0..7 = 1..8 own moves, 8 = none.
-#[pyfunction]
-fn race_buckets(board: Vec<u8>) -> PyResult<(u8, u8)> {
-    Ok(crate::race::race_buckets(&state_from(board, 0, 0)?.board))
 }

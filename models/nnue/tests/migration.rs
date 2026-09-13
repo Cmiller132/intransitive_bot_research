@@ -1,22 +1,24 @@
 use std::time::Duration;
 
 use engine::{apply, from_codes, Outcome, Rules, State};
-use nnue::net::{convert_v3, Accumulator, Model, FILE_SIZE};
+use nnue::net::{Accumulator, Model};
 use nnue::search::{Limits, SearchPool, Searcher};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-fn prototype() -> Vec<u8> {
+fn fixture6() -> Vec<u8> {
     let mut bytes = b"RPSNNUE1".to_vec();
-    for n in [3u32, 972, 512, 255, 64] {
+    for n in [6u32, 1004, 512, 255, 64] {
         bytes.extend(n.to_le_bytes());
     }
     bytes.extend(600f32.to_le_bytes());
+    bytes.extend(1u32.to_le_bytes());
     for _ in 0..512 {
         bytes.extend(96i16.to_le_bytes());
     }
     for i in 0..972 * 512 {
         bytes.extend((((i * 13 + i / 512 * 7) % 31) as i16 - 15).to_le_bytes());
     }
+    bytes.resize(bytes.len() + 32 * 512 * 2, 0);
     for i in 0..1024 {
         bytes.extend((((i * 17) % 15) as i16 - 7).to_le_bytes());
     }
@@ -35,39 +37,7 @@ fn prototype() -> Vec<u8> {
 }
 
 fn model() -> Model {
-    Model::from_bytes(&convert_v3(&prototype()).unwrap()).unwrap()
-}
-
-#[test]
-fn conversion_preserves_payload_and_rejects_other_schemas() {
-    let source = prototype();
-    let bytes = convert_v3(&source).unwrap();
-    assert_eq!(bytes.len(), FILE_SIZE);
-    assert_eq!(&bytes[36..1060], &source[32..1056]);
-    assert_eq!(&bytes[1060..996388], &source[1056..996384]);
-    assert!(bytes[996388..1029156].iter().all(|&b| b == 0));
-    assert_eq!(&bytes[1029156..], &source[996384..]);
-    for (offset, value) in [
-        (8, 3u32),
-        (12, 972),
-        (16, 1024),
-        (20, 256),
-        (24, 65),
-        (32, 4),
-        (1031208, 16),
-    ] {
-        let mut bad = bytes.clone();
-        bad[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        assert!(Model::from_bytes(&bad).is_err());
-    }
-    assert!(Model::from_bytes(&bytes[..100]).is_err());
-    let mut bad = bytes.clone();
-    bad.push(0);
-    assert!(Model::from_bytes(&bad).is_err());
-    let mut bad = bytes;
-    bad[996388] = 1;
-    assert!(Model::from_bytes(&bad).is_ok());
-    assert!(convert_v3(&bad).is_err());
+    Model::from_bytes(&fixture6()).unwrap()
 }
 
 #[test]
@@ -187,65 +157,10 @@ fn shared_table_search_and_pv_stay_legal() {
 }
 
 #[test]
-fn leaf_paths_replay_to_the_recorded_evaluation() {
-    for model in [
-        model(),
-        Model::from_bytes(include_bytes!("fixtures/h256_race.nnue")).unwrap(),
-    ] {
-        let path =
-            std::env::temp_dir().join(format!("nnue-leaf-test-{}.jsonl", std::process::id()));
-        let mut pool = SearchPool::new(1, 1);
-        pool.set_leaves(&path).unwrap();
-        pool.search(
-            &model,
-            &State::initial(),
-            None,
-            Limits {
-                nodes: 1000,
-                depth: 2,
-                time: Duration::from_secs(5),
-            },
-        );
-        assert!(pool.leaf_error().is_none());
-        drop(pool);
-        let records = std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(path).unwrap();
-        assert!(!records.is_empty());
-        for line in records.lines() {
-            let v: serde_json::Value = serde_json::from_str(line).unwrap();
-            let mut state = State::initial();
-            for a in v["path"].as_array().unwrap() {
-                let (child, end) = apply(&Rules::SITE, &state, a.as_u64().unwrap() as u16);
-                assert_eq!(end, Outcome::Ongoing);
-                state = child;
-            }
-            assert_eq!(
-                serde_json::json!(engine::codes(&state.board).as_slice()),
-                v["board"]
-            );
-            assert_eq!(
-                state.since_capture as u64,
-                v["since_capture"].as_u64().unwrap()
-            );
-            assert!(
-                (model.raw(&model.refresh(&state.board, state.since_capture, 200))
-                    - v["raw"].as_f64().unwrap())
-                .abs()
-                    < 1e-12
-            );
-            assert_eq!(
-                model.evaluate(&model.refresh(&state.board, state.since_capture, 200)),
-                v["score"].as_i64().unwrap() as i32
-            );
-        }
-    }
-}
-
-#[test]
 fn player_maps_simulations_to_nodes_on_one_worker() {
     use r#match::{Clock, History, Player};
     let path = std::env::temp_dir().join(format!("nnue-player-test-{}.nnue", std::process::id()));
-    std::fs::write(&path, convert_v3(&prototype()).unwrap()).unwrap();
+    std::fs::write(&path, fixture6()).unwrap();
     let player = nnue::NnuePlayer::load(path.to_str().unwrap(), 4);
     std::fs::remove_file(path).unwrap();
     let mut player = player.unwrap();
@@ -307,91 +222,6 @@ fn clock_rows_match_refresh_at_every_boundary_and_capture() {
                 assert_eq!(model.raw(&next), model.raw_scalar(&next));
             }
         }
-    }
-}
-
-fn bucket_model() -> Model {
-    let one = convert_v3(&prototype()).unwrap();
-    let mut bytes = one[..1029156].to_vec();
-    bytes[32..36].copy_from_slice(&4u32.to_le_bytes());
-    for k in 1..=4i16 {
-        for pair in one[1029156..1031204].chunks_exact(2) {
-            bytes.extend((i16::from_le_bytes(pair.try_into().unwrap()) * k).to_le_bytes());
-        }
-    }
-    for k in 0..4i32 {
-        bytes.extend((64 * k).to_le_bytes());
-    }
-    bytes.extend(&one[1031208..1064108]);
-    for k in 1..=4i16 {
-        for pair in one[1064108..].chunks_exact(2) {
-            bytes.extend((i16::from_le_bytes(pair.try_into().unwrap()) * k).to_le_bytes());
-        }
-    }
-    assert_eq!(bytes.len(), 1_070_520);
-    let model = Model::from_bytes(&bytes).unwrap();
-    bytes.pop();
-    assert!(Model::from_bytes(&bytes).is_err());
-    model
-}
-
-#[test]
-fn buckets_select_all_three_readouts_and_change_on_capture() {
-    let model = bucket_model();
-    let mut avx2 = model.clone();
-    avx2.disable_vnni();
-    for count in 2..=20usize {
-        let mut codes = [0; 81];
-        codes[40] = 1;
-        codes[41] = 6;
-        for (i, cell) in codes[10..10 + count - 2].iter_mut().enumerate() {
-            *cell = if i % 2 == 0 { 1 } else { 4 };
-        }
-        let state = State {
-            board: from_codes(&codes).unwrap(),
-            since_capture: 159,
-            ply: 159,
-        };
-        let acc = model.refresh(&state.board, state.since_capture, 200);
-        let bucket = match count {
-            2..=4 => 0,
-            5..=8 => 1,
-            9..=12 => 2,
-            _ => 3,
-        };
-        let mut single = Model::from_bytes(&convert_v3(&prototype()).unwrap()).unwrap();
-        single
-            .output
-            .copy_from_slice(&model.output[bucket * 1024..(bucket + 1) * 1024]);
-        single.output_bias[0] = model.output_bias[bucket];
-        single
-            .dense
-            .as_mut()
-            .unwrap()
-            .output
-            .copy_from_slice(&model.dense.as_ref().unwrap().output[bucket * 32..(bucket + 1) * 32]);
-        assert_eq!(model.raw(&acc), single.raw(&acc));
-        assert_eq!(model.raw(&acc), model.raw_scalar(&acc));
-        assert_eq!(model.raw(&acc), avx2.raw(&acc));
-        let capture = state
-            .legal_actions()
-            .into_iter()
-            .find(|&a| engine::from_to(a) == (40, 41))
-            .unwrap();
-        let (child, _) = apply(&Rules::SITE, &state, capture);
-        let mut updated = Accumulator::empty(512);
-        model.update(
-            &acc,
-            &state.board,
-            capture,
-            child.since_capture,
-            &mut updated,
-        );
-        assert_eq!(
-            updated,
-            model.refresh(&child.board, child.since_capture, 200)
-        );
-        assert_eq!(model.raw(&updated), model.raw_scalar(&updated));
     }
 }
 
@@ -469,23 +299,6 @@ fn python_h768_export_matches_oracle_and_incremental_trajectory() {
     assert_thousand_move_trajectory(&model);
 }
 
-#[test]
-fn python_format7_export_matches_oracle_and_incremental_trajectory() {
-    // Written by nnue.export from a random H256/B4 network with nonzero race
-    // rows; the positions carry integer_eval's raw values, which the
-    // diagnostic checks against the Rust evaluation.
-    let model = Model::from_bytes(include_bytes!("fixtures/h256_race.nnue")).unwrap();
-    assert_eq!(
-        (model.features, model.hidden, model.buckets),
-        (1022, 256, 4)
-    );
-    let fixture = include_str!("fixtures/h256_race_positions.jsonl");
-    let mut output = Vec::new();
-    nnue::diagnostic::run(&model, fixture.as_bytes(), &mut output, None, 1).unwrap();
-    assert_eq!(String::from_utf8(output).unwrap().lines().count(), 60);
-    assert_thousand_move_trajectory(&model);
-}
-
 fn width_fixture(hidden: usize, buckets: usize) -> Vec<u8> {
     let mut bytes = b"RPSNNUE1".to_vec();
     for value in [6, 1004, hidden as u32, 255, 64] {
@@ -519,9 +332,9 @@ fn width_fixture(hidden: usize, buckets: usize) -> Vec<u8> {
 }
 
 #[test]
-fn width_and_bucket_dimensions_are_dynamic_and_lengths_are_strict() {
-    for hidden in [32, 256, 384, 512, 768, 1024, 1056, 2080] {
-        let bytes = width_fixture(hidden, 4);
+fn supported_widths_and_lengths_are_strict() {
+    for hidden in [32, 256, 384, 512, 768, 1024] {
+        let bytes = width_fixture(hidden, 1);
         let model = Model::from_bytes(&bytes).unwrap();
         assert_eq!(model.hidden, hidden);
         let mut avx2 = model.clone();
@@ -552,7 +365,7 @@ fn width_and_bucket_dimensions_are_dynamic_and_lengths_are_strict() {
         let mut bad = bytes.clone();
         bad.push(0);
         assert!(Model::from_bytes(&bad).is_err());
-        for width in [0u32, 31, 33, u32::MAX] {
+        for width in [0u32, 31, 33, 1056, 2080, u32::MAX] {
             let mut bad = bytes.clone();
             bad[16..20].copy_from_slice(&width.to_le_bytes());
             assert!(Model::from_bytes(&bad).is_err());

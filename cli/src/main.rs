@@ -3,7 +3,7 @@
 mod selfplay;
 mod sequential;
 
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader};
 use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Result};
@@ -29,7 +29,7 @@ struct Cli {
 enum Command {
     /// Generate resumable, CPU-only NNUE self-play datasets, or audit their replay.
     Selfplay(selfplay::Args),
-    /// NNUE migration conversion, parity validation and fixed-node diagnostics.
+    /// NNUE file validation and fixed-node diagnostics.
     Nnue {
         #[command(subcommand)]
         command: NnueCommand,
@@ -75,9 +75,6 @@ enum Command {
     },
     /// One game between two players, printed as JSON.
     Play {
-        /// Collect evaluated leaves from the first player only.
-        #[arg(long)]
-        leaves: Option<PathBuf>,
         #[arg(long)]
         first: String,
         #[arg(long)]
@@ -144,12 +141,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum NnueCommand {
-    Convert {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-    },
     Validate {
         #[arg(long)]
         model: PathBuf,
@@ -179,17 +170,6 @@ fn move_clock(sims: Option<u32>, ms: Option<u64>) -> Result<Clock> {
 }
 fn nnue_command(command: NnueCommand) -> Result<()> {
     match command {
-        NnueCommand::Convert { input, output } => {
-            let bytes =
-                nnue::net::convert_v3(&std::fs::read(input)?).map_err(anyhow::Error::msg)?;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(output)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            println!("{}", serde_json::json!({"format":6,"bytes":bytes.len()}));
-        }
         NnueCommand::Validate { model, input } => {
             let model = nnue::Model::load(model).map_err(anyhow::Error::msg)?;
             nnue::diagnostic::run(
@@ -315,7 +295,6 @@ fn main() -> Result<()> {
             sims,
             move_ms,
             player_threads,
-            leaves,
             seed,
             opening_plies,
             random_moves,
@@ -344,9 +323,7 @@ fn main() -> Result<()> {
                 a.supports_clock(clock) && b.supports_clock(clock),
                 "player rejects simulation budgets; use --move-ms"
             );
-            if let Some(path) = leaves {
-                a.set_leaves(&path)?;
-            }
+
             let mut rng = StdRng::seed_from_u64(seed);
             let opening = Opening::random(&Rules::SITE, opening_plies, &mut rng);
             let record = play_with_random_moves(
