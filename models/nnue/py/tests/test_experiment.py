@@ -784,6 +784,20 @@ def test_a_cleanup_that_cannot_be_proved_stops_the_run_and_keeps_the_reservation
     experiment.lock_release("experiment", os.getpid())
 
 
+def test_launch_takes_the_report_event_of_a_streamed_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    script = (
+        'print(\'{"event": "start", "pair": 0, "game": 0}\')\n'
+        'print(\'{"event": "move", "pair": 0, "game": 0}\')\n'
+        'print(\'{"event": "end", "pair": 0, "game": 0}\')\n'
+        'print(\'{"event": "report", "pairs": 1, "wins": 1, "sequential": {"stop_reason": "running"}}\')\n'
+    )
+    with (tmp_path / "err").open("w") as err:
+        report, events, code = experiment.launch([sys.executable, "-c", script], err)
+    assert code == 0 and report == {"pairs": 1, "wins": 1, "sequential": {"stop_reason": "running"}}
+    assert [e["event"] for _, e in events] == ["start", "end"]
+
+
 def test_launch_kills_the_process_tree_on_an_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     pid_file = tmp_path / "grandchild"
