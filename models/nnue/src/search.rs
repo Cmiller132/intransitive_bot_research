@@ -17,9 +17,12 @@ pub const MATE: i32 = 30_000;
 pub const INF: i32 = 32_000;
 pub const MAX_PLY: usize = 120;
 const NO_MOVE: u16 = u16::MAX;
+const CAPTURE_HISTORY_SIZE: usize = 2 * 3 * 81 * 3;
 
 #[cfg(test)]
 mod accumulator_tests;
+#[cfg(test)]
+mod capture_history_tests;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -218,6 +221,7 @@ pub struct Searcher {
     generation: u8,
     killers: [[u16; 2]; MAX_PLY + 2],
     history: [[i32; 648]; 2],
+    capture_history: [i32; CAPTURE_HISTORY_SIZE],
     acc: Vec<Accumulator>,
     pending: Vec<Option<Pending>>,
     metrics: Option<AccumulatorMetrics>,
@@ -395,6 +399,7 @@ impl Searcher {
             generation: 0,
             killers: [[NO_MOVE; 2]; MAX_PLY + 2],
             history: [[0; 648]; 2],
+            capture_history: [0; CAPTURE_HISTORY_SIZE],
             acc: Vec::new(),
             pending: vec![None; MAX_PLY + 2],
             metrics: None,
@@ -421,6 +426,7 @@ impl Searcher {
     fn clear_heuristics(&mut self) {
         self.generation = 0;
         self.history = [[0; 648]; 2];
+        self.capture_history.fill(0);
         self.killers.fill([NO_MOVE; 2]);
     }
     pub fn set_stop_signal(&mut self, signal: Arc<AtomicU64>, epoch: u64) {
@@ -451,6 +457,9 @@ impl Searcher {
             for value in side {
                 *value /= 2;
             }
+        }
+        for value in &mut self.capture_history {
+            *value /= 2;
         }
         if self.acc.len() != MAX_PLY + 2
             || self.acc.first().is_none_or(|a| a.own.len() != model.hidden)
@@ -869,6 +878,7 @@ impl Searcher {
             }
             alpha = alpha.max(score);
             if alpha >= beta {
+                self.update_captures(state, action, &actions[..move_index], depth);
                 if quiet {
                     if self.killers[ply][0] != action {
                         self.killers[ply][1] = self.killers[ply][0];
@@ -1116,6 +1126,19 @@ impl Searcher {
         }
     }
 
+    /// Train captures only from completed main-search cutoffs and searched alternatives.
+    fn update_captures(&mut self, state: &State, winner: u16, searched: &[u16], depth: i32) {
+        let bonus = (depth * depth * 32).min(1600);
+        if let Some(index) = capture_history_index(state, winner) {
+            history_update(&mut self.capture_history[index], bonus);
+        }
+        for &action in searched {
+            if let Some(index) = capture_history_index(state, action) {
+                history_update(&mut self.capture_history[index], -bonus);
+            }
+        }
+    }
+
     fn order(&mut self, state: &State, actions: &mut [u16], tt_move: u16, ply: usize) {
         self.order_using(state, actions, tt_move, ply, None);
     }
@@ -1146,7 +1169,10 @@ impl Searcher {
             if self.killers[ply][1] == action {
                 score += 50_000;
             }
-            score += history[action as usize];
+            score += capture_history_index(state, action)
+                .map_or(history[action as usize], |index| {
+                    self.capture_history[index]
+                });
             if self.worker_id != 0 {
                 score += (mix(action as u64 ^ self.worker_id.wrapping_mul(0x9e3779b97f4a7c15)) % 97)
                     as i32
@@ -1183,6 +1209,19 @@ impl Searcher {
             self.stopped = true;
         }
         self.stopped
+    }
+}
+
+/// Piece types and destination use the mover's canonical frame; side is absolute.
+fn capture_history_index(state: &State, action: u16) -> Option<usize> {
+    let (from, to) = action_from_to(action);
+    match (state.board[from], state.board[to]) {
+        (Cell::Own(attacker), Cell::Enemy(victim)) => Some(
+            (((state.ply as usize & 1) * 3 + attacker.code() as usize - 1) * 81 + to) * 3
+                + victim.code() as usize
+                - 1,
+        ),
+        _ => None,
     }
 }
 
@@ -1638,9 +1677,9 @@ mod generation_tests {
     fn fixture_fixed_node_signatures_are_repeatable() {
         const DENSE: &[u8] = include_bytes!("../tests/fixtures/h768_dense.nnue");
         let golden = [vec![
-            (Some(604), 29, 2, 4000, 3643, Some((516, 36, 2))),
+            (Some(604), 29, 2, 4000, 3624, Some((516, 36, 2))),
             (Some(576), -39, 3, 4000, 3543, Some((576, -39, 3))),
-            (Some(348), -41, 2, 4000, 3841, Some((348, -41, 2))),
+            (Some(348), -41, 2, 4000, 3835, Some((348, -41, 2))),
             (Some(588), 13, 2, 4000, 3660, Some((507, -42, 2))),
         ]];
         for (bytes, golden) in [DENSE].into_iter().zip(golden) {
