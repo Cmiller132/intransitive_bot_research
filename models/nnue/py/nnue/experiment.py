@@ -603,9 +603,9 @@ def read_lines(stream, lines: queue.Queue) -> None:
 
 
 def launch(command: list[str], err, events: list | None = None) -> tuple[dict | None, list[tuple[float, dict]], int]:
-    """Runs `bot eval` inside its own job: its report (the last stdout line
-    without an `event`, or the `report` event that ends a streamed run,
-    without that key), the streamed start/end events stamped with the
+    """Runs `bot eval` inside its own job: its report (the pretty-printed
+    document a fixed-count run ends with, or the `report` event that ends a
+    streamed run, without that key), the streamed start/end events stamped with the
     monotonic time of their receipt (appended to `events` as they come, so an
     interruption leaves them with the caller), and the exit code. However the
     run ends, the job is terminated: an exception kills the tree before it
@@ -636,6 +636,7 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
         lines: queue.Queue = queue.Queue()
         reader = threading.Thread(target=read_lines, args=(process.stdout, lines), daemon=True)
         reader.start()
+        pending = None  # the lines of a pretty-printed report until they parse
         while True:
             try:
                 item = lines.get(timeout=0.5)
@@ -650,7 +651,15 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
             at, line = item
             if not line.strip():
                 continue
-            entry = json.loads(line)
+            text = (pending or "") + line
+            try:
+                entry = json.loads(text)
+            except json.JSONDecodeError:
+                if pending is None and not line.lstrip().startswith("{"):
+                    raise ValueError(f"bot eval printed {line.strip()[:80]!r}") from None
+                pending = text
+                continue
+            pending = None
             if not isinstance(entry, dict):
                 raise ValueError(f"bot eval printed {line.strip()[:80]!r}")
             if "event" not in entry:
@@ -659,6 +668,8 @@ def launch(command: list[str], err, events: list | None = None) -> tuple[dict | 
                 report = {k: v for k, v in entry.items() if k != "event"}
             elif entry["event"] in ("start", "end"):
                 events.append((at, entry))
+        if pending is not None:
+            raise ValueError(f"bot eval's output ended inside {pending.strip()[:80]!r}")
         try:
             code = process.wait(timeout=EXIT_GRACE)
         except subprocess.TimeoutExpired:
