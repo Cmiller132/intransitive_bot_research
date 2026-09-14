@@ -246,7 +246,7 @@ pub struct SearchPool {
 
 impl SearchPool {
     pub fn new(hash_mb: usize, threads: usize) -> Self {
-        let threads = threads.clamp(1, 8);
+        let threads = threads.clamp(1, 6);
         let bytes = hash_mb.clamp(1, 2048) * 1024 * 1024;
         let shared = if threads > 1 {
             Some(Table::shared(bytes))
