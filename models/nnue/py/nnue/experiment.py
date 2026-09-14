@@ -45,7 +45,9 @@ checkpoint's export, `latest` the final checkpoint's, `best` the trainer's
 `best.nnue`. A match side is `<run>:<endpoint>` or a `.nnue` path, played by
 the preregistered `bot`; sides that are `.exe` paths are search builds
 (`rpsi:` seats with the match's player threads, both sides so the process
-overhead is equal) playing the experiment's `network`. A match with
+overhead is equal) playing the experiment's `network`, or the side's own
+`candidate_network` / `reference_network` when the match names one (a search
+build and a network against another pair; pinned like every input). A match with
 `"sprt": true` is the sequential test of `bot eval --sprt` (journal
 `<tag>.jsonl`, resumed when it exists, stopped by its own rule, streamed so
 that `<tag>.timing.json` records each invocation's pairs, wall time and the
@@ -185,6 +187,10 @@ def fixed_inputs(experiment: dict) -> list[Path]:
     files = [absolute(experiment["bot"])]
     if experiment.get("network"):
         files.append(absolute(experiment["network"]))
+    for match in experiment.get("matches", []):
+        for role in ("candidate", "reference"):
+            if match.get(f"{role}_network"):
+                files.append(absolute(match[f"{role}_network"]))
     for arm in experiment.get("arms", []):
         spec = arm.get("train", {})
         if spec.get("init"):
@@ -361,16 +367,21 @@ def side(spec: str) -> Path:
     return endpoint_file(run, endpoint)
 
 
+def side_network(experiment: dict, match: dict, role: str) -> Path:
+    """The network an `.exe` side plays: the match's own for that side, else the experiment's."""
+    return absolute(match.get(f"{role}_network") or experiment["network"])
+
+
 def seat(experiment: dict, match: dict, role: str) -> list[str]:
     """The `bot eval` arguments of one side: a network under the preregistered
-    search, or a search build (`.exe`) playing the experiment's `network` with
+    search, or a search build (`.exe`) playing its network (`side_network`) with
     the match's player threads. The child's command is split on whitespace by
     `bot eval`, so paths with whitespace are refused; a sequential test also
     names the network so the journal hashes the shared weights."""
     file = side(match[role])
     if file.suffix != ".exe":
         return [f"--{role}", f"nnue:{file}"]
-    network = verify(experiment, absolute(experiment["network"]))
+    network = verify(experiment, side_network(experiment, match, role))
     if any(ch.isspace() for ch in f"{file}{network}"):
         raise ValueError(f"{match['tag']}: an rpsi seat cannot hold a path with whitespace ({file}, {network})")
     out = [f"--{role}", f"rpsi:{file} rpsi --player nnue:{network} --threads {match.get('player_threads', 1)}"]
@@ -414,8 +425,9 @@ def binding(experiment: dict, match: dict) -> dict:
     """What a played match is bound to: its manifest entry, the affinity it ran
     under and the hashes of the files it used."""
     files = [absolute(experiment["bot"]), side(match["candidate"]), side(match["reference"])]
-    if any(file.suffix == ".exe" for file in files[1:]):
-        files.append(absolute(experiment["network"]))
+    for role in ("candidate", "reference"):
+        if side(match[role]).suffix == ".exe":
+            files.append(side_network(experiment, match, role))
     return {
         "match": match,
         "affinity": experiment.get("affinity", "16-31"),
@@ -907,7 +919,7 @@ def expected_provenance(experiment: dict, match: dict) -> dict:
     for role in ("candidate", "reference"):
         file = side(match[role])
         if file.suffix == ".exe":
-            network = relative(absolute(experiment["network"]))
+            network = relative(side_network(experiment, match, role))
             out[role] = {"binary": pinned.get(relative(file)), "network": pinned.get(network)}
         else:
             out[role] = {"binary": out["coordinator"], "network": pinned.get(relative(file)) or sha256(file)}
@@ -1065,6 +1077,9 @@ def validate(experiment: dict) -> None:
     for tag, match in matches.items():
         if bool(match.get("sprt")) == ("pairs" in match):
             raise ValueError(f"{tag}: a sequential match has no pair count, a fixed-count match needs one")
+        for role in ("candidate", "reference"):
+            if match.get(f"{role}_network") and not match[role].endswith(".exe"):
+                raise ValueError(f"{tag}: {role}_network needs a search build (.exe) on that side")
     for rule in experiment.get("rules", []):
         sequential = rule["type"] in SEQUENTIAL_RULES
         if not sequential and rule["type"] not in FIXED_RULES:

@@ -392,6 +392,49 @@ def test_runner_trains_with_a_stop_plays_and_judges(workspace, monkeypatch):
         experiment.main(["run", str(file), "--only", "match"])
 
 
+def test_a_side_may_play_its_own_network(workspace, monkeypatch):
+    root = workspace
+    (root / "other.nnue").write_bytes(b"other weights")
+    directory = root / "runs" / "nnue_gauntlets" / "mixed"
+    directory.mkdir(parents=True)
+    spec = manifest(root)
+    spec["arms"] = []
+    mixed = {"candidate": "patch.exe", "candidate_network": "other.nnue", "reference": "base.exe"}
+    spec["matches"] = [
+        {"tag": "mixed", **mixed, "move_ms": 100, "pairs": 2, "seed": 5},
+        {"tag": "mixedq", **mixed, "move_ms": 50, "sprt": True, "seed": 6},
+    ]
+    spec["rules"] = [
+        {"name": "bar", "type": "score_at_least", "threshold": 0.5, "matches": ["mixed"]},
+        {"name": "patch", "type": "sprt_accept", "matches": ["mixedq"]},
+    ]
+    spec["identities"] = experiment.identities(spec)
+    assert {"other.nnue", "net.nnue", "patch.exe", "base.exe", "bot.exe"} <= set(spec["identities"])
+    file = directory / "experiment.json"
+    file.write_text(json.dumps(spec), encoding="utf-8")
+    calls: list = []
+    outcomes = {"mixed": (2, 1, 1), "mixedq": ([10, 30, 60, 40, 20], "accept")}
+    monkeypatch.setattr(experiment, "launch", scripted_launch(calls, outcomes))
+    monkeypatch.setattr(experiment, "nice", lambda mask: None)
+    assert experiment.main(["run", str(file)]) == 0
+    for command in calls:
+        candidate = command[command.index("--candidate") + 1]
+        reference = command[command.index("--reference") + 1]
+        assert candidate.startswith("rpsi:") and "other.nnue" in candidate and "net.nnue" not in candidate
+        assert reference.startswith("rpsi:") and "net.nnue" in reference and "other.nnue" not in reference
+    sprt = next(c for c in calls if "--sprt" in c)
+    assert sprt[sprt.index("--candidate-network") + 1].endswith("other.nnue")
+    assert sprt[sprt.index("--reference-network") + 1].endswith("net.nnue")
+    verdict = json.loads((directory / "verdict.json").read_text(encoding="utf-8"))
+    assert all(m["valid"] for m in verdict["matches"]) and all(r["met"] for r in verdict["rules"])
+    stored = json.loads((directory / "mixed.match.json").read_text(encoding="utf-8"))
+    assert {"other.nnue", "net.nnue", "patch.exe", "base.exe", "bot.exe"} == set(stored["identities"])
+    bad = json.loads(file.read_text(encoding="utf-8"))
+    bad["matches"][0]["candidate"] = "arm:epoch4"
+    with pytest.raises(ValueError, match="candidate_network"):
+        experiment.validate(bad)
+
+
 def test_a_cuda_arm_is_given_the_gpu_and_a_cpu_run_is_not():
     cpu = {"arms": [{"run": "a", "train": {"config": {"device": "cpu"}}}, {"run": "b"}]}
     assert experiment.visible_devices(cpu) == "-1" and experiment.visible_devices({}) == "-1"
