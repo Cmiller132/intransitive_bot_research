@@ -399,7 +399,13 @@ def test_a_side_may_play_its_own_network(workspace, monkeypatch):
     directory.mkdir(parents=True)
     spec = manifest(root)
     spec["arms"] = []
-    mixed = {"candidate": "patch.exe", "candidate_network": "other.nnue", "reference": "base.exe"}
+    del spec["network"]  # every search build names its own network
+    mixed = {
+        "candidate": "patch.exe",
+        "candidate_network": "other.nnue",
+        "reference": "base.exe",
+        "reference_network": "net.nnue",
+    }
     spec["matches"] = [
         {"tag": "mixed", **mixed, "move_ms": 100, "pairs": 2, "seed": 5},
         {"tag": "mixedq", **mixed, "move_ms": 50, "sprt": True, "seed": 6},

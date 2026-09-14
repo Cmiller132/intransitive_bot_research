@@ -823,8 +823,9 @@ def play(experiment: dict, directory: Path, match: dict) -> dict:
     if (side(match["candidate"]).suffix == ".exe") != (side(match["reference"]).suffix == ".exe"):
         raise ValueError(f"{match['tag']}: a search build plays another search build on the shared network")
     verify(experiment, absolute(experiment["bot"]))
-    if side(match["candidate"]).suffix == ".exe":
-        verify(experiment, absolute(experiment["network"]))
+    for role in ("candidate", "reference"):
+        if side(match[role]).suffix == ".exe":
+            verify(experiment, side_network(experiment, match, role))
     report_file = directory / f"{match['tag']}.json"
     if report_file.is_file() and bound(experiment, directory, match) is None:
         loaded = json.loads(report_file.read_text(encoding="utf-8"))
