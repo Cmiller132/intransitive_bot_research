@@ -5,8 +5,8 @@
 Writes immutable initial/transition exports, channel evidence and report.json.
 The probe runs 1,000 float updates and one QAT backward without an update on
 the CPU whatever device the arms name (cpu or cuda). A widening with
-`widen_outgoing` > 0 (new readout and dense columns +-that value, seeded signs)
-replaces the width-parity gates by a bounded-deviation gate over the fixture
+`widen_outgoing` > 0 (new readout columns +-that value with seeded signs, dense
+columns zero) replaces the width-parity gates by a bounded-deviation gate over the fixture
 (`width_preflight.deviation_bound_raw` in the manifest).
 It never writes an arm checkpoint or changes the manifest.
 """
@@ -148,8 +148,9 @@ def initial_checks(base: NNUE, wide: NNUE, config: Config, ids: torch.Tensor) ->
         "preserved": preserved(base, wide),
         **(
             {
-                "outgoing_seeded": bool(torch.all(out.abs() == config.widen_outgoing))
-                and bool(torch.all(torch.round(out * QB) / QB == out))
+                "outgoing_seeded": bool(torch.all(out[:, :2].abs() == config.widen_outgoing))
+                and bool(torch.all(torch.round(out[:, :2] * QB) / QB == out[:, :2]))
+                and not bool(out[:, 2:].count_nonzero())
             }
             if seeded
             else {"zero_outgoing": not bool(out.count_nonzero())}

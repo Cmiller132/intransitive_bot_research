@@ -133,10 +133,11 @@ class NNUE(nn.Module):
         its own small seeded feature rows (so the columns differ from the first
         step on), the initial bias and, with `outgoing` 0, zero readout and
         dense columns, so the copy evaluates identically at first (DESIGN item
-        33). With `outgoing` > 0 the new readout and dense columns are
-        +-outgoing with seeded signs: a value on the served grid (1/64) carries
-        a task gradient into the new channels from the first quantised step,
-        and the copy deviates from the parent by a bounded amount."""
+        33). With `outgoing` > 0 the new readout columns are +-outgoing with
+        seeded signs (the dense columns stay zero): a value on the served grid
+        (1/64) carries a task gradient into the new channels from the first
+        quantised step, and the copy deviates from the parent by a bounded
+        amount (the dense path would amplify the seeds through the residual)."""
         if hidden <= self.hidden or hidden % 32:
             raise ValueError(f"hidden must be a larger multiple of 32 than {self.hidden}")
         wide = NNUE(hidden, self.version)
@@ -157,7 +158,7 @@ class NNUE(nn.Module):
             layer.weight[:, :old].copy_(source.weight[:, :old])
             layer.weight[:, new : new + old].copy_(source.weight[:, old:])
             layer.bias.copy_(source.bias)
-            if outgoing > 0:
+            if outgoing > 0 and name == "output":
                 for start in (old, new + old):
                     signs = torch.randint(0, 2, (layer.weight.shape[0], new - old), generator=generator) * 2 - 1
                     layer.weight[:, start : start + new - old].copy_(signs.to(layer.weight.dtype) * outgoing)

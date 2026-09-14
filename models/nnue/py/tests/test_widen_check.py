@@ -123,6 +123,11 @@ def test_seeded_outgoing_mode_gates(case):
     assert "outgoing_seeded" in result["checks"] and "zero_outgoing" not in result["checks"]
     assert all(result["checks"].values())
     with torch.no_grad():
+        seeded.dense.weight[0, base.hidden] = 1 / 64
+    broken, _ = w.initial_checks(base, seeded, config, ids)
+    assert not broken["checks"]["outgoing_seeded"]
+    with torch.no_grad():
+        seeded.dense.weight[0, base.hidden] = 0
         seeded.output.weight[0, base.hidden] = 0.02
     broken, _ = w.initial_checks(base, seeded, config, ids)
     assert not broken["checks"]["outgoing_seeded"]

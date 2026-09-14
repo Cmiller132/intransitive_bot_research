@@ -142,7 +142,10 @@ def test_widened_hidden_with_seeded_outgoing_deviates_boundedly(tmp_path):
     for name in ("output", "dense"):
         layer, source = getattr(wide, name), getattr(net, name)
         new = torch.cat([layer.weight[:, 32:64], layer.weight[:, 96:]], 1)
-        assert torch.all(new.abs() == 1 / 64) and (new > 0).any() and (new < 0).any()
+        if name == "output":
+            assert torch.all(new.abs() == 1 / 64) and (new > 0).any() and (new < 0).any()
+        else:
+            assert not new.any()
         assert torch.equal(layer.weight[:, :32], source.weight[:, :32])
         assert torch.equal(layer.weight[:, 64:96], source.weight[:, 32:])
     assert torch.equal(net.widen_hidden(64, seed=3).piece, wide.piece)  # the rows do not depend on the amplitude
