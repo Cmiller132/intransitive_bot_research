@@ -60,7 +60,7 @@ class Config:
     init: str = ""  # a .nnue file or a .pt checkpoint to start from
     resume: str = ""  # a latest.pt to continue exactly
     stop_epoch: int = 0  # stop after this many epochs (0: run to `epochs`); the schedule is unchanged
-    widen_outgoing: float = 0.0  # widening from a narrower .nnue: the new readout and dense columns are +-this (0: zero)
+    widen_outgoing: float = 0.0  # widening from a narrower init: the new readout and dense columns are +-this
 
 
 def parse(argv: list[str]) -> tuple[str, list[tuple[str, float]], Config]:
