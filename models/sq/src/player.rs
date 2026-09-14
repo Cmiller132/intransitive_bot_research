@@ -5,15 +5,17 @@ use std::time::Instant;
 
 use anyhow::Result;
 use engine::{Action, Rules, State};
-use r#match::{Clock, History, Player};
+use r#match::{Analyser, Clock, Heads, History, MoveInfo, Player};
 use rand::{rngs::StdRng, SeedableRng};
-use search::{Budget, Gumbel, Params};
+use search::{Budget, Gumbel, Info, Params};
 
 pub struct SqPlayer {
     name: String,
     net: OrtNet,
     search: Gumbel,
     rng: StdRng,
+    /// The last move chosen and the search behind it.
+    last: Option<(Action, Info)>,
 }
 
 use crate::net::OrtNet;
@@ -63,6 +65,7 @@ impl SqPlayer {
             net,
             search: Gumbel::new(params),
             rng: StdRng::seed_from_u64(settings.seed),
+            last: None,
         })
     }
 }
@@ -78,9 +81,40 @@ impl Player for SqPlayer {
             Clock::Sims(sims) => Budget::Sims(sims),
             Clock::Time(duration) => Budget::Deadline(Instant::now() + duration),
         };
+        let (action, info) =
+            self.search
+                .choose(&mut self.net, state, history, budget, &mut self.rng);
+        self.last = Some((action, info));
+        action
+    }
+
+    fn info(&self) -> Option<MoveInfo> {
+        self.last
+            .as_ref()
+            .map(|(action, info)| MoveInfo::from_search(info, *action))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Analyser for SqPlayer {
+    fn heads(&mut self, state: &State) -> Heads {
+        self.net.heads(state)
+    }
+
+    fn search(&mut self, state: &State, history: &History, sims: u32) -> Info {
+        self.search.reset();
         self.search
-            .choose(&mut self.net, state, history, budget, &mut self.rng)
-            .0
+            .choose(
+                &mut self.net,
+                state,
+                history,
+                Budget::Sims(sims),
+                &mut self.rng,
+            )
+            .1
     }
 
     fn name(&self) -> &str {

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, ensure, Context, Result};
 use engine::{State, N_ACTIONS};
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use r#match::Heads;
 use search::{Eval, Evaluator};
 use serde::Deserialize;
 
@@ -35,6 +36,8 @@ struct Cached {
     q: Vec<f32>,
     /// Mass of each action's value distribution near zero.
     draw: Vec<f32>,
+    /// Probability of each plies-to-end class.
+    tte: Vec<f32>,
     plies_left: f32,
 }
 
@@ -95,6 +98,40 @@ impl OrtNet {
         self.cache.clear();
     }
 
+    /// The raw heads for `state`, without contempt, from the mover's view;
+    /// the value is the policy-weighted Q, sq having no state value head.
+    pub fn heads(&mut self, state: &State) -> Heads {
+        if !self.cache.contains_key(state) {
+            let computed = self
+                .forward(&[state])
+                .expect("ONNX Runtime inference failed");
+            if self.cache.len() >= self.cache_limit {
+                self.cache.clear();
+            }
+            self.cache
+                .insert(state.clone(), computed.into_iter().next().expect("one row"));
+        }
+        let cached = &self.cache[state];
+        let (_, value) = improved_policy(
+            &cached.log_policy,
+            &cached.q,
+            self.meta.alpha,
+            self.meta.beta,
+        );
+        Heads {
+            legal: cached.legal.clone(),
+            policy: cached.log_policy.iter().map(|lp| lp.exp()).collect(),
+            q: cached.q.clone(),
+            value,
+            value_source: "policy_weighted_q",
+            plies_left: cached.plies_left,
+            plies_to_end: cached.tte.clone(),
+            tte_centers: self.meta.tte_centers.clone(),
+            draw: cached.draw.clone(),
+            wdl: None,
+        }
+    }
+
     /// One session run on `states`; the raw outputs restricted to legal actions.
     fn forward(&mut self, states: &[&State]) -> Result<Vec<Cached>> {
         let batch = states.len();
@@ -131,6 +168,7 @@ impl OrtNet {
                     ),
                     q: legal.iter().map(|&a| at(q, a)).collect(),
                     draw: legal.iter().map(|&a| at(draw, a)).collect(),
+                    tte: softmax(&tte[row * classes..(row + 1) * classes]),
                     plies_left: expectation(
                         &tte[row * classes..(row + 1) * classes],
                         &self.meta.tte_centers,
@@ -192,6 +230,10 @@ impl Evaluator for OrtNet {
             .map(|(state, &sign)| self.finish(&self.cache[*state], sign))
             .collect()
     }
+}
+
+fn softmax(values: &[f32]) -> Vec<f32> {
+    log_softmax(values).iter().map(|lp| lp.exp()).collect()
 }
 
 fn log_softmax(values: &[f32]) -> Vec<f32> {

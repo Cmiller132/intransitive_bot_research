@@ -61,7 +61,7 @@ pub fn run(
     nodes: Option<u64>,
     threads: usize,
 ) -> Result<()> {
-    ensure!((1..=4).contains(&threads), "threads must be in 1..=4");
+    ensure!((1..=6).contains(&threads), "threads must be in 1..=6");
     ensure!(nodes != Some(0), "nodes must be positive");
     #[cfg(feature = "profile")]
     ensure!(threads == 1, "profiling requires one search thread");

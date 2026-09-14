@@ -7,8 +7,8 @@ piece-square rows conditioned on the opponent's material, or the incumbent's
 inside a principal-variation search (partial-root selection, cached static
 evaluation, history-aware reductions, reverse and late quiet futility)
 that visits millions of positions per second. DESIGN.md holds the numbered design items. The line
-continues the prototype in the read-only workspace D:/Research/NNUE (its
-release network was the migration control, DESIGN item 4).
+continues an earlier standalone prototype (its release network was the
+migration control, DESIGN item 4).
 
 The two halves share only the feature definition and the file format:
 
@@ -185,7 +185,8 @@ is the byte-identical model-side conversion. `nnue.features` encodes 42 slots
 per perspective (20 pieces, 20 attacked pieces, two clock rows) in the
 format 8 layout; `Layout.rows` maps them onto a format 6 table. The exact
 shared contract, with the fixtures the Rust side is checked against
-(`tests/fixtures/format8_*`), is runs/nnue_plan/format8_contract.md.
+(`tests/fixtures/format8_*`), is kept with the run artifacts
+(runs/nnue_plan/format8_contract.md, untracked).
 Search carries exact counts and clocks through pending moves without evaluating
 them. Each half resolves only to its last capped-context change: a changed half
 starts from its bias and active piece, attacked and clock rows; the other half
@@ -211,10 +212,9 @@ deviation, rows from ply 16, duplicates by board and clock state dropped,
 splits by game and orbit. Measured on eight cores (logical CPUs 16-31 of
 the 7950X, below normal): about 400 games and 100k eligible roots per hour
 at 250k nodes (median completed depth 7), 210k at 100k nodes, 18k at 1M.
-The controlled training study on this data (DESIGN item 37, a null) is in
-runs/nnue_plan/selfplay_plan_final.md; the generator measurements are in
-runs/nnue_plan/astra_status19.md; the step-change programme that followed
-is runs/nnue_plan/step_plan_final.md.
+The controlled training study on this data (DESIGN item 37, a null), the
+generator measurements and the step-change programme that followed are kept
+with the run artifacts in runs/nnue_plan/ (untracked).
 
 ## Retraining on a stronger teacher
 
@@ -235,6 +235,28 @@ sh arena/upload.sh http://<arena> nnue_1 rpsi:./run.sh --replace <seat.tar.gz>; 
 
 Selection is by games only: a lower validation loss has not predicted a
 gauntlet win here.
+
+## Henhen site bot
+
+`Vlad_NNUE` on https://rps.henhen1227.com/bots runs the proven `mb_a` weights
+with the engine name `Vlad NNUE`, six search threads and a 1000 ms move budget.
+It runs in its own container, separately from the arena and the other site
+bots. Henhen usernames cannot contain spaces.
+
+The service is `vlad-nnue.service`; its files are in `/opt/vlad-nnue`.
+Release artifacts, hashes, the service unit and the SVG icon source are in
+`dist/vlad-nnue` (untracked). The official `rpsbot.py` client reads the token from the
+container's owner-only `rpsbot.conf`; credentials are not in the release.
+The site uses a 128-pixel PNG rendered from the SVG.
+
+The RPSI command sets `--move-ms 1000 --max-move-ms 1000 --movetime 1000
+--threads 6`; the existing low-clock protection can shorten a search.
+Player loading and diagnostics accept one to six threads. With less than
+three seconds remaining, the clock budget shrinks with the increment and
+remaining time; below 800 ms, the player uses a small node-limited search.
+Inspect with `systemctl status vlad-nnue` on the container.
+Restarting the service drains any current game before reconnecting.
+Replacing the live model remains a user decision.
 
 ## Tests
 

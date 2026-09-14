@@ -22,8 +22,8 @@ pub struct NnuePlayer {
 impl NnuePlayer {
     pub fn load(spec: &str, threads: usize) -> Result<Self> {
         let (path, hash_mib) = player_options(spec)?;
-        if !(1..=4).contains(&threads) {
-            return Err(anyhow!("NNUE threads must be in 1..=4"));
+        if !(1..=6).contains(&threads) {
+            return Err(anyhow!("NNUE threads must be in 1..=6"));
         }
         Ok(Self {
             name: format!("nnue:{spec}"),
