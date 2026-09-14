@@ -1,9 +1,9 @@
 """Widening preflight bound to an experiment, its inputs and this implementation.
 
-    python -m nnue.widen_check runs/nnue_gauntlets/a3_width/experiment.json
+    python -m nnue.widen_check <new-width-experiment>/experiment.json
 
-Writes immutable initial exports, channel evidence and report.json in preflight/.
-The disposable 256-update CPU probe uses the trainer's sampler, loss and schedule.
+Writes immutable initial/transition exports, channel evidence and report.json.
+The CPU probe runs 1,000 float updates and one QAT backward without an update.
 It never writes an arm checkpoint or changes the manifest.
 """
 
@@ -21,12 +21,12 @@ import torch
 
 from . import export
 from .data import TRAIN, Dataset, Mixture
-from .features import SLOTS, feature_ids, symmetry_table
+from .features import PIECE_ROWS, SLOTS, feature_ids, symmetry_table
 from .model import NNUE, QA, QB, accumulate, fake_quant
 from .paths import data_dir, sha256, workspace_root
 from .train import Config, initial_model, learning_rate, step_loss
 
-UPDATES = 256
+UPDATES = 1000
 FIXTURE = "models/nnue/tests/fixtures/format8_positions.jsonl"
 
 
@@ -36,7 +36,7 @@ def absolute(path: str | Path) -> Path:
 
 
 def configs(manifest: dict) -> tuple[Config, Config, list]:
-    """Accept only a matched format-6 width comparison with a fresh QAT schedule."""
+    """Accept a matched width comparison whose first QAT batch follows the probe."""
     arms = sorted(manifest["arms"], key=lambda a: a["train"]["config"]["hidden"])
     if len(arms) != 2:
         raise ValueError("need exactly two training arms")
@@ -46,13 +46,15 @@ def configs(manifest: dict) -> tuple[Config, Config, list]:
         replace(high, hidden=low.hidden) != low
         or specs[0]["data"] != specs[1]["data"]
         or (low.hidden, high.hidden) != (512, 1024)
-        or low.version != 6
+        or low.version not in (6, 8)
         or low.device != "cpu"
         or low.resume
-        or low.qat_start_epoch != 0
-        or low.epochs * low.steps_per_epoch < UPDATES
+        or low.stop_epoch
+        or low.qat_start_epoch != 1
+        or low.qat_start_epoch * low.steps_per_epoch != UPDATES
+        or low.epochs * low.steps_per_epoch <= UPDATES
     ):
-        raise ValueError("need matched H512/H1024 CPU format-6 arms, QAT from zero, no resume")
+        raise ValueError("need matched H512/H1024 CPU format-6/8 arms, one 1000-update float epoch, no resume")
     return low, high, specs[0]["data"]
 
 
@@ -108,7 +110,11 @@ def preserved(base: NNUE, wide: NNUE) -> bool:
     old, new = base.hidden, wide.hidden
     return all(
         torch.equal(getattr(base, name), getattr(wide, name)[..., :old])
-        for name in ("piece", "attack", "clock", "bias")
+        for name in (
+            ("piece", "attack", "clock", "bias", "context")
+            if base.context is not None
+            else ("piece", "attack", "clock", "bias")
+        )
     ) and all(
         torch.equal(a, b)
         for a, b in [
@@ -130,9 +136,11 @@ def initial_checks(base: NNUE, wide: NNUE, config: Config, ids: torch.Tensor) ->
     checks = {
         "preserved": preserved(base, wide),
         "zero_outgoing": not bool(outgoing(wide, base.hidden).count_nonzero()),
+        "zero_new_residuals": wide.context is None or not bool(wide.context[..., base.hidden :].count_nonzero()),
         "same_seed": all(torch.equal(v, same.state_dict()[k]) for k, v in wide.state_dict().items()),
         "other_seed_preserves": preserved(base, other)
         and torch.equal(wide.bias, other.bias)
+        and (wide.context is None or torch.equal(wide.context, other.context))
         and all(torch.equal(v, other.state_dict()[k]) for k, v in wide.state_dict().items() if "." in k),
         "other_seed_changes_columns": bool(torch.all(torch.any(columns != incoming(other, base.hidden), dim=1))),
         "distinct_nonzero_columns": records["columns"]["duplicates"] == 0
@@ -143,80 +151,131 @@ def initial_checks(base: NNUE, wide: NNUE, config: Config, ids: torch.Tensor) ->
     return {"checks": checks, **records}, {"initial_columns": columns.numpy(), "initial_activations": act.numpy()}
 
 
+def residuals(model: NNUE, old: int, gradient: bool = False) -> torch.Tensor:
+    """Context, new channel, piece row; format 6 has no residual table."""
+    if model.context is None:
+        return model.piece.new_zeros(0, model.hidden - old, PIECE_ROWS)
+    value = model.context.grad if gradient else model.context
+    if value is None:
+        value = torch.zeros_like(model.context)
+    return value[..., old:].permute(0, 2, 1).detach().clone()
+
+
+def context_visits(model: NNUE, ids: torch.Tensor) -> torch.Tensor:
+    """Perspective counts from actual forward inputs; empty perspectives have no piece row."""
+    first = ids[..., :20].amin(dim=-1).flatten()
+    first = first[first < model.layout.attack_base] // PIECE_ROWS
+    return torch.bincount(first, minlength=model.layout.contexts)
+
+
+def served_counts(model: NNUE, old: int) -> dict:
+    weights = torch.round(outgoing(model, old) * QB)
+    # Each channel contains two perspectives, first for output then for dense.
+    direct, dense = weights[:, :2], weights[:, 2:]
+    return {"direct": direct.count_nonzero(dim=1).tolist(), "dense": dense.count_nonzero(dim=1).tolist()}
+
+
 def probe(model: NNUE, old: int, config: Config, mixture: Mixture, ids: torch.Tensor) -> tuple[dict, dict]:
-    """Task gradients are sampled before clipping/AdamW; decay cannot satisfy a gate."""
+    """Task gradients precede clipping/decay; the final QAT backward never updates weights."""
+    if config.qat_start_epoch != 1 or config.steps_per_epoch != UPDATES:
+        raise ValueError("probe needs one 1000-update float epoch before QAT")
     rng = torch.Generator().manual_seed(config.seed + 1)
     table = torch.from_numpy(symmetry_table(model.layout))
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     digest = hashlib.sha256()
-    first_crossing = first_incoming = None
-    initial_gradient = None
-    initial_incoming = first_task_gradient = None
-    max_incoming = torch.zeros(model.hidden - old)
+    first_crossing = first_float_incoming = None
+    max_shared = torch.zeros(model.hidden - old)
+    max_residual = torch.zeros(model.layout.contexts if model.context is not None else 0, model.hidden - old)
+    visits = torch.zeros(model.layout.contexts, dtype=torch.int64)
+    last_visits = visits.clone()
+
+    def observe(module, args):
+        nonlocal last_visits
+        last_visits = context_visits(module, args[0])
+        visits.add_(last_visits)
+
     samples = []
-    for step in range(UPDATES):
-        rows = mixture.next()
-        for key, array in sorted(rows.items()):
-            digest.update(key.encode())
-            digest.update(str((array.shape, array.dtype)).encode())
-            digest.update(array.tobytes())
-        lr = learning_rate(config, step, config.epochs * config.steps_per_epoch)
-        for group in optimizer.param_groups:
-            group["lr"] = lr
-        optimizer.zero_grad(set_to_none=True)
-        loss, _ = step_loss(model, rows, table, config, True, rng)
-        loss.backward()
-        incoming_grad = incoming(model, old, True)
-        outgoing_grad = outgoing(model, old, True)
-        if step == 0:
-            initial_gradient = outgoing_grad.clone()
-            initial_incoming = vectors(incoming_grad)
-        norms = incoming_grad.norm(dim=1)
-        max_incoming = torch.maximum(max_incoming, norms)
-        if first_crossing is not None and bool(norms.any()) and first_incoming is None:
-            first_incoming = step + 1
-            first_task_gradient = vectors(incoming_grad)
-        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-        if not torch.isfinite(loss) or not torch.isfinite(grad):
-            raise RuntimeError("non-finite probe loss or gradient")
-        optimizer.step()
-        model.constrain()
-        served = torch.round(outgoing(model, old) * QB)
-        nonzero = int(served.count_nonzero())
-        if nonzero and first_crossing is None:
-            first_crossing = step + 1
-        samples.append(
-            {"update": step + 1, "lr": lr, "loss": float(loss.detach()), "quantized_outgoing_nonzero": nonzero}
-        )
+    with model.register_forward_pre_hook(observe):
+        for step in range(UPDATES + 1):
+            qat = step == UPDATES
+            rows = mixture.next()
+            for key, array in sorted(rows.items()):
+                digest.update(key.encode())
+                digest.update(str((array.shape, array.dtype)).encode())
+                digest.update(array.tobytes())
+            lr = learning_rate(config, step, config.epochs * config.steps_per_epoch)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+            optimizer.zero_grad(set_to_none=True)
+            loss, _ = step_loss(model, rows, table, config, qat, rng)
+            loss.backward()
+            shared = incoming(model, old, True)
+            residual = residuals(model, old, True)
+            shared_norm, residual_norm = shared.norm(dim=1), residual.norm(dim=2)
+            max_shared = torch.maximum(max_shared, shared_norm)
+            max_residual = torch.maximum(max_residual, residual_norm)
+            if step == 0:
+                initial_gradient = outgoing(model, old, True).clone()
+            if not qat and first_float_incoming is None and bool(shared_norm.any() or residual_norm.any()):
+                first_float_incoming = step + 1
+            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            if not torch.isfinite(loss) or not torch.isfinite(grad):
+                raise RuntimeError("non-finite probe loss or gradient")
+            if not qat:
+                optimizer.step()
+                model.constrain()
+            served = served_counts(model, old)
+            nonzero = sum(served["direct"]) + sum(served["dense"])
+            if nonzero and first_crossing is None:
+                first_crossing = step + 1
+            samples.append(
+                {
+                    "batch": step + 1,
+                    "qat": qat,
+                    "updated": not qat,
+                    "lr": lr,
+                    "loss": float(loss.detach()),
+                    "quantized_outgoing_nonzero": nonzero,
+                }
+            )
     columns = incoming(model, old)
     act = activations(model, ids, old)
-    initial = vectors(initial_gradient)
-    final = vectors(columns)
+    initial, final = vectors(initial_gradient), vectors(columns)
+    act_record = activation_record(act)
     checks = {
         "initial_outgoing_gradient": any(n > 0 for n in initial["norms"])
         and initial["duplicates"] < len(initial["norms"]) - 1,
-        "quantization_crossing": first_crossing is not None,
-        "subsequent_incoming_task_gradient": first_incoming is not None,
-        "final_distinct_columns": final["duplicates"] == 0,
+        "served_readout_at_transition": nonzero > 0,
+        "qat_incoming_task_gradient": bool(shared_norm.any() or residual_norm.any()),
+        "final_distinct_columns": final["duplicates"] == 0 and all(n > 0 for n in final["norms"]),
+        "final_distinct_varying_activations": act_record["duplicates"] == 0
+        and all(v > 0 for v in act_record["variance"]),
     }
     return {
         "updates": UPDATES,
+        "batches": UPDATES + 1,
+        "qat_backward_batch": UPDATES + 1,
         "batch_sha256": digest.hexdigest(),
         "first_quantized_outgoing_update": first_crossing,
-        "first_subsequent_incoming_backward": first_incoming,
+        "first_float_incoming_backward": first_float_incoming,
         "initial_outgoing_gradient": initial,
-        "initial_incoming_task_gradient": initial_incoming,
-        "first_incoming_task_gradient": first_task_gradient,
-        "final_incoming_gradient": vectors(incoming_grad),
-        "max_incoming_task_gradient_norm": max_incoming.tolist(),
+        "qat_shared_task_gradient": vectors(shared),
+        "qat_residual_task_gradient_norms": residual_norm.tolist(),
+        "max_shared_task_gradient_norm": max_shared.tolist(),
+        "max_residual_task_gradient_norms": max_residual.tolist(),
+        "served_readout_per_channel": served,
+        "context_perspective_visits": visits.tolist(),
+        "qat_context_perspective_visits": last_visits.tolist(),
         "final_columns": final,
-        "final_activations": activation_record(act),
+        "final_activations": act_record,
         "samples": samples,
         "checks": checks,
     }, {
         "initial_outgoing_gradient": initial_gradient.numpy(),
-        "final_incoming_gradient": incoming_grad.numpy(),
+        "qat_shared_task_gradient": shared.numpy(),
+        "qat_residual_task_gradient": residual.numpy(),
         "final_columns": columns.numpy(),
+        "final_residual_columns": residuals(model, old).numpy(),
         "final_activations": act.numpy(),
     }
 
@@ -281,7 +340,7 @@ def run(manifest_path: Path) -> dict:
     directory.mkdir(exist_ok=False)
     (directory / "experiment.json").write_bytes(manifest_bytes)
     report = {
-        "schema": 1,
+        "schema": 2,
         "passed": False,
         "bindings": before,
         "seed": high.seed,
@@ -291,6 +350,7 @@ def run(manifest_path: Path) -> dict:
         "numpy": np.__version__,
         "updates": UPDATES,
         "widths": [low.hidden, high.hidden],
+        "version": high.version,
         "manifest_sha256": manifest_hash,
         "errors": [],
     }
@@ -298,6 +358,10 @@ def run(manifest_path: Path) -> dict:
         torch.set_num_threads(4)
         torch.manual_seed(high.seed)
         base, wide = initial_model(low), initial_model(high)
+        parent = export.load(Path(low.init))
+        if (parent.hidden, parent.version) != (low.hidden, low.version):
+            raise ValueError("parent must already have the control width and format")
+        del parent
         positions = [json.loads(line) for line in absolute(FIXTURE).read_text().splitlines()]
         if len(positions) != 512:
             raise ValueError("need all 512 shared fixture positions")
@@ -306,6 +370,8 @@ def run(manifest_path: Path) -> dict:
         clock = np.array([p["clock"] for p in positions])
         ids = torch.from_numpy(wide.layout.rows(feature_ids(board, since, clock)))
         report["initial"], arrays = initial_checks(base, wide, high, ids)
+        report["fixture_context_perspective_visits"] = context_visits(wide, ids).tolist()
+        arrays["initial_residual_columns"] = residuals(wide, low.hidden).numpy()
         with torch.no_grad():
             report["float_max_difference_descriptive"] = float((base(ids) - wide(ids)).abs().max())
         np.savez(directory / "channels.npz", **arrays)
@@ -318,7 +384,12 @@ def run(manifest_path: Path) -> dict:
             request = directory / f"h{model.hidden}_positions.jsonl"
             request.write_text(
                 "".join(
-                    json.dumps({**{k: p[k] for k in ("board", "ply", "clock", "since_capture")}, "raw6": float(value)})
+                    json.dumps(
+                        {
+                            **{k: p[k] for k in ("board", "ply", "clock", "since_capture")},
+                            ("raw" if model.version == 8 else "raw6"): float(value),
+                        }
+                    )
                     + "\n"
                     for p, value in zip(positions, raw, strict=True)
                 ),
@@ -330,6 +401,7 @@ def run(manifest_path: Path) -> dict:
                 )
             )
         report["integer"] = {
+            "parent_export_exact": sha256(directory / f"h{base.hidden}_initial.nnue") == sha256(Path(low.init)),
             "python_width_exact": bool(np.array_equal(*values)),
             "rust_width_exact": bool(np.array_equal(*rust)),
             "cross_backend_integer_exact": all(
@@ -340,12 +412,21 @@ def run(manifest_path: Path) -> dict:
         }
         if not all(report["initial"]["checks"].values()) or not all(report["integer"].values()):
             raise ValueError("initial widening gate failed; probe not started")
-        # The initial exports above are the only models retained; the probe mutates this disposable copy.
         datasets = [(Dataset.open(data_dir(name), TRAIN), share) for name, share in parts]
         if any(not len(d) or "ids" not in d.rows for d, _ in datasets):
             raise ValueError("every mixture dataset needs nonempty training rows and its bound ids8 cache")
         mixture = Mixture(datasets, high.batch, high.seed, ("target", "weight"))
         report["probe"], final_arrays = probe(wide, low.hidden, high, mixture, ids)
+        transition = directory / "transition.nnue"
+        export.export(wide, transition)
+        with torch.no_grad():
+            difference = wide(ids, qat=False).numpy() - export.integer_eval(transition, board, since, clock)
+        report["probe"]["switch_float_minus_served_descriptive"] = {
+            "count": len(difference),
+            "mean": float(difference.mean()),
+            "absolute_quantiles": np.quantile(np.abs(difference), [0, 0.5, 0.95, 1]).tolist(),
+        }
+        final_arrays["switch_float_minus_served"] = difference
         arrays.update(final_arrays)
         np.savez(directory / "channels.npz", **arrays)
         if binding(manifest_path, manifest, parts) != before:
