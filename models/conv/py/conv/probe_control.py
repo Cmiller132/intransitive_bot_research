@@ -297,10 +297,14 @@ def trajectory_excess(episode: dict) -> float | None:
         return None
     if type(outcome) not in (int, float) or not math.isfinite(outcome) or not -1 <= outcome <= 1:
         raise ValueError("trajectory lacks a bounded numeric terminal return")
-    return float(np.mean([
-        2 * row["played_q"] * (row["played_q"] - outcome * (-1 if index % 2 else 1))
-        for index, row in enumerate(trajectory)
-    ]))
+    return float(
+        np.mean(
+            [
+                2 * row["played_q"] * (row["played_q"] - outcome * (-1 if index % 2 else 1))
+                for index, row in enumerate(trajectory)
+            ]
+        )
+    )
 
 
 class Game:
@@ -500,9 +504,9 @@ class Game:
                 root = search(env.board, env.since_capture, env.ply, env.legal, self.evaluate, full)
                 simulations += self.cfg.search.sims if full else self.cfg.search.cheap_sims
             if record:
-                trajectory.append(dict(
-                    state=self.snapshot(), action=int(root.action[0]), played_q=float(root.played_q[0]), full=full
-                ))
+                trajectory.append(
+                    dict(state=self.snapshot(), action=int(root.action[0]), played_q=float(root.played_q[0]), full=full)
+                )
             if pool is not None:
                 pool.offer(self.candidates(root, step))
             # The terminal clock label uses the last mover's pre-move material lead.
@@ -624,8 +628,7 @@ def complete_mean(values: list) -> float | None:
 def check_mean(record: dict, field: str, expected: float | None) -> None:
     actual = record.get(field, "absent")
     if (expected is None and actual is not None) or (
-        expected is not None
-        and (type(actual) not in (int, float) or not math.isclose(actual, expected, abs_tol=1e-12))
+        expected is not None and (type(actual) not in (int, float) or not math.isclose(actual, expected, abs_tol=1e-12))
     ):
         raise ValueError(f"{field} does not match its planned measurements")
 
@@ -707,7 +710,9 @@ def finite_sample_completion_range(
         if set(measured) != set(unique):
             raise ValueError("selected states do not match recorded measurements")
         candidate_bounds = {
-            key: measurement_completion_ranges(measured[key], f"{identity}/candidate{number}", pairs, anchors, bases, endpoint)
+            key: measurement_completion_ranges(
+                measured[key], f"{identity}/candidate{number}", pairs, anchors, bases, endpoint
+            )
             for number, key in enumerate(unique)
         }
         for target in targets:
@@ -795,7 +800,8 @@ class Progress:
             "selection_manifests": self.selection_manifests.copy(),
             "persistence": {
                 **self.persistence,
-                "scope": "Completed writes before this snapshot; excludes this snapshot's own write and in-flight work.",
+                "scope": "Completed writes before this snapshot; excludes this snapshot's own write and "
+                "in-flight work.",
             },
         }
         if self.path is not None:
@@ -857,7 +863,8 @@ def validate_completed_payload(payload: dict) -> None:
                     length = len(episode["trajectory"])
                     index = int(np.random.default_rng(seed).integers(length))
                     if (
-                        anchor["seed"] != seed or anchor["index"] != index
+                        anchor["seed"] != seed
+                        or anchor["index"] != index
                         or anchor["state_key"] != state_key(episode["trajectory"][index]["state"])
                         or anchor["inclusion_probability"] != 1 / length
                     ):
@@ -897,8 +904,27 @@ def family_splits(games: int, selection: str, samples: int | None, counts: tuple
         raise ValueError("uniform corpus requires a positive sample count")
     if counts is None or len(counts) != 3 or any(type(n) is not int or n < 0 for n in counts) or sum(counts) != games:
         raise ValueError("corpus split counts must be nonnegative and sum to the requested games")
-    roles = [role for role, count in zip(("train", "validation", "locked_test"), counts, strict=True) for _ in range(count)]
+    names = ("train", "validation", "locked_test")
+    roles = [role for role, count in zip(names, counts, strict=True) for _ in range(count)]
     return {f"discovery{i}": role for i, role in enumerate(roles)}
+
+
+def coverage_counts(
+    records: list[dict], games: int, slots: int, bases: int, anchors: int, pairs: int, endpoint: str
+) -> dict:
+    """The confirmation pairs behind the report's coverage block. Every selected state confirms
+    its opening (endpoint `both`) and every future anchor of each base with `pairs` independent
+    pairs; the plan counts every slot, the request only the distinct states a discovery selected
+    (a censored discovery selects none)."""
+    per_state = (pairs if endpoint == "both" else 0) + bases * anchors * pairs
+    selected = sum(len(r["measurements"]) for r in records)
+    return dict(
+        requested_games=games,
+        planned_states=games * slots,
+        planned_pairs=games * slots * per_state,
+        selected_states=selected,
+        requested_pairs=selected * per_state,
+    )
 
 
 def probe(
@@ -1104,9 +1130,13 @@ def probe(
         choices = {k: v for k, v in discovery["candidate_pool"].items() if k != "payload"}
         measured = {}
         record = dict(
-            game=identity, split=splits[identity], discovery_censored=discovery["censored"],
+            game=identity,
+            split=splits[identity],
+            discovery_censored=discovery["censored"],
             planned_slots=samples_per_game if selection == "uniform_corpus" else 4,
-            candidates=choices, selection_manifest=None, measurements=measured,
+            candidates=choices,
+            selection_manifest=None,
+            measurements=measured,
         )
         records.append(record)
         if discovery["censored"]:
@@ -1142,15 +1172,25 @@ def probe(
                         index = int(np.random.default_rng(anchor_seed).integers(len(base["trajectory"])))
                         anchor = state_from(base["trajectory"][index]["state"])
                         confirmation = confirm(anchor, f"{base_id}/anchor{a}", forbidden)
-                        future.append(dict(
-                            index=index, seed=anchor_seed, base_episode=base_id,
-                            inclusion_probability=1 / len(base["trajectory"]), state_key=anchor.key().hex(),
-                            confirmation=confirmation,
-                        ))
-                value["bases"].append(dict(
-                    base_episode=base_id, base_censored=base["censored"], current_excess=base["current_excess"],
-                    future_anchors=future, future_mean=complete_mean([a["confirmation"]["mean"] for a in future]),
-                ))
+                        future.append(
+                            dict(
+                                index=index,
+                                seed=anchor_seed,
+                                base_episode=base_id,
+                                inclusion_probability=1 / len(base["trajectory"]),
+                                state_key=anchor.key().hex(),
+                                confirmation=confirmation,
+                            )
+                        )
+                value["bases"].append(
+                    dict(
+                        base_episode=base_id,
+                        base_censored=base["censored"],
+                        current_excess=base["current_excess"],
+                        future_anchors=future,
+                        future_mean=complete_mean([a["confirmation"]["mean"] for a in future]),
+                    )
+                )
             value["future_mean"] = complete_mean([base["future_mean"] for base in value["bases"]])
             value["current_excess_mean"] = complete_mean([base["current_excess"] for base in value["bases"]])
             value["finite_sample_completion_ranges"] = measurement_completion_ranges(
@@ -1166,7 +1206,7 @@ def probe(
     if selection == "selectors":
         completion_ranges = finite_sample_completion_range(records, games, pairs, anchors, bases, endpoint)
         rng = np.random.default_rng(seed_for(master, "bootstrap"))
-        for target in (("opening", "future") if endpoint == "both" else ("future",)):
+        for target in ("opening", "future") if endpoint == "both" else ("future",):
             for method in ("rank_sample", "rank_argmax", "regret_argmax"):
                 differences = []
                 for record in records:
@@ -1181,15 +1221,20 @@ def probe(
                         differences.append(values[0] - values[1])
                 d = np.array(differences)
                 comparisons[f"{target}/{method}"] = dict(
-                    complete_discovery_games=len(d), censored_or_missing_games=games - len(d),
+                    complete_discovery_games=len(d),
+                    censored_or_missing_games=games - len(d),
                     mean_lift=float(d.mean()) if len(d) else None,
-                    game_bootstrap_ci95=interval(d[rng.integers(len(d), size=(1000, len(d)))].mean(1)) if len(d) >= 2 else None,
+                    game_bootstrap_ci95=(
+                        interval(d[rng.integers(len(d), size=(1000, len(d)))].mean(1)) if len(d) >= 2 else None
+                    ),
                     finite_sample_completion_range=completion_ranges[f"{target}/{method}"],
                 )
     pair_records = [p for c in confirmations for p in c["pairs"]]
     complete = sum(p["status"] == "complete" for p in pair_records)
     episodes, roots = list(progress.episodes.values()), list(progress.roots.values())
-    coverage = coverage_counts(records, games, samples_per_game if selection == "uniform_corpus" else 4, bases, anchors, pairs, endpoint)
+    coverage = coverage_counts(
+        records, games, samples_per_game if selection == "uniform_corpus" else 4, bases, anchors, pairs, endpoint
+    )
     report = dict(
         schema=PROTOCOL_VERSION,
         protocol=protocol,

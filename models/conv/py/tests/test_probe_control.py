@@ -70,22 +70,33 @@ def completion_record(index, opening, uniform_opening, future, uniform_future, *
         if key in record["measurements"]:
             continue
         prefix = f"{identity}/candidate{len(record['measurements'])}"
+        base_id = f"{prefix}/base0"
         anchors = [
             dict(
                 index=0,
                 state_key=state_key(candidate(7)["state"]),
-                base_episode=f"{prefix}/base",
-                confirmation=confirmation(values, f"{prefix}/anchor{i}"),
+                base_episode=base_id,
+                confirmation=confirmation(values, f"{base_id}/anchor{i}"),
             )
             for i, values in enumerate(future_products or [])
         ]
         means = [a["confirmation"]["mean"] for a in anchors]
+        future_mean = float(np.mean(means)) if means and None not in means else None
+        censored_base = future_products is None
         record["measurements"][key] = dict(
+            measurement_id=prefix,
             opening=confirmation(products, f"{prefix}/opening"),
-            base_episode=f"{prefix}/base",
-            base_censored=future_products is None,
-            future_anchors=anchors,
-            future_mean=float(np.mean(means)) if means and None not in means else None,
+            bases=[
+                dict(
+                    base_episode=base_id,
+                    base_censored=censored_base,
+                    current_excess=None if censored_base else 0.0,
+                    future_anchors=anchors,
+                    future_mean=future_mean,
+                )
+            ],
+            future_mean=future_mean,
+            current_excess_mean=None if censored_base else 0.0,
         )
     return record
 
@@ -160,6 +171,7 @@ def test_completion_range_rejects_unfinished_or_malformed_work(damage):
     records = [completion_record(i, [1, None], [0, 0], [[0, 0]], [[0, 0]], shared=True) for i in range(2)]
     record = records[0]
     measured = next(iter(record["measurements"].values()))
+    base = measured["bases"][0]
     confirmation = measured["opening"]
     pair = confirmation["pairs"][0]
     if damage == "missing_game":
@@ -193,19 +205,19 @@ def test_completion_range_rejects_unfinished_or_malformed_work(damage):
     elif damage == "incorrect_mean":
         confirmation["mean"] = 1
     elif damage == "base_status":
-        measured["base_censored"] = None
+        base["base_censored"] = None
     elif damage == "base_identity":
-        measured["base_episode"] += "/wrong"
+        base["base_episode"] += "/wrong"
     elif damage == "missing_anchor":
-        measured["future_anchors"].clear()
+        base["future_anchors"].clear()
     elif damage == "anchor_identity":
-        measured["future_anchors"][0]["confirmation"]["measurement_id"] += "/wrong"
+        base["future_anchors"][0]["confirmation"]["measurement_id"] += "/wrong"
     elif damage == "anchor_base_identity":
-        measured["future_anchors"][0]["base_episode"] += "/wrong"
+        base["future_anchors"][0]["base_episode"] += "/wrong"
     elif damage == "incorrect_future_mean":
         measured["future_mean"] = 1
     elif damage == "censored_base_with_anchors":
-        measured["base_censored"] = True
+        base["base_censored"] = True
     else:
         record["discovery_censored"] = True
     with pytest.raises(ValueError):
@@ -263,7 +275,7 @@ def test_candidate_payload_roundtrip_preserves_exact_selections_rng_and_occurren
     pool, batches = recorded_pool()
     values = [v for batch in batches for v in batch]
     expected = {
-        method: {**values[i], "occurrence_probability": probability}
+        method: {**values[i], "occurrence_id": i, "occurrence_probability": probability}
         for method, i, probability in (
             ("rank_sample", 2, 0.32161340995559373),
             ("rank_argmax", 1, 1.0),
@@ -572,10 +584,11 @@ def test_full_probe_on_cpu_has_disjoint_independent_episodes_and_finite_summary(
     assert all(c["mean_lift"] == pytest.approx(0) for c in result["comparisons"].values())
     for record in result["games"]:
         for measured in record["measurements"].values():
-            for anchor in measured["future_anchors"]:
-                for pair in anchor["confirmation"]["pairs"]:
-                    assert measured["base_episode"] not in pair["episodes"]
-                    assert record["game"] not in pair["episodes"]
+            for base in measured["bases"]:
+                for anchor in base["future_anchors"]:
+                    for pair in anchor["confirmation"]["pairs"]:
+                        assert base["base_episode"] not in pair["episodes"]
+                        assert record["game"] not in pair["episodes"]
 
 
 def test_capped_discovery_never_launches_confirmations(monkeypatch):
@@ -734,7 +747,18 @@ def test_coarse_resume_reuses_rejected_attempts_and_matches_uninterrupted_probe(
                 censored=False,
                 scheduled_simulations=1,
                 seconds=0.0,
-                trajectory=[state_record(self.state)] if record else None,
+                trajectory=(
+                    [
+                        dict(
+                            state=state_record(self.state),
+                            action=context["action"],
+                            played_q=context["q"],
+                            full=context["full"],
+                        )
+                    ]
+                    if record
+                    else None
+                ),
             )
 
     monkeypatch.setattr("conv.probe_control.Game", FixtureGame)
@@ -777,8 +801,9 @@ def test_coarse_resume_reuses_rejected_attempts_and_matches_uninterrupted_probe(
     )
     assert len(attempts) == calls
     uninterrupted = probe(small_config(), tiny, "p", 0, 1, 1, 1, "cpu", [opening()], **kwargs)
-    resumed.pop("elapsed_seconds")
-    uninterrupted.pop("elapsed_seconds")
+    for volatile in ("elapsed_seconds", "persistence"):
+        resumed.pop(volatile)
+        uninterrupted.pop(volatile)
     assert resumed == uninterrupted
     completed = json.loads(path.read_text())
     corrupt = deepcopy(completed)
