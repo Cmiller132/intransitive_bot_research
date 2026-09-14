@@ -689,7 +689,8 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   is not in the shared arena binary. nnue_3 = the deployment candidate of item 47 (b2_format8_s2:epoch20
   under the capture-history search, a seat-local Linux build of master e7251b5, c2efc2e4...) deployed
   2026-09-14 17:31 on the user's decision as a third seat at the same fixed 200k nodes, one thread;
-  nnue_1 and nnue_2 unchanged as references.
+  nnue_1 and nnue_2 unchanged as references. The Henhen site bot Vlad_NNUE runs the same pair and
+  binary since 2026-09-14 23:46 UTC (six threads, 1000 ms; README).
 - Exit condition, its first clause met by the deployment candidate of item 47 (the capture-history
   build with b2_format8_s2:epoch20, .661 at 100 ms), the other two preregistered after it
   (exit_250ms_b2_ch 0c3e0eed..., running from 16:15; exit_200k_b2_ch ba282170..., under the runner's
