@@ -5,7 +5,8 @@ perspectives sharing a table of int16 rows over 13,640 features in format 8,
 piece-square rows conditioned on the opponent's material, or the incumbent's
 1,004 in format 6; 512 wide by default and multiples of 32 from 32 through 1,024) scores positions
 inside a principal-variation search (partial-root selection, cached static
-evaluation, history-aware reductions, reverse and late quiet futility)
+evaluation, history-aware reductions, reverse and late quiet futility,
+capture-history ordering)
 that visits millions of positions per second. DESIGN.md holds the numbered design items. The line
 continues an earlier standalone prototype (its release network was the
 migration control, DESIGN item 4).
