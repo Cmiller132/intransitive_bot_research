@@ -615,6 +615,21 @@ that record.
     200k fixed nodes) are preregistered next; deployment is the user's decision. Audited by Claude
     alone; co-signature pending.
 
+48. A3, H1024 by readout-seeded widening against the H512 continuation (2026-09-14;
+    runs/nnue_gauntlets/a3_width_readout; pinned manifest ea3da948..., verdict.json 0e4fce77..., the
+    runner's original kept as verdict.runner.json): both arms from b2_format8_s2:epoch20 on the A1
+    mixture, 20 epochs at lr 1e-4, one float epoch then QAT, seed 2, on the GPU, the wide arm widened
+    with `--widen_outgoing 0.015625` (preflight passed, item 33). H1024 against H512 .408 [.369, .446]
+    at 50 ms and .423 [.380, .465] at 100 ms: width_gain not met, the wide network clearly weaker on
+    the clock. Against the parent: H1024 .429 [.391, .468] and .410 [.367, .453] (promotion_h1024 not
+    met); the H512 continuation .528 [.491, .564] and .472 [.430, .513] (promotion_control512 not met).
+    200 pairs at 50 ms and 150 at 100 ms per match, 2,100 games, all valid. Objective at epoch 20:
+    H1024 .0194, H512 .0194, the parent .0192; training value loss .0080 and .0085 against the parent's
+    .0098. Reading: the lineage has exhausted its mixture; twenty more epochs at either width lower the
+    training loss and raise the held-out objective, and the wider network's slower evaluation is not
+    repaid. Width is closed at this data size; exit_check_a3 is not run. Audited by Claude alone;
+    co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -659,8 +674,8 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   2026-09-14) failed its preflight too (a3_width_warmin: no new readout reached the 1/64 grid in
   1,000 float updates); readout-seeded widening passed (item 33): a3_width_readout (format 8 H1024
   against H512 from B2's format 8 parent, both with `--widen_outgoing 0.015625` and one float epoch,
-  pinned ea3da948..., arms trained on the GPU 2026-09-14, matches queued; exit_check_a3 preregistered
-  and held out of the queue until width_gain is known, the runner having no guard field).
+  pinned ea3da948..., arms trained on the GPU 2026-09-14, judged 16:15 (item 48): width_gain,
+  promotion_h1024 and promotion_control512 all not met; exit_check_a3, preregistered, is not run).
   A2, the high-lr restart: a2_restart_lr3e4 (ba1fb0e3...) pinned 14:20, one arm from b2_format8_s2:epoch20
   at lr 3e-4 against A3's H512 continuation arm at 1e-4 as the matched control (same init, mixture, seed,
   QAT start and length), judged at 50 and 100 ms plus the parent at 100 ms; the arm training on the GPU,
@@ -673,7 +688,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   NNUE seat at a fixed 200k nodes per move beside nnue_1 = mb_a; the accepted capture-history patch
   is not in the arena binary.
 - Exit condition, its first clause met by the deployment candidate of item 47 (the capture-history
-  build with b2_format8_s2:epoch20, .661 at 100 ms), the other two preregistered after it: at least
+  build with b2_format8_s2:epoch20, .661 at 100 ms), the other two preregistered after it
+  (exit_250ms_b2_ch 0c3e0eed..., running from 16:15; exit_200k_b2_ch ba282170..., under the runner's
+  fixed-simulation match mode, c32a695): at least
   65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
