@@ -130,3 +130,21 @@ def test_widened_hidden_evaluates_identically_with_distinct_new_columns(tmp_path
     assert torch.equal(net.widen_hidden(64, seed=3).piece, wide.piece)
     with pytest.raises(ValueError):
         net.widen_hidden(32)
+
+
+def test_widened_hidden_with_seeded_outgoing_deviates_boundedly(tmp_path):
+    net = trained_like(NNUE(32), 11)
+    wide = net.widen_hidden(64, seed=3, outgoing=1 / 64)
+    boards, since, clock = positions(4, 40)
+    a = evaluate(export(net, tmp_path / "a.nnue") and tmp_path / "a.nnue", boards, since, clock)
+    b = evaluate(export(wide, tmp_path / "b.nnue") and tmp_path / "b.nnue", boards, since, clock)
+    assert not np.array_equal(a, b) and np.abs(a - b).max() < 0.5
+    for name in ("output", "dense"):
+        layer, source = getattr(wide, name), getattr(net, name)
+        new = torch.cat([layer.weight[:, 32:64], layer.weight[:, 96:]], 1)
+        assert torch.all(new.abs() == 1 / 64) and (new > 0).any() and (new < 0).any()
+        assert torch.equal(layer.weight[:, :32], source.weight[:, :32])
+        assert torch.equal(layer.weight[:, 64:96], source.weight[:, 32:])
+    assert torch.equal(net.widen_hidden(64, seed=3).piece, wide.piece)  # the rows do not depend on the amplitude
+    assert torch.equal(net.widen_hidden(64, seed=3, outgoing=1 / 64).output.weight, wide.output.weight)
+    assert not torch.equal(net.widen_hidden(64, seed=4, outgoing=1 / 64).output.weight, wide.output.weight)

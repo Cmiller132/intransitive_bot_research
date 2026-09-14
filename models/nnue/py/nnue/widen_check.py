@@ -4,7 +4,10 @@
 
 Writes immutable initial/transition exports, channel evidence and report.json.
 The probe runs 1,000 float updates and one QAT backward without an update on
-the CPU whatever device the arms name (cpu or cuda).
+the CPU whatever device the arms name (cpu or cuda). A widening with
+`widen_outgoing` > 0 (new readout and dense columns +-that value, seeded signs)
+replaces the width-parity gates by a bounded-deviation gate over the fixture
+(`width_preflight.deviation_bound_raw` in the manifest).
 It never writes an arm checkpoint or changes the manifest.
 """
 
@@ -133,16 +136,34 @@ def initial_checks(base: NNUE, wide: NNUE, config: Config, ids: torch.Tensor) ->
     other = initial_model(replace(config, seed=config.seed + 1))
     columns = incoming(wide, base.hidden)
     act = activations(wide, ids, base.hidden)
-    records = {"columns": vectors(columns), "activations": activation_record(act)}
+    out = outgoing(wide, base.hidden)
+    seeded = config.widen_outgoing > 0
+    heads = ("output.bias", "dense.bias", "delta.weight")  # the head parameters a seeded widening keeps seed-free
+    records = {
+        "columns": vectors(columns),
+        "activations": activation_record(act),
+        "widen_outgoing": config.widen_outgoing,
+    }
     checks = {
         "preserved": preserved(base, wide),
-        "zero_outgoing": not bool(outgoing(wide, base.hidden).count_nonzero()),
+        **(
+            {
+                "outgoing_seeded": bool(torch.all(out.abs() == config.widen_outgoing))
+                and bool(torch.all(torch.round(out * QB) / QB == out))
+            }
+            if seeded
+            else {"zero_outgoing": not bool(out.count_nonzero())}
+        ),
         "zero_new_residuals": wide.context is None or not bool(wide.context[..., base.hidden :].count_nonzero()),
         "same_seed": all(torch.equal(v, same.state_dict()[k]) for k, v in wide.state_dict().items()),
         "other_seed_preserves": preserved(base, other)
         and torch.equal(wide.bias, other.bias)
         and (wide.context is None or torch.equal(wide.context, other.context))
-        and all(torch.equal(v, other.state_dict()[k]) for k, v in wide.state_dict().items() if "." in k),
+        and all(
+            torch.equal(v, other.state_dict()[k])
+            for k, v in wide.state_dict().items()
+            if "." in k and (not seeded or k in heads)
+        ),
         "other_seed_changes_columns": bool(torch.all(torch.any(columns != incoming(other, base.hidden), dim=1))),
         "distinct_nonzero_columns": records["columns"]["duplicates"] == 0
         and all(n > 0 for n in records["columns"]["norms"]),
@@ -352,6 +373,7 @@ def run(manifest_path: Path) -> dict:
         "updates": UPDATES,
         "widths": [low.hidden, high.hidden],
         "version": high.version,
+        "widen_outgoing": high.widen_outgoing,
         "manifest_sha256": manifest_hash,
         "errors": [],
     }
@@ -401,10 +423,28 @@ def run(manifest_path: Path) -> dict:
                     absolute(manifest["bot"]), net, request, directory / f"h{model.hidden}_rust.jsonl", len(positions)
                 )
             )
+        deviation = np.abs(values[1] - values[0])
+        bound = float(manifest.get("width_preflight", {}).get("deviation_bound_raw", 0.0))
+        seeded = high.widen_outgoing > 0
+        if seeded and bound <= 0:
+            raise ValueError("a seeded widening needs width_preflight.deviation_bound_raw in the manifest")
+        report["width_deviation"] = {
+            "raw_max": float(deviation.max()),
+            "raw_mean": float(deviation.mean()),
+            "raw_p95": float(np.quantile(deviation, 0.95)),
+            "bound": bound,
+            "seeded": seeded,
+        }
         report["integer"] = {
             "parent_export_exact": sha256(directory / f"h{base.hidden}_initial.nnue") == sha256(Path(low.init)),
-            "python_width_exact": bool(np.array_equal(*values)),
-            "rust_width_exact": bool(np.array_equal(*rust)),
+            **(
+                {"width_deviation_bounded": float(deviation.max()) <= bound}
+                if seeded
+                else {
+                    "python_width_exact": bool(np.array_equal(*values)),
+                    "rust_width_exact": bool(np.array_equal(*rust)),
+                }
+            ),
             "cross_backend_integer_exact": all(
                 np.array_equal(np.rint(a * QA * QA * QB), np.rint(b * QA * QA * QB))
                 for a, b in zip(values, rust, strict=True)

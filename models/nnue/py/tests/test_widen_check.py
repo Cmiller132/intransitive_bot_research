@@ -115,6 +115,22 @@ def test_weight_decay_cannot_pass_incoming_task_gradient_gate(case):
     assert not result["checks"]["served_readout_at_transition"]
 
 
+def test_seeded_outgoing_mode_gates(case):
+    base, _, config, ids, rows = case
+    config = replace(config, widen_outgoing=1 / 64, lr=0.001, warmup_steps=0)
+    seeded = initial_model(config)
+    result, _ = w.initial_checks(base, seeded, config, ids)
+    assert "outgoing_seeded" in result["checks"] and "zero_outgoing" not in result["checks"]
+    assert all(result["checks"].values())
+    with torch.no_grad():
+        seeded.output.weight[0, base.hidden] = 0.02
+    broken, _ = w.initial_checks(base, seeded, config, ids)
+    assert not broken["checks"]["outgoing_seeded"]
+    probe, _ = w.probe(initial_model(config), base.hidden, config, Batches(rows), ids)
+    assert probe["first_quantized_outgoing_update"] == 1
+    assert probe["checks"]["served_readout_at_transition"] and probe["checks"]["qat_incoming_task_gradient"]
+
+
 def test_configs_reject_recipe_drift():
     train = {
         "init": "parent.nnue",

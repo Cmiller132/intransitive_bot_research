@@ -60,6 +60,7 @@ class Config:
     init: str = ""  # a .nnue file or a .pt checkpoint to start from
     resume: str = ""  # a latest.pt to continue exactly
     stop_epoch: int = 0  # stop after this many epochs (0: run to `epochs`); the schedule is unchanged
+    widen_outgoing: float = 0.0  # with a narrower .nnue init: the new columns' readout and dense weights are +-this (0: zero, exact parity; 1/64: served from the first step)
 
 
 def parse(argv: list[str]) -> tuple[str, list[tuple[str, float]], Config]:
@@ -182,7 +183,7 @@ def initial_model(config: Config) -> NNUE:
     if config.init.endswith(".nnue"):
         model = export_module.load(Path(config.init))
         if model.hidden < config.hidden:
-            model = model.widen_hidden(config.hidden, config.seed)
+            model = model.widen_hidden(config.hidden, config.seed, config.widen_outgoing)
         elif model.hidden != config.hidden:
             raise ValueError(f"{config.init} has hidden {model.hidden}, config says {config.hidden}")
         if model.version < config.version:
@@ -231,7 +232,10 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     if config.resume:
         saved = torch.load(config.resume, map_location="cpu", weights_only=False)
         volatile = {"resume": "", "stop_epoch": 0}
-        same = {**saved["config"], **volatile} == {**asdict(config), **volatile}
+        defaults = {
+            f.name: f.default for f in fields(Config)
+        }  # a field added since the run started reads as its default
+        same = {**defaults, **saved["config"], **volatile} == {**asdict(config), **volatile}
         if not same or any(saved.get(k) != v for k, v in inputs.items()):
             raise ValueError("resume with the settings, init and datasets the run was started with")
         model.load_state_dict(saved["model"])
