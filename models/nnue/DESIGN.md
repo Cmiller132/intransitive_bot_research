@@ -448,7 +448,17 @@ that record.
 33. Width 768 padded from 512 with identical zero columns scored 43.7 % (39.7-47.5) over 500 games
     at 50 ms against the 512 it started from; the padding defect (identical columns, identical
     gradients) is fixed by seeded columns and the width question is open (A3). Artifact:
-    runs/nnue_gauntlets/ft_self5_w768_500_timed.
+    runs/nnue_gauntlets/ft_self5_w768_500_timed. Measured with the preflight checker
+    (`nnue.widen_check`, 2026-09-13/14): with zero outgoing columns the new channels are served as
+    zero under quantisation-aware training and receive no task gradient, from QAT at epoch 0
+    (a3_width, 256 updates) and after one float epoch of 1,000 updates at lr up to 1e-4
+    (a3_width_warmin: no new readout reached the 1/64 grid); seeding the new readout and dense
+    columns with +-1/64 deviates from the parent by up to .37 raw on the 512 fixture positions (the
+    dense path amplifies the seeds; a3_width_seeded); seeding the readout columns only
+    (`--widen_outgoing 0.015625`, dense columns zero) deviates by at most .087 raw (mean .023) and
+    every new channel carries a task gradient at the first quantised step (a3_width_readout
+    preflight 494c97b1...), the widening under test in section 7. Built by Claude 2026-09-14 on
+    the user's instruction; Astra's co-signature pending.
 34. Search speed and threads (Astra, turns 15-16): a 35.24 % median paired speed-up on one thread
     (each benchmark pass over the same 100 fixed-node roots; the ratio of the median aggregate
     throughputs is 29.7 %, 1,062,227 to 1,377,801 nodes/s), all 100 results identical; the stages
@@ -566,27 +576,34 @@ strength-accepted for code; preregistered, running or judged for an experiment.
 - C2, search patches by sequential test: the quiescence transposition table rejected (item 40);
   capture history accepted (item 43), the first patch of the bundle, merged into master 2026-09-14 (95ae9ee);
   late move pruning and internal iterative reduction are screened next on that base, one at a time
-  (LMP rebased on the accepted base with one shared per-node safety scan, its full check interrupted
-  at the 2026-09-13 stop); a fixed-count 100 ms confirmation of the bundle after at most three
+  (LMP frozen 2026-09-14 by Claude as runs/nnue_bins/c2_search_lmp.exe 3b4f6032..., revision 158a661 =
+  494b4b6 + 9a1e452, c2_lmp pinned 53af4c88... and queued); a fixed-count 100 ms confirmation of the bundle after at most three
   accepted patches.
 - D, labels: the pilot judged (item 41), the selection not supported at this size; a larger share or
   a label-depth arm would need its own preregistration.
 - B, format 8: the seed-2 pilot met its rules (item 42); the seed-3 confirmation (format8_train_s3,
-  pinned bd34ff3f...) started 2026-09-13 18:02 and was stopped at the session end with its format 8
-  arm at epoch 19 of 20 and the control not started; a relaunch resumes it. Adoption as the training
-  format requires its independent format_gain and promotion_format8 rules to be met; then B2
-  (runs/nnue_gauntlets/b2_format8_lineage, preregistered, unpinned: format 8 factorised from
-  long60_s2:epoch60 against its format 6 continuation).
+  pinned bd34ff3f...) was stopped 2026-09-13 with its format 8 arm at epoch 19 and resumed 2026-09-14
+  09:45 (running). Adoption as the training
+  format requires its independent format_gain and promotion_format8 rules to be met; B2
+  (runs/nnue_gauntlets/b2_format8_lineage: format 8 factorised from long60_s2:epoch60 against its
+  format 6 continuation) was pinned 2026-09-14 (9304f4f9..., both arms on the GPU under the user's grant,
+  the seed-3 guard overridden by the user's instruction), its arms trained (10 and 13 minutes), its
+  matches queued; its own seed-3 confirmation b2_format8_lineage_s3 (da64d98c...) and exit_check_b2
+  (the network against mb_a at 100 ms, .575 and .65 rules) are preregistered.
 - A3, H1024 with the corrected widening: the manifest runs/nnue_gauntlets/a3_width (format 6 from
   long60_s2:epoch60) failed its preflight 2026-09-13
   (runs/nnue_gauntlets/a3_width/preflight/report.json 75068e4b...): structure and integer parity
   exact, but under quantisation-aware training the zero readout columns are served as zero and no
-  new channel received a task gradient in 256 updates. Agreed remedy: one float epoch for both arms
-  before QAT (qat_start_epoch 1), the checker revised for it and for format 8 (astra/widen-warmin40,
-  e059935, checked, merge pending); a new experiment is preregistered once B2's parent exists. A2,
+  new channel received a task gradient in 256 updates. The agreed remedy (one float epoch before QAT, checker e059935, merged
+  2026-09-14) failed its preflight too (a3_width_warmin: no new readout reached the 1/64 grid in
+  1,000 float updates); readout-seeded widening passed (item 33): a3_width_readout (format 8 H1024
+  against H512 from B2's format 8 parent, both with `--widen_outgoing 0.015625` and one float epoch,
+  pinned ea3da948..., arms trained on the GPU 2026-09-14, matches queued; exit_check_a3 preregistered).
+  A2,
   the high-lr restart, open; C3, a race term only through a measured race error that stays with
-  deeper labels; A4, from scratch at H1024 over 200+ epochs, on the GPU only and only after shorter
-  matched controls justify it. A2, C3 and A4 proposed.
+  deeper labels; A4, from scratch at H1024 over 200 epochs: a4_scratch_h1024 pinned 3e1f6e28... and training on the GPU
+  2026-09-14 (the user's grant; the GPU's long job while the CPU plays the other matches), judged against
+  long60_s2:epoch60 at 50 and 100 ms and mb_a at 100 ms. A2 and C3 proposed.
 - Arena: nnue_2 = long60_s2:epoch60 (ed00ddf9..., the network that met the arena bar in the
   promotion test of item 39's lineage) deployed 2026-09-13 19:53 on the user's decision as a second
   NNUE seat at a fixed 200k nodes per move beside nnue_1 = mb_a; the accepted capture-history patch
