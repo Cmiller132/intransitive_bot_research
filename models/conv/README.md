@@ -64,9 +64,7 @@ Four things separate this line from `sq`:
   (frozen-checkpoint candidate comparisons using independent continuations),
   `probe_parity.py` (evaluator, search and saved-pool comparisons against production inference),
   `fit_control.py` (frozen control-head feature extraction and reconstruction checks),
-  `config.py` (every tunable), `paths.py`; `py/scripts/derive_bias_resume.py`
-  resets the regret heads, their optimizer moments and the control buffer in
-  a resume checkpoint while preserving the rest of training.
+  `config.py` (every tunable), `paths.py`.
 
 ## Self-play search
 
@@ -118,7 +116,6 @@ python -m conv.probe_control --ckpt runs/<name>/ckpt_NNNNNN.pt --device cpu|cuda
 python -m conv.probe_parity --study execution --ckpt runs/<name>/ckpt_NNNNNN.pt --pilot PATH --device cuda --out PATH [--resume]
 python -m conv.probe_parity --study batch_shape --ckpt runs/<name>/ckpt_NNNNNN.pt --prior PATH --device cuda --out PATH [--resume]
 python -m conv.fit_control --ckpt runs/<name>/ckpt_NNNNNN.pt --parity PATH --device cuda --out PATH
-python models/conv/py/scripts/derive_bias_resume.py SRC DST [BACKUP]
 ```
 
 A run is written to `<workspace root>/runs/<name>/` whatever the working

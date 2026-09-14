@@ -1,7 +1,8 @@
 # conv design
 
-Status 2026-09-10: run conv_g160, the width-160 shape and settings below, is
-being prepared; conv_g128 was stopped at iteration 161.
+Status 2026-09-13: conv_g192p10, the ten-pair run of this design, is the
+current line; its restart-off arm completed iteration 160 (RGSC.md). The
+earlier runs conv_g128 (width 112) and conv_g160 are stopped.
 
 Status: items 1-30 approved on 2026-09-08 and built; items 13, 18 and 26
 amended and approved the same day. Items 31-33 and the 2026-09-10 amendments

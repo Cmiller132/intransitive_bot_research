@@ -409,41 +409,6 @@ def test_ranking_loss_excludes_dummy_when_labelled_and_is_zero_when_empty():
     assert ranking_loss(gamma, label, torch.zeros_like(ok)).item() == 0.0
 
 
-def test_bias_resume_removes_regret_weights_and_moments(tmp_path):
-    from conv.model import share_fresh_heads
-    from conv.train import load_optimizer_state, optimizer_state, regret_parameter_indices
-    from scripts.derive_bias_resume import main as derive
-
-    cfg = tiny_config(envs=1, steps=1)
-    net, ema = ConvNet(cfg.net), ConvNet(cfg.net)
-    ema.load_state_dict(net.state_dict())
-    learner = Learner(cfg, net, ema, "cpu")
-    for p in net.parameters():
-        learner.opt.state[p] = {
-            "step": torch.tensor(3.0),
-            "exp_avg": torch.ones_like(p),
-            "exp_avg_sq": torch.ones_like(p),
-        }
-    src, dst, backup = (str(tmp_path / name) for name in ("src.pt", "dst.pt", "backup.pt"))
-    save_checkpoint(src, net, ema, optimizer_state(learner.opt, net), 17, cfg)
-    derive(["derive_bias_resume.py", src, dst, backup])
-    assert (tmp_path / "src.pt").read_bytes() == (tmp_path / "backup.pt").read_bytes()
-
-    ck = load_checkpoint(dst)
-    indices = regret_parameter_indices(net)
-    assert ck["iteration"] == 17 and all(index not in ck["optimizer"]["state"] for index in indices)
-    assert ck["control"]["warmup_left"] == 0 and not ck["control"]["heads_active"]
-    fresh_net, fresh_ema = build(cfg, ck, "cpu", "model"), build(cfg, ck, "cpu", "ema")
-    assert fresh_net.fresh and all(key.startswith("regret.") for key in fresh_net.fresh)
-    share_fresh_heads(fresh_net, fresh_ema)
-    for key in fresh_net.fresh:
-        assert torch.equal(fresh_net.state_dict()[key], fresh_ema.state_dict()[key])
-    fresh_learner = Learner(cfg, fresh_net, fresh_ema, "cpu")
-    load_optimizer_state(fresh_learner.opt, fresh_net, ck["optimizer"], "cpu")
-    params = list(fresh_net.parameters())
-    assert all(fresh_learner.opt.state[params[index]]["exp_avg"].count_nonzero() == 0 for index in indices)
-
-
 def test_search_control_labels_train_and_resume(tmp_path):
     """A collection with the search control: regret labels are suffix means
     of played-Q calibration excess, the buffer fills from

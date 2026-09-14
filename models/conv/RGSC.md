@@ -19,7 +19,7 @@ log stayed unchanged. No interruption or further training restart was needed.
 The original trainer was stopped during iteration 102. Its completed iteration
 101 was removed from the active lineage and preserved in `killed_it101/`,
 including its checkpoint, window, CSV and
-[archived original-arm diagnostic](../../runs/conv_g192p10/killed_it101/rgsc_diagnostics.json).
+archived original-arm diagnostic (`runs/conv_g192p10/killed_it101/rgsc_diagnostics.json`).
 The historical assessment below includes that archived iteration; it must not
 be confused with the new arm's iteration 101 or counted in its conversion totals.
 
@@ -90,7 +90,7 @@ counts zero. The active lineage now has 46,705/46,705 conversions across
 arm's 12,537 across 101–160, excluding the archived original-arm iteration
 101's 417.
 
-The [active diagnostic](../../runs/conv_g192p10/rgsc_diagnostics.json) covers
+The active diagnostic (`runs/conv_g192p10/rgsc_diagnostics.json`) covers
 154–160. Its newest iteration matches the log: 526 labelled completed games
 and 193,577 rows, with no partial games excluded. There were no maximum-plies
 endings at 160. The rolling start at 154 excludes games already underway then,
@@ -1249,7 +1249,7 @@ observed clipped mean 0.06971, whereas raw signed mean is -0.09313. Both
 reconstruction checks pass. This demonstrates how the logged signed error can
 rise without a comparably large mean error against the buffer's clipped label;
 it does not establish accurate per-state predictions or recovered ranking.
-The [archived rolling diagnostic](../../runs/conv_g192p10/killed_it101/rgsc_diagnostics.json) records
+The archived rolling diagnostic (`runs/conv_g192p10/killed_it101/rgsc_diagnostics.json`) records
 the latest monitoring window separately from the full audits.
 
 The last iteration before the switch, 31, used the original search. Its
@@ -1490,8 +1490,8 @@ settled result. Checkpoint 100 belongs to the original arm; later new-arm export
 must be kept distinct from any future unchanged control continuation.
 The exporter remains active; checkpoint 110 is the next eligible export.
 
-Evidence: [current-run audit](../../runs/conv_g192p10/rgsc_audit.json) and
-[g160 audit](../../runs/conv_g160/rgsc_audit.json). Field definitions and commands
+Evidence: current-run audit (`runs/conv_g192p10/rgsc_audit.json`) and
+g160 audit (`runs/conv_g160/rgsc_audit.json`). Field definitions and commands
 are in the [README](README.md#python-interface).
 
 ### Repeated-opening evidence
@@ -1673,7 +1673,7 @@ timing evidence, not GPU throughput or a completed real-model rollout experiment
 The original trainer was stopped at 03:36:08 UTC on 12 September after atomic
 checkpoint 31, its log and its persisted window agreed. The last reply masks
 were clear and model/EMA tensors finite. The immutable
-[boundary checkpoint](../../runs/conv_g192p10/ckpt_000031.pt) has SHA-256
+boundary checkpoint (`runs/conv_g192p10/ckpt_000031.pt`) has SHA-256
 `a43555ab0f1d490ac2e6836a30ae1583bedc421e11e2e6576107b3e5bdad13c5`.
 A CPU restore check found optimizer step 65,664, 12 replay windows (20–31),
 2,359,296 rows, active RGSC heads and no warmup reset. The 127,879 unresolved
@@ -1687,8 +1687,8 @@ Both eager checkpoint-31 pilots completed and were independently audited:
 
 | Pilot artifact | Episodes | Complete pairs | Plies | Elapsed seconds | Matching attempts | Censored / capped pairs |
 |---|---:|---:|---:|---:|---:|---:|
-| [Root context](../../runs/conv_g192p10/rgsc_probe_31_root_context_overnight.json) | 21 | 8 | 2,112 | 568.5999 | 0 | 0 / 0 |
-| [Action/mode](../../runs/conv_g192p10/rgsc_probe_31_action_mode_overnight.json) | 21 | 8 | 2,082 | 567.3834 | 56 | 0 / 0 |
+| Root context (`runs/conv_g192p10/rgsc_probe_31_root_context_overnight.json`) | 21 | 8 | 2,112 | 568.5999 | 0 | 0 / 0 |
+| Action/mode (`runs/conv_g192p10/rgsc_probe_31_action_mode_overnight.json`) | 21 | 8 | 2,082 | 567.3834 | 56 | 0 / 0 |
 
 Neither pilot censored an episode or discovery. Both used one originating
 discovery game, one pair per measurement and one future anchor. Their discovery
@@ -1835,7 +1835,7 @@ not be launched again:
 python -m conv.probe_control --ckpt runs/conv_g192p10/ckpt_000160.pt --device cuda --estimand action_mode --out runs/conv_g192p10/rgsc_probe_160_action_mode_pilot.json --games 2 --pairs 2 --anchors 1 --max-root-attempts 128 --seed 1
 ```
 
-The [completed pilot](../../runs/conv_g192p10/rgsc_probe_160_action_mode_pilot.json)
+The completed pilot (`runs/conv_g192p10/rgsc_probe_160_action_mode_pilot.json`)
 contains 3,479,777 bytes, SHA-256
 `a2dbe55cb833aa11063f77a5cef77ed153a6598e6c58f5f12081e8f6387cbae0`.
 Elapsed time was 1,433.48 seconds (23.89 minutes), with 74 episodes, 5,858
@@ -1977,7 +1977,7 @@ TF32 factors, while B isolates the evaluator flag change.
 
 After a fresh GPU ownership check, the command ran from 01:18:21 to 01:22:38 UTC
 on 14 September as PID 62816, with output
-[rgsc_parity_160.json](../../runs/conv_g192p10/rgsc_parity_160.json).
+rgsc_parity_160.json (`runs/conv_g192p10/rgsc_parity_160.json`).
 It exited successfully after all 191 units in 252.64 seconds (4.21 minutes).
 The completed artifact has 21,514,705 bytes and SHA-256
 `47f8365eb6c08c13f4e1aeb3dd257b89b38b2bd58e2d5bb241014b90c2da602e`.
@@ -2059,7 +2059,7 @@ Source SHA is
 `94cbe93fab33cd6ff82beff049c600b9f9325ec596f41f0c9d4cdd898bb0d7c7`.
 All 12 units completed successfully in 59.90 seconds; the worker exited normally.
 The new artifact is
-[rgsc_parity_160_batch_shape.json](../../runs/conv_g192p10/rgsc_parity_160_batch_shape.json),
+rgsc_parity_160_batch_shape.json (`runs/conv_g192p10/rgsc_parity_160_batch_shape.json`),
 7,586,617 bytes, SHA
 `b6632612865ee12be0348479d80be0e2ff06f72e4b8d1839af88056c6b4355e1`.
 Parent validation matched all ten source hashes, the immutable checkpoint,
@@ -2125,7 +2125,7 @@ first real CUDA attempt stopped at its capture guard: every one of the 41
 unhooked chunks exactly matched saved C scores, with no graph breaks, but the
 first capture buffer was not fully written. No usable feature cache or head
 reconstruction resulted. The failed artifact is
-[rgsc_features_160.json](../../runs/conv_g192p10/rgsc_features_160.json),
+rgsc_features_160.json (`runs/conv_g192p10/rgsc_features_160.json`),
 SHA `e641fdf15b4e998b69c96ed2080c3391303462418aec47817e08399348f2c8f7`,
 83,665,324 bytes, elapsed 25.38 seconds. Its source SHA is
 `e5d8a9edbb5153d485ca274ed5ac62306cf0dfcef7fbe8627b2c6f6cc1766f6e`.
@@ -2138,7 +2138,7 @@ passed in 2.67 seconds, with lint/format and independent review passing.
 
 The guarded GPU retry captured all 41 chunks but failed the exact numerical
 gate in 36.64 seconds. Its artifact is
-[rgsc_features_160_guarded.json](../../runs/conv_g192p10/rgsc_features_160_guarded.json),
+rgsc_features_160_guarded.json (`runs/conv_g192p10/rgsc_features_160_guarded.json`),
 87,108,198 bytes, SHA
 `2d89e538099e26d3813ed2880efb942e48ec5cc0adcc8dc95884302eccf1ff8c`.
 Source SHA is `bae6d8ca9249730d6a809f7497821699015cb58d4171c4e4cb39579d16488967`.
@@ -2165,7 +2165,7 @@ The corrected extractor passed all original exact gates on the GPU. All 27
 focused CPU tests passed in 3.08 seconds, lint/format passed, and Peirce approved
 the dynamic-batch correction before this third GPU attempt. The successful
 artifact is
-[rgsc_features_160_dynamic.json](../../runs/conv_g192p10/rgsc_features_160_dynamic.json),
+rgsc_features_160_dynamic.json (`runs/conv_g192p10/rgsc_features_160_dynamic.json`),
 87,040,179 bytes, SHA
 `5107d6652053f3a753d47e23121a630f38ea6b05dad1e2667fe3d766fefec109`.
 Its source SHA is
