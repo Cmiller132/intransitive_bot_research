@@ -548,8 +548,8 @@ that record.
     sequential test: accepted at 1,760 pairs, LLR 3.050 against the bound 2.944, pentanomial counts
     [170, 324, 715, 319, 232], 1368/903/1249 over 3,520 games, descriptive score interval [.504,
     .530]; reconciled by the runner, whose verdict included C1's journal replay, and independently
-    audited without replay by Claude and Astra; accepted for merge as the first patch of the bundle
-    (not yet merged). Timing: .352 pairs per active second with eight concurrent pairs, idle share
+    audited without replay by Claude and Astra; the first patch of the bundle, merged into master
+    2026-09-14 (95ae9ee). Timing: .352 pairs per active second with eight concurrent pairs, idle share
     .284.
 
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
@@ -564,7 +564,7 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   least .575 at 100 ms over 250 pairs per arm under the frozen C1 build; preregistered, running;
   deployment is the user's decision).
 - C2, search patches by sequential test: the quiescence transposition table rejected (item 40);
-  capture history accepted (item 43), the first patch of the bundle, its merge into master pending;
+  capture history accepted (item 43), the first patch of the bundle, merged into master 2026-09-14 (95ae9ee);
   late move pruning and internal iterative reduction are screened next on that base, one at a time
   (LMP rebased on the accepted base with one shared per-node safety scan, its full check interrupted
   at the 2026-09-13 stop); a fixed-count 100 ms confirmation of the bundle after at most three

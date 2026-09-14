@@ -3,7 +3,8 @@
     python -m nnue.widen_check <new-width-experiment>/experiment.json
 
 Writes immutable initial/transition exports, channel evidence and report.json.
-The CPU probe runs 1,000 float updates and one QAT backward without an update.
+The probe runs 1,000 float updates and one QAT backward without an update on
+the CPU whatever device the arms name (cpu or cuda).
 It never writes an arm checkpoint or changes the manifest.
 """
 
@@ -47,14 +48,14 @@ def configs(manifest: dict) -> tuple[Config, Config, list]:
         or specs[0]["data"] != specs[1]["data"]
         or (low.hidden, high.hidden) != (512, 1024)
         or low.version not in (6, 8)
-        or low.device != "cpu"
+        or low.device not in ("cpu", "cuda")
         or low.resume
         or low.stop_epoch
         or low.qat_start_epoch != 1
         or low.qat_start_epoch * low.steps_per_epoch != UPDATES
         or low.epochs * low.steps_per_epoch <= UPDATES
     ):
-        raise ValueError("need matched H512/H1024 CPU format-6/8 arms, one 1000-update float epoch, no resume")
+        raise ValueError("need matched H512/H1024 CPU or CUDA format-6/8 arms, one 1000-update float epoch, no resume")
     return low, high, specs[0]["data"]
 
 
