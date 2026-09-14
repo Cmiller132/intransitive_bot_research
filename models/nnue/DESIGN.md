@@ -590,6 +590,18 @@ that record.
     verdict; a3_width_readout, trained on that parent under the user's instruction, is judged as its
     own matched comparison. Audited by Claude alone; co-signature pending.
 
+46. Exit check of B2's network against mb_a (2026-09-14; runs/nnue_gauntlets/exit_check_b2; pinned
+    manifest 646e7f43..., verdict.json 01c9050a..., the runner's original kept as verdict.runner.json):
+    b2_format8_s2:epoch20 (ba8e0b93...) against the deployed mb_a under the frozen gate 6 build on both
+    seats, one thread, 100 ms, 250 pairs: 247 wins, 136 draws, 117 losses, .630 [.598, .662], 500 games
+    valid, 250 distinct openings, first mover .514. arena_candidate (.575) met; exit_100ms (.65) not met.
+    Against the same reference long60_s2:epoch60 scored .599 [.566, .632] (the promotion test of item
+    39's lineage): the format 8 continuation is 3.1 points stronger at 100 ms, the interval's lower bound
+    at the old point estimate; the network alone does not reach the exit clause. The deployment-candidate
+    test deploy_candidate_b2_ch (this network under the accepted capture-history build against mb_a under
+    the gate 6 build, per-side networks in the runner) follows; deployment is the user's decision (a
+    format 8 network needs a format 8 capable arena binary). Audited by Claude alone; co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -619,7 +631,13 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   matches queued; its own seed-3 confirmation b2_format8_lineage_s3 (da64d98c...) and exit_check_b2
   (the network against mb_a at 100 ms, .575 and .65 rules) are preregistered. B2 judged 14:06 (item 45):
   parent_gain_format8 met, format_gain not met at 100 ms by the lower bound .495; exit_check_b2 running;
-  the seed-3 matches queued (guard amended before they play).
+  the seed-3 matches queued (guard amended before they play). b2x_duration40 (d636972c..., the format 8
+  continuation over 40 epochs against B2's 20-epoch endpoint) pinned 14:05, its arm trained on the GPU
+  (1,218 s), matches queued. deploy_candidate_b2_ch (19e979aa..., the accepted capture-history build
+  playing b2_format8_s2:epoch20 against the gate 6 build playing mb_a at 100 ms over 250 pairs, .575 and
+  .65 rules; per-side networks in the runner, 4e04d59) pinned 14:18 and queued after exit_check_b2.
+  exit_check_b2 judged 14:33 (item 46): .630 [.598, .662] against mb_a, the arena bar met, the exit clause
+  not; deploy_candidate_b2_ch running from 14:32.
 - A3, H1024 with the corrected widening: the manifest runs/nnue_gauntlets/a3_width (format 6 from
   long60_s2:epoch60) failed its preflight 2026-09-13
   (runs/nnue_gauntlets/a3_width/preflight/report.json 75068e4b...): structure and integer parity
@@ -628,12 +646,15 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   2026-09-14) failed its preflight too (a3_width_warmin: no new readout reached the 1/64 grid in
   1,000 float updates); readout-seeded widening passed (item 33): a3_width_readout (format 8 H1024
   against H512 from B2's format 8 parent, both with `--widen_outgoing 0.015625` and one float epoch,
-  pinned ea3da948..., arms trained on the GPU 2026-09-14, matches queued; exit_check_a3 preregistered).
-  A2,
-  the high-lr restart, open; C3, a race term only through a measured race error that stays with
+  pinned ea3da948..., arms trained on the GPU 2026-09-14, matches queued; exit_check_a3 preregistered
+  and held out of the queue until width_gain is known, the runner having no guard field).
+  A2, the high-lr restart: a2_restart_lr3e4 (ba1fb0e3...) pinned 14:20, one arm from b2_format8_s2:epoch20
+  at lr 3e-4 against A3's H512 continuation arm at 1e-4 as the matched control (same init, mixture, seed,
+  QAT start and length), judged at 50 and 100 ms plus the parent at 100 ms; the arm training on the GPU,
+  matches queued. C3, a race term only through a measured race error that stays with
   deeper labels; A4, from scratch at H1024 over 200 epochs: a4_scratch_h1024 pinned 3e1f6e28... and training on the GPU
   2026-09-14 (the user's grant; the GPU's long job while the CPU plays the other matches), judged against
-  long60_s2:epoch60 at 50 and 100 ms and mb_a at 100 ms. A2 and C3 proposed.
+  long60_s2:epoch60 at 50 and 100 ms and mb_a at 100 ms. C3 proposed.
 - Arena: nnue_2 = long60_s2:epoch60 (ed00ddf9..., the network that met the arena bar in the
   promotion test of item 39's lineage) deployed 2026-09-13 19:53 on the user's decision as a second
   NNUE seat at a fixed 200k nodes per move beside nnue_1 = mb_a; the accepted capture-history patch
