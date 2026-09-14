@@ -250,12 +250,17 @@ sh arena/upload.sh http://<arena> nnue_1 rpsi:./run.sh --replace <seat.tar.gz>; 
 ```
 
 Selection is by games only: a lower validation loss has not predicted a
-gauntlet win here.
+gauntlet win here. The current lineage, its recipe (format 8, H512, 20
+epochs at lr 1e-4 from the incumbent, one float epoch before QAT) and the
+open hypotheses are in DESIGN.md section 7; the step-by-step programme, its
+queue helpers and the latest hand-off are kept with the run artifacts in
+runs/nnue_plan/ (untracked).
 
 ## Henhen site bot
 
-`Vlad_NNUE` on https://rps.henhen1227.com/bots runs the proven `mb_a` weights
-with the engine name `Vlad NNUE`, six search threads and a 1000 ms move budget.
+`Vlad_NNUE` on https://rps.henhen1227.com/bots runs the arena's `nnue_2`
+network (long60_s2:epoch60, since 2026-09-14; `mb_a` before) with the engine
+name `Vlad NNUE`, six search threads and a 1000 ms move budget.
 It runs in its own container, separately from the arena and the other site
 bots. Henhen usernames cannot contain spaces.
 
