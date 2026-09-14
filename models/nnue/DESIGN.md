@@ -575,6 +575,21 @@ that record.
     training format. Audited by Claude alone (Astra unavailable under a Codex usage limit until
     2026-09-19); co-signature pending.
 
+45. B2, format 8 on the qualified lineage (2026-09-14; runs/nnue_gauntlets/b2_format8_lineage; pinned
+    manifest 9304f4f9..., verdict.json 5e6272f7..., the runner's original kept as verdict.runner.json):
+    from long60_s2:epoch60's format 6 bytes, the format 8 arm factorised through widen_contexts against
+    the format 6 continuation on the A1 mixture, 20 epochs, seed 2, both arms on the GPU (30 and 38 s per
+    epoch). Format 8 against format 6 .564 [.522, .606] at 50 ms and .540 [.495, .583] at 100 ms: the
+    format rule not met (the 100 ms lower bound .495). Against the parent: format 8 .564 [.521, .605] and
+    .595 [.550, .640] (parent_gain_format8 met), format 6 .526 [.485, .568] and .528 [.483, .573]
+    (explanatory). 200 pairs at 50 ms and 150 at 100 ms per match, 2,100 games, all valid. Objective at
+    epoch 20 .0192 against .0202; epoch-mean training value loss .0098 against .0141. The format 8
+    continuation is the strongest network measured against the qualified parent; whether the format or
+    the continuation carries the 100 ms gain is left to the seed-3 confirmation (b2_format8_lineage_s3,
+    its activation amended before its matches). The width-parent selection is not authorised by this
+    verdict; a3_width_readout, trained on that parent under the user's instruction, is judged as its
+    own matched comparison. Audited by Claude alone; co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -602,7 +617,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   format 6 continuation) was pinned 2026-09-14 (9304f4f9..., both arms on the GPU under the user's grant,
   the seed-3 guard overridden by the user's instruction), its arms trained (10 and 13 minutes), its
   matches queued; its own seed-3 confirmation b2_format8_lineage_s3 (da64d98c...) and exit_check_b2
-  (the network against mb_a at 100 ms, .575 and .65 rules) are preregistered.
+  (the network against mb_a at 100 ms, .575 and .65 rules) are preregistered. B2 judged 14:06 (item 45):
+  parent_gain_format8 met, format_gain not met at 100 ms by the lower bound .495; exit_check_b2 running;
+  the seed-3 matches queued (guard amended before they play).
 - A3, H1024 with the corrected widening: the manifest runs/nnue_gauntlets/a3_width (format 6 from
   long60_s2:epoch60) failed its preflight 2026-09-13
   (runs/nnue_gauntlets/a3_width/preflight/report.json 75068e4b...): structure and integer parity
