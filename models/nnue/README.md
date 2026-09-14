@@ -153,7 +153,8 @@ retained checkpoints, exports their endpoints, plays the matches through
 the preregistered frozen `bot` (fixed pair counts with the eval tool's
 bootstrap interval, or the sequential test `bot eval --sprt`; search builds
 seated through `rpsi:` on a shared network or a side's own `candidate_network` /
-`reference_network`) and writes `verdict.json` under
+`reference_network`; a per-move budget of `move_ms` or a fixed `sims` count, 80 being
+the arena seat's 200k nodes) and writes `verdict.json` under
 the declared rules, one heavy phase at a time under the compute lock.
 `nnue.label` runs the release `bot` or the frozen copy named by `NNUE_BOT`.
 

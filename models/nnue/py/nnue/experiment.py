@@ -47,7 +47,10 @@ the preregistered `bot`; sides that are `.exe` paths are search builds
 (`rpsi:` seats with the match's player threads, both sides so the process
 overhead is equal) playing the experiment's `network`, or the side's own
 `candidate_network` / `reference_network` when the match names one (a search
-build and a network against another pair; pinned like every input). A match with
+build and a network against another pair; pinned like every input). A match's
+budget is a wall clock (`move_ms`) or a fixed simulation count (`sims`; an NNUE
+player searches 2,500 nodes per simulation, so 80 is the arena seat's 200k
+nodes). A match with
 `"sprt": true` is the sequential test of `bot eval --sprt` (journal
 `<tag>.jsonl`, resumed when it exists, stopped by its own rule, streamed so
 that `<tag>.timing.json` records each invocation's pairs, wall time and the
@@ -390,14 +393,20 @@ def seat(experiment: dict, match: dict, role: str) -> list[str]:
     return out
 
 
+def budget(match: dict) -> list[str]:
+    """The per-move budget: a wall clock or a fixed simulation count."""
+    if "sims" in match:
+        return ["--sims", str(match["sims"])]
+    return ["--move-ms", str(match["move_ms"])]
+
+
 def command_of(experiment: dict, directory: Path, match: dict) -> list[str]:
     command = [
         str(absolute(experiment["bot"])),
         "eval",
         *seat(experiment, match, "candidate"),
         *seat(experiment, match, "reference"),
-        "--move-ms",
-        str(match["move_ms"]),
+        *budget(match),
         "--threads",
         str(match.get("concurrent", 8)),
         "--player-threads",
@@ -932,7 +941,8 @@ def protocol_problems(protocol: dict, match: dict, experiment: dict | None) -> l
     settings = protocol.get("settings") or {}
     expected = {
         "seed": match["seed"],
-        "move_ms": match["move_ms"],
+        "move_ms": match.get("move_ms"),
+        **({"sims": match["sims"]} if "sims" in match else {}),  # a clock match's journal carries the default count
         "opening_plies": match.get("opening_plies", 8),
         "workers": match.get("concurrent", 8),
     }
@@ -1030,8 +1040,8 @@ def summarise(match: dict, report: dict | None, directory: Path, experiment: dic
     for role in ("candidate", "reference"):
         if side(match[role]).suffix != ".exe" and str(side(match[role])) not in str(report.get(role, "")):
             problems.append(f"the report's {role} is not the manifest's")
-    if report.get("move_ms") != match["move_ms"]:
-        problems.append("the report's clock differs from the manifest")
+    if report.get("move_ms") != match.get("move_ms") or ("sims" in match and report.get("sims") != match["sims"]):
+        problems.append("the report's budget differs from the manifest")
     if match.get("sprt"):
         sequential = report.get("sequential", {})
         valid = sequential.get("stop_reason") in ("accept", "reject", "inconclusive")
@@ -1042,7 +1052,8 @@ def summarise(match: dict, report: dict | None, directory: Path, experiment: dic
         "played": True,
         "candidate": match["candidate"],
         "reference": match["reference"],
-        "move_ms": match["move_ms"],
+        "move_ms": match.get("move_ms"),
+        **({"sims": match["sims"]} if "sims" in match else {}),
         "games": games,
         "wins": report["wins"],
         "draws": report["draws"],
@@ -1078,6 +1089,8 @@ def validate(experiment: dict) -> None:
     for tag, match in matches.items():
         if bool(match.get("sprt")) == ("pairs" in match):
             raise ValueError(f"{tag}: a sequential match has no pair count, a fixed-count match needs one")
+        if ("move_ms" in match) == ("sims" in match):
+            raise ValueError(f"{tag}: a match has a clock (move_ms) or a simulation count (sims), one of the two")
         for role in ("candidate", "reference"):
             if match.get(f"{role}_network") and not match[role].endswith(".exe"):
                 raise ValueError(f"{tag}: {role}_network needs a search build (.exe) on that side")

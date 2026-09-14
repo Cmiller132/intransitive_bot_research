@@ -89,8 +89,8 @@ def header_of(command: list, sides: dict) -> dict:
         "settings": {
             "capture_clock": 200,
             "pairs": 3008,
-            "sims": 0,
-            "move_ms": option("--move-ms"),
+            "sims": option("--sims") if "--sims" in command else 32,
+            "move_ms": option("--move-ms") if "--move-ms" in command else None,
             "reference_move_ms": None,
             "reference_sims": None,
             "workers": option("--threads"),
@@ -184,7 +184,8 @@ def scripted_launch(calls: list, outcomes: dict):
             sequential = None
         report = {
             **sides,
-            "move_ms": int(command[command.index("--move-ms") + 1]),
+            "move_ms": int(command[command.index("--move-ms") + 1]) if "--move-ms" in command else None,
+            "sims": int(command[command.index("--sims") + 1]) if "--sims" in command else 0,
             "wins": tally["W"],
             "draws": tally["D"],
             "losses": tally["L"],
@@ -439,6 +440,40 @@ def test_a_side_may_play_its_own_network(workspace, monkeypatch):
     bad["matches"][0]["candidate"] = "arm:epoch4"
     with pytest.raises(ValueError, match="candidate_network"):
         experiment.validate(bad)
+
+
+def test_a_fixed_simulation_match_is_judged_by_its_budget(workspace, monkeypatch):
+    root = workspace
+    directory = root / "runs" / "nnue_gauntlets" / "nodes"
+    directory.mkdir(parents=True)
+    spec = manifest(root)
+    spec["arms"] = []
+    spec["matches"] = [
+        {"tag": "n80", "candidate": "patch.exe", "reference": "base.exe", "sims": 80, "pairs": 2, "seed": 5},
+        {"tag": "n80q", "candidate": "patch.exe", "reference": "base.exe", "sims": 80, "sprt": True, "seed": 6},
+    ]
+    spec["rules"] = [
+        {"name": "bar", "type": "score_at_least", "threshold": 0.5, "matches": ["n80"]},
+        {"name": "patch", "type": "sprt_accept", "matches": ["n80q"]},
+    ]
+    spec["identities"] = experiment.identities(spec)
+    file = directory / "experiment.json"
+    file.write_text(json.dumps(spec), encoding="utf-8")
+    calls: list = []
+    outcomes = {"n80": (2, 1, 1), "n80q": ([10, 30, 60, 40, 20], "accept")}
+    monkeypatch.setattr(experiment, "launch", scripted_launch(calls, outcomes))
+    monkeypatch.setattr(experiment, "nice", lambda mask: None)
+    assert experiment.main(["run", str(file)]) == 0
+    for command in calls:
+        assert command[command.index("--sims") + 1] == "80" and "--move-ms" not in command
+    verdict = json.loads((directory / "verdict.json").read_text(encoding="utf-8"))
+    assert all(m["valid"] for m in verdict["matches"]) and all(r["met"] for r in verdict["rules"])
+    assert all(m["sims"] == 80 and m["move_ms"] is None for m in verdict["matches"])
+    for bad in ({"sims": 80, "move_ms": 50}, {}):
+        broken = json.loads(file.read_text(encoding="utf-8"))
+        broken["matches"][0] = {**{k: v for k, v in broken["matches"][0].items() if k != "sims"}, **bad}
+        with pytest.raises(ValueError, match="one of the two"):
+            experiment.validate(broken)
 
 
 def test_a_cuda_arm_is_given_the_gpu_and_a_cpu_run_is_not():
