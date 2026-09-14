@@ -1,0 +1,30 @@
+# The arena site: the built frontend from /opt/arena/web, the API and the
+# health check proxied to the uvicorn process on the loopback. The tunnel
+# (cloudflared) connects from the loopback and carries the visitor's address
+# in X-Forwarded-For, which uvicorn reads (arena.service).
+:80 {
+	root * /opt/arena/web
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8100 {
+			flush_interval -1
+			trusted_proxies 127.0.0.0/8
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy 127.0.0.1:8100 {
+			trusted_proxies 127.0.0.0/8
+		}
+	}
+
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+
+	encode gzip zstd
+	header {
+		-Server
+	}
+}

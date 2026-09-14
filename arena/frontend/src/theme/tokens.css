@@ -1,0 +1,175 @@
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+:root {
+    --bg: #f7f2f1;
+    --surface: #fffdfd;
+    --surface-2: #f0e8e7;
+    --ink: #1b1a24;
+    --ink-2: #55515f;
+    --ink-3: #625e6d;
+    --line: #e4dad9;
+    --line-strong: #cfc3c2;
+    --blue: #172fbe;
+    --blue-soft: #dce1f8;
+    --red: #a92e26;
+    --red-soft: #f3d9d5;
+    --mint: #a3d3b3;
+    --mint-light: #c9e6d3;
+    --accent: #287668;
+    --accent-text: #1f6558;
+    --accent-soft: #d7ebe4;
+    --on-accent: #ffffff;
+    --piece-blue: #102daf;
+    --piece-red: #98251f;
+    --overlay-policy: #171321;
+    --overlay-outline: #ffffff;
+    --overlay-attention: #6a1b9a;
+    --q-best: #216e5f;
+    --q-good: #5d9577;
+    --q-inacc: #9a6711;
+    --q-mistake: #a94716;
+    --q-blunder: #7b2e88;
+    --shadow: 0 1px 0 rgba(27, 26, 36, 0.04), 0 8px 24px -16px rgba(27, 26, 36, 0.25);
+    color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+        --bg: #101322;
+        --surface: #171b2e;
+        --surface-2: #1e2338;
+        --ink: #f2f0f6;
+        --ink-2: #c1becc;
+        --ink-3: #aaa7b8;
+        --line: #343a56;
+        --line-strong: #505775;
+        --blue: #9eaaff;
+        --blue-soft: #253171;
+        --red: #ff8b7b;
+        --red-soft: #552723;
+        --mint: #79ad8e;
+        --mint-light: #a3d3b3;
+        --accent: #64c8b6;
+        --accent-text: #8edccc;
+        --accent-soft: #163b36;
+        --on-accent: #101322;
+        --piece-blue: #122fad;
+        --piece-red: #92241e;
+        --overlay-policy: #171321;
+        --overlay-outline: #ffffff;
+        --overlay-attention: #5a167d;
+        --q-best: #155e4f;
+        --q-good: #245e44;
+        --q-inacc: #7a4b00;
+        --q-mistake: #8c330b;
+        --q-blunder: #652170;
+        --shadow: 0 1px 0 rgba(0, 0, 0, 0.2), 0 8px 24px -16px rgba(0, 0, 0, 0.6);
+        color-scheme: dark;
+    }
+}
+:root[data-theme='dark'] {
+    --bg: #101322;
+    --surface: #171b2e;
+    --surface-2: #1e2338;
+    --ink: #f2f0f6;
+    --ink-2: #c1becc;
+    --ink-3: #aaa7b8;
+    --line: #343a56;
+    --line-strong: #505775;
+    --blue: #9eaaff;
+    --blue-soft: #253171;
+    --red: #ff8b7b;
+    --red-soft: #552723;
+    --mint: #79ad8e;
+    --mint-light: #a3d3b3;
+    --accent: #64c8b6;
+    --accent-text: #8edccc;
+    --accent-soft: #163b36;
+    --on-accent: #101322;
+    --piece-blue: #122fad;
+    --piece-red: #92241e;
+    --overlay-policy: #171321;
+    --overlay-outline: #ffffff;
+    --overlay-attention: #5a167d;
+    --q-best: #155e4f;
+    --q-good: #245e44;
+    --q-inacc: #7a4b00;
+    --q-mistake: #8c330b;
+    --q-blunder: #652170;
+    --shadow: 0 1px 0 rgba(0, 0, 0, 0.2), 0 8px 24px -16px rgba(0, 0, 0, 0.6);
+    color-scheme: dark;
+}
+
+/*
+ * A player named with the colour it is playing. `--blue` and `--red` are the
+ * token colours of the two sides in both themes, so a name reads the same in
+ * the live grid, the game list and the analysis header. The swatch and the
+ * turn dot inherit the name's colour, and the bold weight of `to-move` says
+ * whose turn it is without relying on colour alone.
+ */
+.side-name {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4em;
+    min-width: 0;
+    font-weight: 600;
+}
+/* The doubled selectors outrank the page rules that colour rows and captions. */
+.side-blue,
+.side-name.side-blue {
+    color: var(--blue);
+}
+.side-red,
+.side-name.side-red {
+    color: var(--red);
+}
+.side-name .side-label {
+    color: inherit;
+}
+.side-swatch {
+    flex: none;
+    width: 0.66em;
+    height: 0.66em;
+    border-radius: 2px;
+    background: currentColor;
+}
+.side-turn {
+    flex: none;
+    width: 0.5em;
+    height: 0.5em;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    opacity: 0.35;
+}
+.side-turn.on {
+    background: currentColor;
+    opacity: 1;
+}
+.side-name.to-move .side-label {
+    font-weight: 800;
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+}
+.side-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.side-tag {
+    color: var(--ink-3);
+    font:
+        400 10px 'IBM Plex Mono',
+        monospace;
+    font-style: normal;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}

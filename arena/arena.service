@@ -1,0 +1,15 @@
+[Unit]
+Description=Intransitive arena: rated games, ratings and analysis
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/arena.env
+WorkingDirectory=/opt/arena/backend
+ExecStart=/opt/arena/venv/bin/uvicorn arena.api.app:app --host 127.0.0.1 --port 8100 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
