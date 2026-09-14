@@ -90,4 +90,4 @@ match/README.md defines the evaluation and the record formats.
 
 ## License
 
-See [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
