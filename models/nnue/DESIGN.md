@@ -562,6 +562,19 @@ that record.
     2026-09-14 (95ae9ee). Timing: .352 pairs per active second with eight concurrent pairs, idle share
     .284.
 
+44. B, format 8 against format 6, seed 3 (2026-09-14; runs/nnue_gauntlets/format8_train_s3; pinned
+    manifest bd34ff3f..., verdict.json 565d51e7..., the runner's original kept as verdict.runner.json):
+    the confirmation of item 42 preregistered before its result, from mb_b's format 6 bytes on the A1
+    mixture, 20 epochs, seed 3, CPU (the format 8 arm interrupted at epoch 19 on 2026-09-13 and resumed
+    exactly). Format 8 against format 6 .556 [.518, .596] at 50 ms and .552 [.510, .593] at 100 ms:
+    the format rule met. Against mb_b: format 8 .629 [.593, .666] and .623 [.582, .665], format 6
+    .566 [.528, .605] and .543 [.495, .592]: promotion_format8 met, promotion_control6 not met (the
+    100 ms lower bound .495). 200 pairs at 50 ms and 150 at 100 ms per match, 2,100 games, all valid.
+    Objective at epoch 20 .0196 against .0210; epoch-mean training value loss .0104 against .0153.
+    Two seeds meet format_gain and promotion_format8 independently: format 8 is adopted as the
+    training format. Audited by Claude alone (Astra unavailable under a Codex usage limit until
+    2026-09-19); co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -583,8 +596,8 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   a label-depth arm would need its own preregistration.
 - B, format 8: the seed-2 pilot met its rules (item 42); the seed-3 confirmation (format8_train_s3,
   pinned bd34ff3f...) was stopped 2026-09-13 with its format 8 arm at epoch 19 and resumed 2026-09-14
-  09:45 (running). Adoption as the training
-  format requires its independent format_gain and promotion_format8 rules to be met; B2
+  09:45 and judged 12:48 (item 44): format_gain and promotion_format8 met at both budgets, so
+  format 8 is adopted as the training format. B2
   (runs/nnue_gauntlets/b2_format8_lineage: format 8 factorised from long60_s2:epoch60 against its
   format 6 continuation) was pinned 2026-09-14 (9304f4f9..., both arms on the GPU under the user's grant,
   the seed-3 guard overridden by the user's instruction), its arms trained (10 and 13 minutes), its
