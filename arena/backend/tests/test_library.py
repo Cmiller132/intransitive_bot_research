@@ -25,18 +25,18 @@ def test_henhen_pgn_import(client, conn) -> None:
     row = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
     assert row["source"] == "henhen" and row["frame"] == "henhen"
     assert row["ply_count"] == 209
-    assert row["source_id"] == "757f2991f5723929c03a8401"
+    assert row["source_id"] == "000000000000000000000002"
     assert conn.execute("SELECT count(*) FROM plies WHERE game_id = ?", (game_id,)).fetchone()[0] == 210
     assert import_payload(client, "henhen_pgn", text) == [game_id]
     page = client.get(f"/api/games/{game_id}").json()
-    assert page["players"]["blue"]["name"] == "VladKlentBot"
+    assert page["players"]["blue"]["name"] == "BlueBot"
     assert page["moves"][0]["san"].endswith(page["moves"][0]["san"][-2:])
     assert len(page["positions"]) == 210
     assert page["positions"][0]["position_key"] == page["positions"][0]["position_key"].lower()
     assert page["review_status"] == "not_analysed" and page["live"] is False
     listing = client.get("/api/games", params={"source": "henhen"}).json()
     assert listing["total"] == 1 and listing["items"][0]["id"] == game_id
-    assert client.get("/api/games", params={"player": "ALTFish"}).json()["total"] == 1
+    assert client.get("/api/games", params={"player": "RedBot"}).json()["total"] == 1
     assert client.get("/api/games", params={"live": 1}).json()["total"] == 0
 
 

@@ -40,6 +40,6 @@ describe('rules', () => {
         const states = replay([...cycle, ...cycle], board, 'blue')
         expect(states[4].repetition).toBe(2)
         expect(states[8].repetition).toBe(3)
-        expect(states[8].result).toEqual({ winner: null, reason: 'repetition' })
+        expect(states[8].result).toBeUndefined()
     })
 })

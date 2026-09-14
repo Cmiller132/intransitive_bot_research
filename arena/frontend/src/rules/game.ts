@@ -71,22 +71,15 @@ export function applyMove(state: PositionState, move: Move): PositionState {
         ply: state.ply + 1,
         psc,
         repetition: 1,
-        result: detectResult(board, state.to_move, to_move, psc, 1),
+        result: detectResult(board, state.to_move, to_move, psc),
     }
 }
-export function detectResult(
-    board: number[],
-    mover: Side,
-    toMove: Side,
-    psc: number,
-    repetition: number,
-): Result | undefined {
+export function detectResult(board: number[], mover: Side, toMove: Side, psc: number): Result | undefined {
     const goal = mover === 'blue' ? 80 : 0
     if (sideOf(board[goal]) === mover) return { winner: mover, reason: 'corner' }
     if (!board.some((p) => sideOf(p) === toMove)) return { winner: mover, reason: 'no_pieces' }
     if (!legalMoves(board, toMove).length) return { winner: mover, reason: 'no_moves' }
     if (psc >= 200) return { winner: null, reason: 'stagnation' }
-    if (repetition >= 3) return { winner: null, reason: 'repetition' }
     return undefined
 }
 export const initialState = (): PositionState => ({
@@ -109,7 +102,7 @@ export function replay(moves: Move[], setup = initialBoard(), first: Side = 'blu
         states.push({
             ...next,
             repetition,
-            result: detectResult(next.board, previous.to_move, next.to_move, next.psc, repetition),
+            result: detectResult(next.board, previous.to_move, next.to_move, next.psc),
         })
     }
     return states

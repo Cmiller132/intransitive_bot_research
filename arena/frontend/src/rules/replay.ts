@@ -24,7 +24,7 @@ export function statesFor(
             states.push({
                 ...next,
                 repetition,
-                result: detectResult(next.board, previous.to_move, next.to_move, next.psc, repetition),
+                result: detectResult(next.board, previous.to_move, next.to_move, next.psc),
             })
         } catch (cause) {
             const detail = cause instanceof Error ? cause.message : String(cause)
