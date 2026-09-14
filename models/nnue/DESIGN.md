@@ -602,6 +602,19 @@ that record.
     the gate 6 build, per-side networks in the runner) follows; deployment is the user's decision (a
     format 8 network needs a format 8 capable arena binary). Audited by Claude alone; co-signature pending.
 
+47. Deployment candidate: the accepted search build with B2's network against the deployed pair
+    (2026-09-14; runs/nnue_gauntlets/deploy_candidate_b2_ch; pinned manifest 19e979aa..., verdict.json
+    214d3413..., the runner's original kept as verdict.runner.json): c2_search_capture_history.exe
+    (d00ab30f..., item 43) playing b2_format8_s2:epoch20 (ba8e0b93...) against the frozen gate 6 build
+    (e4e0d5ff...) playing mb_a (2e275215...), rpsi seats on both sides with one thread each (per-side
+    networks in the runner, 4e04d59 and ee4e32b), 100 ms, 250 pairs: 273 wins, 115 draws, 112 losses,
+    .661 [.625, .695], 500 games valid, mean 251 plies. arena_candidate (.575) and exit_100ms (.65)
+    both met: the first clause of the exit condition (section 7) is met for the first time, by the
+    pair; the network alone scored .630 (item 46) and the patch's sequential estimate was .517 at
+    50 ms (item 43). The remaining clauses (250 ms with four threads at .60 over 500 games; the seat's
+    200k fixed nodes) are preregistered next; deployment is the user's decision. Audited by Claude
+    alone; co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -637,7 +650,7 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   playing b2_format8_s2:epoch20 against the gate 6 build playing mb_a at 100 ms over 250 pairs, .575 and
   .65 rules; per-side networks in the runner, 4e04d59) pinned 14:18 and queued after exit_check_b2.
   exit_check_b2 judged 14:33 (item 46): .630 [.598, .662] against mb_a, the arena bar met, the exit clause
-  not; deploy_candidate_b2_ch running from 14:32.
+  not; deploy_candidate_b2_ch judged 15:00 (item 47): .661 [.625, .695], both rules met.
 - A3, H1024 with the corrected widening: the manifest runs/nnue_gauntlets/a3_width (format 6 from
   long60_s2:epoch60) failed its preflight 2026-09-13
   (runs/nnue_gauntlets/a3_width/preflight/report.json 75068e4b...): structure and integer parity
@@ -659,7 +672,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   promotion test of item 39's lineage) deployed 2026-09-13 19:53 on the user's decision as a second
   NNUE seat at a fixed 200k nodes per move beside nnue_1 = mb_a; the accepted capture-history patch
   is not in the arena binary.
-- Exit condition, met by nothing above: at least 65 % against frozen mb_a at 100 ms over 500 games,
+- Exit condition, its first clause met by the deployment candidate of item 47 (the capture-history
+  build with b2_format8_s2:epoch20, .661 at 100 ms), the other two preregistered after it: at least
+  65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
   deployment is the user's decision.
