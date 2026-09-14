@@ -6,7 +6,7 @@ match runner stays model-agnostic.
 ```
 bot eval  --candidate sq:runs/x/export.onnx [--reference sq:weights/sq_g128.onnx] [--pairs 32 | --sprt pairs.jsonl] [--resume] [--sims 32 | --move-ms 100] [--reference-move-ms 100 | --reference-sims 32] [--threads 4] [--player-threads 1] [--seed 0] [--opening-plies 8] [--records games.jsonl] [--stream]
 bot play  --first sq:a.onnx --second sq:b.onnx [--sims 32 | --move-ms 100] [--player-threads 1] [--seed 0] [--opening-plies 8] [--random-moves K --random-from P --random-to Q] [--random-seed S]
-bot rpsi  --player sq:model.onnx [--move-ms 250] [--max-move-ms 250] [--sims 32] [--movetime 100] [--threads 4] [--name intransitive_bot]
+bot rpsi  --player sq:model.onnx [--move-ms 250] [--max-move-ms 250] [--sims 32] [--movetime 100 | --fixed-sims 80] [--threads 4] [--name intransitive_bot]
 bot analyse --engine conv:model.onnx [--threads 1]   # or sq:<onnx>, nnue:<file.nnue>
 bot nnue validate --model model.nnue --input positions.jsonl
 bot nnue diagnose --model model.nnue --input positions.jsonl --nodes 20000 [--threads 1]
@@ -44,8 +44,8 @@ sims (0 for a timed candidate), and the effective reference_move_ms and
 reference_sims (the unused reference unit is null). Without either override,
 both players receive the candidate budget.
 
-Adding a model means adding one arm to `player_from_spec`. Results are printed
-as JSON.
+Adding a model means adding one arm to `player_from_spec` and one to
+`analyser_from_spec`. Results are printed as JSON.
 
 `eval --sprt pairs.jsonl` runs the fixed C1 pentanomial test: pair-average
 candidate scores 0, .25, .5, .75, 1; hypotheses .50/.52, alpha=beta=.05,
@@ -87,7 +87,8 @@ built outside a git history, the version alone.
 `eval --threads` sets concurrent pairs; `--player-threads` sets threads within
 one player. NNUE reserves 20 ms under host-provided time budgets. The RPSI
 seat option `--movetime N` replaces `go sims` with a self-imposed N ms budget;
-NNUE uses it without a reserve. Explicit host movetime and site clocks take
+NNUE uses it without a reserve; `--fixed-sims N` instead replaces `go sims`
+with a fixed count of N simulations. Explicit host movetime and site clocks take
 precedence and retain the reserve. Simulation play maps
 n simulations to n * 2,500 nodes on one worker (120 s safety ceiling); use timed
 eval for equal wall-time comparisons. Its records include nodes, depth, score

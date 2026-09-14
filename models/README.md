@@ -14,9 +14,10 @@ A model package `models/<name>/` holds:
 - `README.md`: purpose and interface of both halves.
 
 Plugging in: list the crate in the root Cargo.toml members and in `cli`'s
-dependencies, and add one arm to `player_from_spec` in cli/src/main.rs so
-that `<name>:<path>` builds the player. Eval, play and rpsi then work through
-`match::Player` without further changes.
+dependencies, and add one arm to `player_from_spec` and one to `analyser_from_spec` in
+cli/src/main.rs so that `<name>:<path>` builds the player and the analyser.
+Eval, play, rpsi and analyse then work through `match::Player` and
+`match::Analyser` without further changes.
 
 `sq/` is the worked example (the reference line); `conv/` is the second model,
 built to the same layout; `nnue/` is the CPU line, a sparse integer evaluator

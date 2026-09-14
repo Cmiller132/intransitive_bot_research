@@ -18,7 +18,9 @@
 - One GPU training run at a time. Check before launching; never interrupt a
   run except for a failure.
 - Deploying to the site is the user's decision.
-- `cargo xtask check` must pass before a session ends.
+- Before ending a session, run checks relevant to the changes. Run a model's
+  CPU tests only when that model or its dependencies changed; use
+  `cargo xtask check` when full-workspace validation is relevant.
 - Before ending a session: delete your scratch files and diagnostics, remove
   code and comments your changes made obsolete, update any README whose
   interface changed, and report plainly what was measured and what is undone.

@@ -14,7 +14,7 @@ package, class, method and line has a purpose.
   them actively.
 - Repeated solutions: the old workspace solved the same problem several times
   (evaluation most notably). Here every problem has exactly one solution.
-- Unclear structure: the work is split into three components with fixed
+- Unclear structure: the work is split into four components with fixed
   boundaries (below).
 
 ## Components
@@ -41,13 +41,14 @@ reference model or an older checkpoint. The one variant is the timed eval
 (`bot eval --move-ms N`), the same paired match under a per-move wall clock
 with a declared thread count per player, for engines whose strength is a
 function of time (the NNUE line); its report carries the complete-pair count
-and a seeded opening-pair bootstrap interval. Anything else is a diagnostic,
-not an eval.
+and a seeded opening-pair bootstrap interval. Either form can run as the
+fixed sequential test (`bot eval --sprt`) instead of a fixed pair count.
+Anything else is a diagnostic, not an eval.
 
 ### Models (Rust + Python)
 
 Each model is its own package of Rust and Python code and owns all of its
-logic: network definition, inference, search, training and GPU self-play.
+logic: network definition, inference, search, training and self-play.
 Models interact with the rest of the workspace only through the engine's rules
 and the match runner's player interface.
 
@@ -79,9 +80,9 @@ blank.
 
 ## Reference artifacts
 
-Two checkpoints are brought in as read-only weights: catq@140 and the latest
-sq_g128 checkpoint. They serve as distillation starting points and as match
-references. Nothing else comes from the old run directories.
+One checkpoint is brought in as read-only weights: the sq_g128 checkpoint
+(weights/README.md). It serves as a distillation starting point and as the
+match reference. Nothing else comes from the old run directories.
 
 ## Old workspaces
 
@@ -94,10 +95,16 @@ deliberate.
 
 ## Documentation
 
-Exactly these documents exist: this file, Agents.md, a workspace README, one
+Exactly these documents exist: this file, AGENTS.md, a workspace README, one
 game-rules document, the bot architecture specification (docs/), one README
 per crate, package and top-level directory stating its purpose and interface,
 and one DESIGN.md per model holding its numbered design items.
+The user-requested [RGSC diagnosis and experiment plan](models/conv/RGSC.md)
+is one maintained working document. Its proposals do not approve changes to
+the model design; measured data remains in the linked run artifacts.
+The user-approved NNUE experiment plan, kept with its run artifacts in
+runs/nnue_plan/ (untracked), defines the active controlled training
+comparison; exact settings and measured results remain in those artifacts.
 There is no results log, no proposals folder and no history.
 Measured results live with their run artifacts and in commit messages.
 
@@ -107,7 +114,7 @@ Measured results live with their run artifacts and in commit messages.
   rust-toolchain.toml.
 - Cargo workspace: crates `engine`, `search` (the generic Gumbel search),
   `match`, `cli` (the `bot` binary that knows every model), `xtask` (the task
-  runner: `cargo xtask check | wheel | linux`) and one crate per model under
+  runner: `cargo xtask check | wheel | release | linux`) and one crate per model under
   `models/`; each model's Python package sits beside its crate.
 - Windows native, one RTX 4070 Ti, Triton kernels kept for GPU self-play.
 - Deployment targets: the site bot container and the arena container, both

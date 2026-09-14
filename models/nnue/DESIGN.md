@@ -25,7 +25,7 @@ strength-accepted.
 
 The deployed network is identified by its file hash and its sidecar (run, epoch, objective, config,
 datasets), never by a name; an unjudged candidate is not the incumbent. README owns the commands,
-the experiment manifests and verdicts own recipes and results, claude_notes.md is the session log;
+the experiment manifests and verdicts own recipes and results;
 DESIGN states the contracts and the bounded findings that shaped them.
 
 ## 2. Evaluator and formats

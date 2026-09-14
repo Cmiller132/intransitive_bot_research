@@ -20,7 +20,7 @@ export format:
 - `SqPlayer::load(onnx_path, threads)`: the default play settings (contempt,
   repetition penalty, moves-left, batch, cache size); `with_settings` takes a
   `PlaySettings`.
-- `planes::encode(state) -> [f32; 25 * 81]`.
+- `planes::encode(state, out)` writes the 25 x 81 planes into `out`.
 - `OrtNet`: `search::Evaluator` over an exported graph and its sidecar.
 
 ## Python interface
