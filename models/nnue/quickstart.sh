@@ -34,7 +34,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-NET="${1:?usage: models/nnue/quickstart.sh <start.nnue> [name]   (a format 8 .nnue file; see models/nnue/QUICKSTART.md)}"
+NET="${1:?usage: models/nnue/quickstart.sh <start.nnue> [name]   (a .nnue file, e.g. models/nnue/examples/example.nnue; see models/nnue/QUICKSTART.md)}"
 NAME="${2:-qs_$(date +%Y%m%d_%H%M%S)}"
 GAMES="${GAMES:-3200}"
 NODES="${NODES:-100000}"

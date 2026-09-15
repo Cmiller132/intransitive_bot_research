@@ -54,11 +54,9 @@ duplicate positions are dropped. About 220 rows come out of a game.
    `python3` the script uses.
 5. Check: `target/release/bot --help` and
    `python3 -c "import engine, nnue, torch"` both succeed.
-6. A starting network: a format 8 `.nnue` file. None is in the repository
-   (weights are untracked); use one you were given, or a network you
-   trained. For a pipeline test only,
-   `models/nnue/tests/fixtures/format8_h32.nnue` is a 32-wide test fixture
-   that runs everything but plays badly.
+6. A starting network: any `.nnue` file in format 6 or 8. The repository
+   ships an example, `models/nnue/examples/example.nnue`, to start from; a
+   format 6 file is converted to format 8 by the trainer on the way in.
 
 ## First run
 
@@ -66,14 +64,14 @@ A smoke test of the whole pipeline, under a minute:
 
 ```
 GAMES=8 NODES=5000 EPOCHS=1 STEPS=5 BATCH=256 WARMUP=2 PAIRS=2 SIMS=1 \
-  models/nnue/quickstart.sh path/to/start.nnue smoke
+  models/nnue/quickstart.sh models/nnue/examples/example.nnue smoke
 ```
 
 A first real pass sized for a CPU trainer (generation is the long part,
 about 1.5 hours on a 16-core machine; training some minutes):
 
 ```
-GAMES=3200 EPOCHS=4 STEPS=250 BATCH=2048 models/nnue/quickstart.sh path/to/start.nnue first
+GAMES=3200 EPOCHS=4 STEPS=250 BATCH=2048 models/nnue/quickstart.sh models/nnue/examples/example.nnue first
 ```
 
 The script prints each step with a timestamp and ends with a line like
@@ -100,7 +98,7 @@ a clean slate under the same name, delete `runs/<name>/`.
 Every knob is an environment variable set on the command line. The
 defaults are the research loop's H512 continuation recipe; the script
 reads the network's width from the file, so a different width needs no
-setting.
+setting, and a format 6 file trains as format 8.
 
 | variable | default | meaning | when to change |
 |---|---|---|---|

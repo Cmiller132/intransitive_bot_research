@@ -246,6 +246,7 @@ and when to change it, how to read the score, iterating, troubleshooting.
 The Rust generator and the Python trainer share nothing but files: shards
 and a manifest under `runs/nnue_selfplay/<name>/` in, a `.nnue` file under
 `runs/<name>/` out, and that file is what the generator plays next.
+`models/nnue/examples/example.nnue` is an example network to start from.
 
 ## Retraining on a stronger teacher
 
