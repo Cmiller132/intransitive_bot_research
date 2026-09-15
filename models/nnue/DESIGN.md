@@ -879,3 +879,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   Two guards added 17:15 after round 3's stage 2 re-admitted a net dropped at stage 1 (its 200-game error bar
   was wider): a net dropped at a stage stays dropped, and the last stage takes at most four contenders by pooled
   score (round 3's stage 3 had run eight of ten: 3,200 games where four would have been 1,600).
+  Round 3's result (the first round on 25k labels, multipv games and PV rows): every arm above .49 at the screen;
+  ema chosen at .5475 over 800 games (pool_s3 .545, human2x .536; the base pool arm .4925 over 400 against its
+  seed replica's .545, seed noise again); the gain test accepted at .536 [.511, .563] over 432 pairs at 40k; ema
+  promoted and deployed as nnue_6 at 17:46. A loop bug found at the promotion: finish_round zeroed the untested
+  row count after every non-failed round, losing the sets imported while the round ran (loop_08 and loop_09,
+  4.97 M root rows); fixed to recount the pool sets outside the round, the state corrected under a stop.
