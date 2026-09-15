@@ -722,11 +722,18 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
   deployment is the user's decision.
 - The improvement loop (runs/nnue_plan/autoloop.py, rewritten 2026-09-14 after the review of its
-  skeleton; runs/nnue_loop/ holds its state, log, digest, proposals and alerts): self-play from the
-  accepted network on both CCDs at idle priority, a fixed held-out set no arm trains on
-  (heldout_loop), every round four mixture variants of the accepted network trained on the GPU and
-  screened on that set, the screen's choice against the accepted network under the lock (the 50 ms
-  sequential test as the screen, a fixed 100 ms match at .5 over 150 pairs as the guard; both met
-  promote), generations pooled across null rounds, a deployment-candidate test after every
-  promotion; it never deploys. Started 2026-09-14 21:xx to take over the lane once the queue drains
-  and gen5_round is judged (its endpoint adopted if promotion_gen5 is met).
+  skeleton and redesigned 2026-09-15 as a fixed-node ladder; runs/nnue_loop/ holds its state, log,
+  digest, proposals and alerts; runs/nnue_plan/LOOP_PLAN_2026-09-14.md the reasoning): self-play from
+  the accepted network on both CCDs at idle priority; when the pool's untested rows reach the
+  increment (3 M, doubled after null rounds up to 4x) four mixture continuations of the accepted
+  network, a control every third round, an optional from-scratch arm and the mean-weight soup of the
+  continuations are trained on the GPU; then, under the lock, at fixed nodes with 16 games at once
+  and both seats through the accepted search build: a 200-opening screen of every variant at 20k
+  nodes (the held-out MSE recorded beside it, never decisive; the best at least .49 or the round is
+  null), the C1 sequential test at 40k nodes (gain), the same test at 240k nodes with the accepted
+  network in the candidate seat (hold; rule sprt_reject = not two points worse), both met promote;
+  then a deployment ladder against the deployed pair (sequential accept at 240k, the 250 ms four-thread
+  site-like test at .5, an anchor reading); both deploy rules met write a proposal. The two budgets
+  are six apart as fishtest's STC and LTC; it never deploys. Started 2026-09-14 21:00, redesigned code
+  from 2026-09-15 00:50, to take over the lane once the queue drains and gen5_round is judged (its
+  endpoint adopted if promotion_gen5 is met).
