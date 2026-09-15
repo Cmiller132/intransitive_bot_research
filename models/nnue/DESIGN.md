@@ -658,6 +658,60 @@ that record.
     audited mechanically by the loop (runner and re-judgement agree); Claude's reading; co-signature
     pending.
 
+51. B2's seed-3 confirmation: format 8 factorised from long60_s2:epoch60 against its format 6
+    continuation (2026-09-14; runs/nnue_gauntlets/b2_format8_lineage_s3; pinned manifest 54230500...,
+    verdict.json 34926105..., the runner's original 33c62d2e... kept as verdict.runner.json): both
+    arms from long60_s2:epoch60 on the lineage's 12-set mixture, 20 epochs at lr 1e-4,
+    quantisation-aware from the first epoch, seed 3, on the GPU (b2_format8_s3:epoch20 04d05114...,
+    b2_control6_s3:epoch20 fd052a18...); 200 pairs at 50 ms and 150 at 100 ms per match, one thread,
+    eight concurrent games, the parent matches beside, 2,100 games, all valid. Format 8 against format
+    6: .546 [.507, .586] at 50 ms and .527 [.482, .573] at 100 ms, so format_gain (lower bound above
+    .5 at both budgets) is not met at 100 ms, as in seed 2 (item 45, lower bound .495). Against the
+    parent: format 8 .569 [.527, .609] and .567 [.522, .610], parent_gain_format8 met at both budgets;
+    format 6 .511 [.472, .550] and .523 [.482, .565]. Reading: the second seed repeats the first. The
+    format 8 continuation beats its parent by five to seven points at both budgets and the format 6
+    continuation does not, while the format-against-format difference (2.7 to 4.6 points) is smaller
+    because the control also learns from its twenty epochs; the adoption of format 8 (item 44) stands
+    and the exit clauses were met by a format 8 network (items 47, 49, 50). Judged 23:08 by the
+    queue's runner and audited mechanically by the loop (runner and re-judgement agree); Claude's
+    reading; co-signature pending.
+
+52. C2, late move pruning by sequential test (2026-09-14; runs/nnue_gauntlets/c2_lmp; pinned manifest
+    53af4c88..., verdict.json 93a8ef5a..., the runner's original 4709d4ec... kept as
+    verdict.runner.json): runs/nnue_bins/c2_search_lmp.exe (3b4f6032..., revision 158a661 = the
+    capture-history base 494b4b6 + 9a1e452) against the accepted capture-history build
+    c2_search_capture_history.exe (d00ab30f...), rpsi seats with one thread each, eight concurrent
+    games, both playing mb_b (a3180912...), 50 ms, the C1 sequential test (.50 against .52): rejected
+    at 128 pairs with 66 wins, 41 draws, 149 losses, .338 [.289, .389], LLR -3.96, pentanomial counts
+    [41, 25, 44, 12, 6], 256 games valid, 128 distinct openings, mean 242 plies. accept_lmp not met,
+    and not as a null: the patch is sixteen points weaker than its base at 50 ms, so the moves it
+    prunes late in the list are often the best ones under this move ordering. The bundle stays at
+    capture history; internal iterative reduction is next on that base, and a re-tuned or
+    history-guarded pruning would be a new frozen build with its own preregistration. The improvement
+    loop's search build is unchanged. Judged 23:14 by the queue's runner and audited mechanically by
+    the loop (agree); Claude's reading; co-signature pending.
+
+53. A4, from scratch at H1024 over 200 epochs (2026-09-14 and 15;
+    runs/nnue_gauntlets/a4_scratch_h1024; pinned manifest 3e1f6e28..., verdict.json 51e56cd1..., the
+    runner's original 4bee0d8c... kept as verdict.runner.json): one arm a4_h1024_scratch_s2 without an
+    init on the lineage's 12-set mixture, 200 epochs of 1,000 steps at batch 8192, lr 3e-4 with 1,000
+    warm-up steps and a floor of .15, twenty float epochs then quantisation-aware, seed 2, trained on
+    the GPU 2026-09-14 under the user's grant; endpoint epoch200 (19212038...) played, the best
+    validation checkpoint at epoch 101 (objective .0255, c1ca294f...) recorded beside it. Against
+    long60_s2:epoch60: .251 [.216, .286] at 50 ms (200 pairs) and .302 [.255, .350] at 100 ms (150
+    pairs); against mb_a .339 [.304, .374] at 100 ms (250 pairs); 1,200 games valid, one thread, eight
+    concurrent games, mean 214 to 228 plies. parent_gain and arena_bar not met, by twenty to
+    twenty-five points. Reading: two hundred passes from scratch over the mixture the lineage's
+    continuations train on for twenty leave a wider network far behind the parent, and the validation
+    objective bottomed at epoch 101 (.0255 against about .019 for the lineage's networks on this
+    mixture, item 48), so the second hundred passes overfit. The corpus does not carry the lineage's
+    strength; that strength was accumulated over its self-play generations, which is what the
+    improvement loop continues. From scratch is closed at this corpus size: the loop's scratch arm
+    stays off (its gate, a4_vs_long60_100 at .48 or better, reads .302) and LOOP_PLAN section E is not
+    taken; revisit only when the pool is several generations deeper. Judged 2026-09-15 00:01 by the
+    queue's runner and audited mechanically by the loop at 00:02 (agree); Claude's reading;
+    co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -673,8 +727,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   capture history accepted (item 43), the first patch of the bundle, merged into master 2026-09-14 (95ae9ee);
   late move pruning and internal iterative reduction are screened next on that base, one at a time
   (LMP frozen 2026-09-14 by Claude as runs/nnue_bins/c2_search_lmp.exe 3b4f6032..., revision 158a661 =
-  494b4b6 + 9a1e452, c2_lmp pinned 53af4c88... and queued); a fixed-count 100 ms confirmation of the bundle after at most three
-  accepted patches.
+  494b4b6 + 9a1e452; c2_lmp 53af4c88... judged 2026-09-14 23:14, item 52: rejected at 128 pairs, .338 at 50 ms,
+  so the bundle stays at capture history and internal iterative reduction is next on that base); a fixed-count
+  100 ms confirmation of the bundle after at most three accepted patches.
 - D, labels: the pilot judged (item 41), the selection not supported at this size; a larger share or
   a label-depth arm would need its own preregistration.
 - B, format 8: the seed-2 pilot met its rules (item 42); the seed-3 confirmation (format8_train_s3,
@@ -694,6 +749,9 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   .65 rules; per-side networks in the runner, 4e04d59) pinned 14:18 and queued after exit_check_b2.
   exit_check_b2 judged 14:33 (item 46): .630 [.598, .662] against mb_a, the arena bar met, the exit clause
   not; deploy_candidate_b2_ch judged 15:00 (item 47): .661 [.625, .695], both rules met.
+  b2_format8_lineage_s3 judged 23:08 (item 51): parent_gain_format8 met at both budgets, format_gain again
+  not met at 100 ms (lower bound .482); format 8 stands. b2x_duration40's matches were dropped from the queue
+  2026-09-14 22:55 on the user's word (the arm is trained; re-queue any time).
 - A3, H1024 with the corrected widening: the manifest runs/nnue_gauntlets/a3_width (format 6 from
   long60_s2:epoch60) failed its preflight 2026-09-13
   (runs/nnue_gauntlets/a3_width/preflight/report.json 75068e4b...): structure and integer parity
@@ -706,11 +764,13 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   promotion_h1024 and promotion_control512 all not met; exit_check_a3, preregistered, is not run).
   A2, the high-lr restart: a2_restart_lr3e4 (ba1fb0e3...) pinned 14:20, one arm from b2_format8_s2:epoch20
   at lr 3e-4 against A3's H512 continuation arm at 1e-4 as the matched control (same init, mixture, seed,
-  QAT start and length), judged at 50 and 100 ms plus the parent at 100 ms; the arm training on the GPU,
-  matches queued. C3, a race term only through a measured race error that stays with
-  deeper labels; A4, from scratch at H1024 over 200 epochs: a4_scratch_h1024 pinned 3e1f6e28... and training on the GPU
-  2026-09-14 (the user's grant; the GPU's long job while the CPU plays the other matches), judged against
-  long60_s2:epoch60 at 50 and 100 ms and mb_a at 100 ms. C3 proposed.
+  QAT start and length), judged at 50 and 100 ms plus the parent at 100 ms; the arm trained on the GPU, its
+  matches dropped from the queue 2026-09-14 22:55 on the user's word (re-queue any time). C3, a race term only through a measured race error that stays with
+  deeper labels; A4, from scratch at H1024 over 200 epochs: a4_scratch_h1024 pinned 3e1f6e28..., trained on the GPU
+  2026-09-14 (the user's grant; the GPU's long job while the CPU played the other matches), judged 2026-09-15
+  00:01 (item 53): .251 and .302 against long60_s2:epoch60 at 50 and 100 ms, .339 against mb_a at 100 ms,
+  neither rule met; from scratch is closed at this corpus size and the loop's scratch arm stays off. C3
+  proposed.
 - Arena: nnue_2 = long60_s2:epoch60 (ed00ddf9..., the network that met the arena bar in the
   promotion test of item 39's lineage) deployed 2026-09-13 19:53 on the user's decision as a second
   NNUE seat at a fixed 200k nodes per move beside nnue_1 = mb_a; the accepted capture-history patch
@@ -739,7 +799,7 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   skeleton and redesigned 2026-09-15 as a fixed-node ladder; runs/nnue_loop/ holds its state, log,
   digest, proposals and alerts; runs/nnue_plan/LOOP_PLAN_2026-09-14.md the reasoning): self-play from
   the accepted network on both CCDs at idle priority; when the pool's untested rows reach the
-  increment (3 M, doubled after null rounds up to 4x) four mixture continuations of the accepted
+  increment (2.7 M rows, one 12,800-game batch, doubled after null rounds up to 4x) four mixture continuations of the accepted
   network, a control every third round, an optional from-scratch arm and the mean-weight soup of the
   continuations are trained on the GPU; then, under the lock, at fixed nodes with 16 games at once
   and both seats through the accepted search build: a 200-opening screen of every variant at 20k
@@ -749,5 +809,7 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   then a deployment ladder against the deployed pair (sequential accept at 240k, the 250 ms four-thread
   site-like test at .5, an anchor reading); both deploy rules met write a proposal. The two budgets
   are six apart as fishtest's STC and LTC; it never deploys. Started 2026-09-14 21:00, redesigned code
-  from 2026-09-15 00:50, to take over the lane once the queue drains and gen5_round is judged (its
-  endpoint adopted if promotion_gen5 is met).
+  from 2026-09-15 00:50. The queue was trimmed 22:55 on the user's word (gen5_round never preregistered:
+  round 1 tests gen5's data directly against the accepted network); the loop took the lane 01:14 when the
+  queue drained; a Windows update rebooted the machine 01:33 and the loop was restarted 04:20 with its
+  generators resumed from their records.
