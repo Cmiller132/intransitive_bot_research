@@ -885,3 +885,10 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   promoted and deployed as nnue_6 at 17:46. A loop bug found at the promotion: finish_round zeroed the untested
   row count after every non-failed round, losing the sets imported while the round ran (loop_08 and loop_09,
   4.97 M root rows); fixed to recount the pool sets outside the round, the state corrected under a stop.
+  The arena judges each new seat against the last confirmed seat (the user, 19:50; state.confirmed_seat, nnue_3
+  at the start: the pair the user deployed by hand), so gains accumulate across rounds instead of being tested one
+  small step at a time under +-30 half-widths: nnue_4 +23 over nnue_3, nnue_5 -2, nnue_6 +19 had all failed the +30
+  bar against the previous seat. Re-judged: nnue_6 273.4 +-29.6 after 684 games, +41.6 over nnue_3 (231.8),
+  confirmed 19:56; new seats are judged against nnue_6. A confirmation now deploys the network to the site bot
+  Vlad_NNUE (deploy_site.py; auto_site_deploy): nnue_6 has been the site bot since 18:11 (a swap the user had
+  paused was already running when the interruption arrived; the user ordered the deployment at 19:50).
