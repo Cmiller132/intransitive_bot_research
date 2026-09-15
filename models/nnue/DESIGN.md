@@ -867,3 +867,12 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   MSE is a running A/B of the PV rows on identical games (about 11 GPU minutes and 4 lane-b minutes per round,
   one 8-minute import per batch). The arm is skipped in a round whose twins are not all imported. Multipv
   sampling has no such control: it changes the games, so its test is a separate generation.
+  The screen in stages with common openings (2026-09-15 16:00, the user, after Stockfish's easy_train.py, which
+  tests every saved epoch at 25,000 nodes from one book and adds games only to the networks whose Elo plus 1.5
+  error bars still reaches the leader): stages of 100, 100 and 200 openings; every net plays stage 1 from the
+  same openings (one seed per stage, so the comparison between arms is paired on the openings; before, each arm
+  drew its own 200); after each stage the wins, draws and losses are pooled and only the contenders go on, a
+  contender being a candidate whose pooled score plus 1.5 standard errors reaches both the leader's pooled score
+  and .49 (control and width arms play stage 1 only); the choice is by pooled score. The same lane-b budget as
+  the flat 200-opening screen (about 4,000 games), spent on the contenders: the finalists end with 800 games
+  instead of 400 and the losers with 200. First used by round 3's screen (loop_r03_screen, stage 1 pinned 16:02).
