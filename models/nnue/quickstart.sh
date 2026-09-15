@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One iteration of the NNUE self-play loop on one machine, from a starting network to a stronger one:
+# One iteration of the NNUE self-play loop on one machine (macOS on Apple silicon is the reference platform;
+# any Unix with the same tools works). From a starting network to a candidate and its score:
 #
 #   models/nnue/quickstart.sh <start.nnue> [name]
 #
@@ -10,28 +11,35 @@
 #   4. train      nnue.train        a continuation of the starting network on that dataset -> runs/<name>/best.nnue
 #   5. evaluate   bot eval          the new network against the starting one at a fixed node budget
 #
-# The Rust side and the Python side share nothing but files: records in, a .nnue file out. Run it again with
-# NET=runs/<name>/best.nnue to iterate. Every knob is an environment variable (defaults in brackets):
+# The Rust side and the Python side share nothing but files: records in, a .nnue file out. Run it again with the
+# new file as the start to iterate. Every knob is an environment variable (defaults in brackets); QUICKSTART.md
+# explains each one, the setup and how to read the result.
 #
-#   GAMES [3200]      games to generate           NODES [100000]   search nodes per move (the label budget)
-#   THREADS [cores]   games in flight / trainer threads             HASH [64]        transposition table MiB per game
-#   EPOCHS [20]       STEPS [1000] steps per epoch   BATCH [8192]  LR [0.0001]      the H512 continuation recipe
-#   DEVICE [cpu]      cpu, cuda (or mps to try)   PAIRS [100]      evaluation openings (two games each)
-#   SIMS [8]          evaluation budget in units of 2,500 nodes (8 = 20k nodes)     SEED [1]
+#   GAMES [3200]        games to generate (about 220 labelled positions each)
+#   NODES [100000]      search nodes per move: the label budget (the research loop's value)
+#   THREADS [all cores] games in flight, and the trainer's threads; one game per core is the model
+#   HASH [64]           transposition table MiB per game in flight
+#   EPOCHS [20] STEPS [1000] BATCH [8192] LR [0.0001] WARMUP [200]   the H512 continuation recipe
+#   DEVICE [cpu]        cpu is the tested path; mps may work with a recent PyTorch
+#   EXTRA_DATA []       more "<set>:<share>" entries for the training mixture, space separated (earlier sets)
+#   PAIRS [100]         evaluation openings, two games each      SIMS [8]   evaluation budget, units of 2,500 nodes
+#   SEED [1]            generation, training and evaluation seed
+#   PY [python3]        the interpreter with the nnue and engine packages   BOT [target/release/bot]
 #
-# Timings measured on a Ryzen 7950X (16 one-thread games in flight): about 2,200 games/h at 100k nodes, 800/h at
-# 250k; an M3 Max measured 800/h at 250k nodes with 16 in flight, so expect about 2,000/h at 100k. Training the
-# full recipe (20 x 1,000 steps at batch 8192, H512) is 11 minutes on an RTX 4070 Ti and hours on a CPU: for a
-# first pass on a CPU use EPOCHS=4 STEPS=250 BATCH=2048. Evaluation at SIMS=8 PAIRS=100 is a few minutes.
+# Rates: about 130 games per core-hour at 100k nodes (a 16-core machine makes about 2,200 games/h; 250k nodes is
+# 2.5 times slower). The full training recipe (20 x 1,000 steps at batch 8192, H512) is 11 minutes on a desktop
+# GPU and hours on a CPU: for a first pass on a CPU use EPOCHS=4 STEPS=250 BATCH=2048. Evaluation at SIMS=8
+# PAIRS=100 takes a few minutes. A smoke test of the whole pipeline: GAMES=8 NODES=5000 EPOCHS=1 STEPS=5 BATCH=256
+# WARMUP=2 PAIRS=2 SIMS=1 (under a minute).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-NET="${1:?usage: models/nnue/quickstart.sh <start.nnue> [name]   (a format 8 .nnue file; NET=runs/<name>/best.nnue to iterate)}"
+NET="${1:?usage: models/nnue/quickstart.sh <start.nnue> [name]   (a format 8 .nnue file; see models/nnue/QUICKSTART.md)}"
 NAME="${2:-qs_$(date +%Y%m%d_%H%M%S)}"
 GAMES="${GAMES:-3200}"
 NODES="${NODES:-100000}"
 if [ -z "${THREADS:-}" ]; then
-  THREADS="$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8) | tr -d ' ')"
+  THREADS="$( (sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8) | tr -d ' ')"
 fi
 HASH="${HASH:-64}"
 SEED="${SEED:-1}"
@@ -41,6 +49,7 @@ BATCH="${BATCH:-8192}"
 LR="${LR:-0.0001}"
 WARMUP="${WARMUP:-200}"
 DEVICE="${DEVICE:-cpu}"
+EXTRA_DATA="${EXTRA_DATA:-}"
 PAIRS="${PAIRS:-100}"
 SIMS="${SIMS:-8}"
 PY="${PY:-python3}"
@@ -48,10 +57,10 @@ BOT="${BOT:-target/release/bot}"
 
 say() { printf '\n== %s  (%s)\n' "$1" "$(date '+%H:%M:%S')"; }
 
-# ---- preflight: the bot binary, the Python packages ----------------------------------------------------------------
+# ---- preflight: the bot binary, the Python packages, the network --------------------------------------------------
 if [ ! -x "$BOT" ] && [ -x "$BOT.exe" ]; then BOT="$BOT.exe"; fi
 if [ ! -x "$BOT" ]; then
-  say "building the bot binary (cargo build --release -p cli)"
+  say "building the bot binary (cargo build --release -p cli; the first build downloads the ONNX Runtime library)"
   cargo build --release -p cli
   if [ ! -x "$BOT" ] && [ -x "$BOT.exe" ]; then BOT="$BOT.exe"; fi
 fi
@@ -59,6 +68,7 @@ if ! "$PY" -c "import engine, nnue, torch, numpy" 2>/dev/null; then
   echo "Python is missing a package. From the workspace root:" >&2
   echo "  $PY -m pip install -e 'models/nnue/py[dev]'     # the nnue package: torch, numpy" >&2
   echo "  $PY -m pip install maturin && cargo xtask wheel  # the engine module (the importer replays games through it)" >&2
+  echo "  ($PY must be Python 3.11 or newer; PY=<interpreter> selects another one)" >&2
   exit 1
 fi
 if [ ! -f "$NET" ]; then echo "no such network: $NET" >&2; exit 1; fi
@@ -85,8 +95,10 @@ if [ ! -f "runs/nnue_data/$SET/ids8.npy" ]; then
 fi
 
 # ---- 4. train -----------------------------------------------------------------------------------------------------------
-say "4/5 training $NAME from $NET on $SET ($EPOCHS x $STEPS steps, batch $BATCH, $DEVICE)"
-"$PY" -m nnue.train --run "$NAME" --init "$NET" --data "$SET:1.0" --hidden "$HIDDEN" --version 8 \
+DATA_ARGS="--data $SET:1.0"
+for entry in $EXTRA_DATA; do DATA_ARGS="$DATA_ARGS --data $entry"; done
+say "4/5 training $NAME from $NET on $SET${EXTRA_DATA:+ + $EXTRA_DATA} ($EPOCHS x $STEPS steps, batch $BATCH, $DEVICE)"
+"$PY" -m nnue.train --run "$NAME" --init "$NET" $DATA_ARGS --hidden "$HIDDEN" --version 8 \
   --batch "$BATCH" --steps_per_epoch "$STEPS" --epochs "$EPOCHS" --lr "$LR" --weight_decay 1e-5 \
   --warmup_steps "$WARMUP" --lr_floor 0.15 --qat_start_epoch 1 --raw_weight 0.02 --symmetry_weight 0.2 \
   --grad_clip 5 --patience "$EPOCHS" --val_rows 8192 --threads "$THREADS" --device "$DEVICE" --seed "$SEED"
@@ -105,4 +117,4 @@ print(f"candidate score {score:.3f} over {games} games (wins {r['wins']}, draws 
 PYEOF
 
 say "done: runs/$NAME/best.nnue (a score above .5 means it beat the starting network; see runs/$NAME/eval.json)"
-echo "next iteration:  NET=runs/$NAME/best.nnue  $0 runs/$NAME/best.nnue"
+echo "next iteration:  $0 runs/$NAME/best.nnue   (EXTRA_DATA=\"$SET:1.0\" keeps this set in the next mixture)"

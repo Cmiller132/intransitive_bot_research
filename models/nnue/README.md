@@ -230,37 +230,22 @@ the 7950X, below normal): about 400 games and 100k eligible roots per hour
 at 250k nodes (median completed depth 7), 210k at 100k nodes, 18k at 1M.
 The improvement loop generates at 100k nodes with sixteen games in flight
 per CCD: about 2,200 games/h per sixteen threads (130-150 games per
-thread-hour, about 220 labelled roots a game), 800/h at 250k; an M3 Max
-measured 800/h at 250k with sixteen in flight. So the 20,000-game example
-above is about a day at 250k nodes on sixteen cores and the loop's
+thread-hour, about 220 labelled roots a game), 800/h at 250k; Apple silicon
+cores run the search at about the same rate per core. So the 20,000-game
+example above is about a day at 250k nodes on sixteen cores, and the loop's
 12,800-game batches take three hours on both CCDs at 100k.
 
 ### Quick start on one machine
 
 `models/nnue/quickstart.sh <start.nnue> [name]` runs one iteration end to
-end: generation, import, encode, training and a fixed-node evaluation of the
-new network against the starting one, every knob an environment variable
-(`GAMES=3200 NODES=100000 THREADS=<cores> EPOCHS=20 STEPS=1000 BATCH=8192
-DEVICE=cpu PAIRS=100 SIMS=8`; the header of the script has the timings).
-The Rust and Python sides share nothing but files: `bot selfplay` writes
-gzip JSONL shards and a `manifest.json` under `runs/nnue_selfplay/<name>/`;
-`python -m nnue.importer selfplay` turns them into the NumPy dataset
-`runs/nnue_data/selfplay_<name>/`; `python -m nnue.data encode` adds the
-feature-id cache; `python -m nnue.train --init <start.nnue> --data
-selfplay_<name>:1.0 ...` writes `runs/<name>/best.nnue`; `bot eval
---candidate nnue:runs/<name>/best.nnue --reference nnue:<start.nnue> --sims 8
---pairs 100` scores it, and the same file is what `bot selfplay --player
-nnue:<file>` generates from next. Prerequisites: `cargo build --release -p
-cli`, `pip install -e "models/nnue/py[dev]"`, `pip install maturin && cargo
-xtask wheel` (the engine's Python module, which the importer replays games
-through). Training on a CPU is slow (the full recipe is 11 minutes on an
-RTX 4070 Ti and hours on a CPU): start with `EPOCHS=4 STEPS=250 BATCH=2048`.
-The loop on the research machine keeps the parent's replay mixture (human
-games and older self-play) beside the fresh set; the script trains on the
-fresh set alone.
-The controlled training study on this data (DESIGN item 37, a null), the
-generator measurements and the step-change programme that followed are kept
-with the run artifacts in runs/nnue_plan/ (untracked).
+end on one machine (generation, import, encode, training, a fixed-node
+evaluation of the new network against the starting one), every knob an
+environment variable. QUICKSTART.md in this directory is the guide: the
+one-time setup on macOS with Apple silicon, the first run, every variable
+and when to change it, how to read the score, iterating, troubleshooting.
+The Rust generator and the Python trainer share nothing but files: shards
+and a manifest under `runs/nnue_selfplay/<name>/` in, a `.nnue` file under
+`runs/<name>/` out, and that file is what the generator plays next.
 
 ## Retraining on a stronger teacher
 
