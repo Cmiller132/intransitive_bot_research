@@ -12,7 +12,8 @@ use anyhow::{bail, ensure, Context, Result};
 use clap::Args as ClapArgs;
 use flate2::{read::GzDecoder, Compression, GzBuilder};
 use nnue::search::{Limits, Searcher};
-use r#match::selfplay::{self, Config, Decision, Event, Label, Record, ScoreKind};
+use r#match::selfplay::{self, Config, Decision, Event, Label, Record, Root, ScoreKind};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -41,6 +42,12 @@ pub struct Args {
     multipv: u32,
     #[arg(long, default_value_t = 60)]
     multipv_margin: i32,
+    /// Percent of the near-best alternatives that are played instead of the best move.
+    #[arg(long, default_value_t = 50)]
+    multipv_prob: u32,
+    /// The alternative search's node budget, as a percent of --nodes.
+    #[arg(long, default_value_t = 25)]
+    multipv_nodes: u32,
     /// Record the first K principal-variation actions with every search label.
     #[arg(long, default_value_t = 0)]
     pv_labels: u32,
@@ -69,6 +76,8 @@ struct Settings {
     game: Config,
     multipv: u32,
     multipv_margin: i32,
+    multipv_prob: u32,
+    multipv_nodes: u32,
     pv_labels: u32,
     shard_games: u64,
     compression_level: u32,
@@ -101,6 +110,7 @@ struct Counts {
     nodes: u64,
     search_ns: u64,
     pv_positions: u64,
+    alternative_roots: u64,
 }
 impl Counts {
     fn add(&mut self, r: &Record) {
@@ -112,6 +122,7 @@ impl Counts {
         self.nodes += r.roots.iter().map(|r| r.nodes).sum::<u64>();
         self.search_ns += r.roots.iter().map(|r| r.elapsed_ns).sum::<u64>();
         self.pv_positions += r.roots.iter().map(|r| r.pv.len() as u64).sum::<u64>();
+        self.alternative_roots += r.roots.iter().filter(|r| r.alternative.is_some()).count() as u64;
     }
     fn merge(&mut self, other: &Self) {
         self.games += other.games;
@@ -122,6 +133,7 @@ impl Counts {
         self.nodes += other.nodes;
         self.search_ns += other.search_ns;
         self.pv_positions += other.pv_positions;
+        self.alternative_roots += other.alternative_roots;
     }
 }
 
@@ -282,6 +294,7 @@ fn decision(
         action,
         label,
         pv,
+        alternative: None,
         nodes: result.nodes,
         elapsed_ns: result
             .elapsed
@@ -291,9 +304,107 @@ fn decision(
     })
 }
 
+/// What the alternative searches cost; the labelled search's own nodes and time stay
+/// on the root, so a root still reports the size of the search that labelled it.
+#[derive(Default)]
+struct AlternativeCost {
+    nodes: AtomicU64,
+    elapsed_ns: AtomicU64,
+}
+
+/// One move: the labelled search at the full budget and, under --multipv 2, a second search
+/// over the other legal moves. Its answer is played with probability `multipv_prob` when it is
+/// within `multipv_margin` of the label, so games spread while every move stays near-best.
+/// The label is always the main search's; only the played move changes.
+fn searched_decision(
+    searcher: &mut Searcher,
+    model: &nnue::Model,
+    state: &engine::State,
+    settings: &Settings,
+    rng: &mut StdRng,
+    cost: &AlternativeCost,
+) -> Result<Decision> {
+    let limits = Limits {
+        nodes: settings.nodes,
+        time: Duration::MAX,
+        depth: settings.max_depth,
+    };
+    let mut decision = decision(
+        searcher.search(model, state, None, limits),
+        state,
+        settings.pv_labels,
+    )?;
+    let label = match decision.label {
+        Some(label)
+            if settings.multipv > 1
+                && state.ply >= settings.game.opening_plies
+                && label.kind == ScoreKind::Search =>
+        {
+            label
+        }
+        _ => return Ok(decision),
+    };
+    let others: Vec<engine::Action> = state
+        .legal_actions()
+        .into_iter()
+        .filter(|&action| action != label.action)
+        .collect();
+    if others.is_empty() {
+        return Ok(decision);
+    }
+    let second = searcher.search(
+        model,
+        state,
+        Some(&others),
+        Limits {
+            nodes: (settings.nodes * u64::from(settings.multipv_nodes) / 100).max(1),
+            ..limits
+        },
+    );
+    cost.nodes.fetch_add(second.nodes, Ordering::Relaxed);
+    cost.elapsed_ns.fetch_add(
+        second.elapsed.as_nanos().try_into().unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    // The played move is one of the two lines' best moves: a partial improvement of the
+    // main search is not played, so a move other than the label's is always a sampled one.
+    decision.action = label.action;
+    if let Some((action, score, _)) = second.completed_root() {
+        decision.alternative = Some((action, score));
+        if label.score.saturating_sub(score) <= settings.multipv_margin
+            && rng.random_range(0..100) < settings.multipv_prob
+        {
+            decision.action = action;
+        }
+    }
+    Ok(decision)
+}
+
 fn load_manifest(dir: &Path) -> Result<Manifest> {
     serde_json::from_reader(BufReader::new(File::open(dir.join("manifest.json"))?))
         .map_err(Into::into)
+}
+
+/// The sampling rule against the settings that produced the record: only --multipv 2 may
+/// record an alternative, a played one is within the margin, and an eligible root that played
+/// anything other than its label's move must carry the alternative it played.
+fn multipv_agrees(root: &Root, settings: &Settings) -> bool {
+    match root.alternative {
+        Some((action, score)) => {
+            settings.multipv > 1
+                && (root.played_action != Some(action)
+                    || root
+                        .root_score
+                        .is_some_and(|best| best.saturating_sub(score) <= settings.multipv_margin))
+        }
+        None => {
+            settings.multipv == 1
+                || root.ply < settings.game.opening_plies
+                || root.searched_best.is_none()
+                || root.played_action.is_none()
+                || root.played_action == root.searched_best
+        }
+    }
 }
 
 fn verify_record(record: &Record, settings: &Settings) -> Result<()> {
@@ -316,7 +427,8 @@ fn verify_record(record: &Record, settings: &Settings) -> Result<()> {
                 || record.game.plies == settings.game.max_plies)
             && record.roots.iter().all(|root| root.nodes <= settings.nodes
                 && root.completed_depth <= settings.max_depth
-                && root.pv.len() <= settings.pv_labels as usize),
+                && root.pv.len() <= settings.pv_labels as usize
+                && multipv_agrees(root, settings)),
         "record differs from effective settings"
     );
     record.verify()
@@ -494,8 +606,12 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
     ensure!(
-        args.multipv == 1,
-        "this generator supports only --multipv 1"
+        args.multipv == 1 || args.multipv == 2,
+        "this generator supports --multipv 1 or 2"
+    );
+    ensure!(
+        args.multipv_prob <= 100 && args.multipv_nodes > 0 && args.multipv_nodes <= 100,
+        "multipv-prob is a percent and multipv-nodes a percent of --nodes"
     );
     ensure!(
         args.multipv_margin >= 0 && args.nodes > 0 && args.threads > 0 && args.shard_games > 0,
@@ -527,6 +643,8 @@ pub fn run(args: Args) -> Result<()> {
         },
         multipv: args.multipv,
         multipv_margin: args.multipv_margin,
+        multipv_prob: args.multipv_prob,
+        multipv_nodes: args.multipv_nodes,
         pv_labels: args.pv_labels,
         shard_games: args.shard_games,
         compression_level: 1,
@@ -553,9 +671,14 @@ pub fn run(args: Args) -> Result<()> {
         repetition_draw: false,
         score_adjudication: false,
         score_scale: 600,
-        seed_algorithm:
-            "splitmix64-v1; game=derive(seed,id); opening=derive(game,0); injection=derive(game,1)"
-                .into(),
+        seed_algorithm: format!(
+            "splitmix64-v1; game=derive(seed,id); opening=derive(game,0); injection=derive(game,1){}",
+            if settings.multipv > 1 {
+                "; alternative=derive(game,2)"
+            } else {
+                ""
+            }
+        ),
         settings,
     };
     fs::create_dir_all(&args.records)?;
@@ -601,6 +724,7 @@ pub fn run(args: Args) -> Result<()> {
     let mut publication_time = Duration::ZERO;
     let worker_count = args.threads.min(jobs.len());
     let next = AtomicU64::new(0);
+    let alternative = AlternativeCost::default();
     let settings = &manifest.identity.settings.clone();
     let dir = &args.records;
     let outcome: Result<()> = std::thread::scope(|scope| {
@@ -610,6 +734,7 @@ pub fn run(args: Args) -> Result<()> {
             let sender = sender.clone();
             let jobs = &jobs;
             let next = &next;
+            let alternative = &alternative;
             let model = &model;
             let stop = Arc::clone(&stop);
             scope.spawn(move || {
@@ -623,30 +748,22 @@ pub fn run(args: Args) -> Result<()> {
                     let result = (|| -> Result<(Counts, Duration)> {
                         let game_start = Instant::now();
                         searcher.clear();
-                        let record = Record::new(
-                            &settings.game,
-                            &settings.player,
-                            id,
-                            selfplay::derive_seed(settings.seed, id),
-                        )?;
+                        let seed = selfplay::derive_seed(settings.seed, id);
+                        let record = Record::new(&settings.game, &settings.player, id, seed)?;
                         let mut journal = Journal::new(&active(dir, id), &record)?;
+                        // The sampler's own stream: the same seed and settings replay the game.
+                        let mut rng = StdRng::seed_from_u64(selfplay::derive_seed(seed, 2));
                         let record = selfplay::generate(
                             record,
                             &settings.game,
                             &mut |state| {
-                                decision(
-                                    searcher.search(
-                                        model,
-                                        state,
-                                        None,
-                                        Limits {
-                                            nodes: settings.nodes,
-                                            time: Duration::MAX,
-                                            depth: settings.max_depth,
-                                        },
-                                    ),
+                                searched_decision(
+                                    &mut searcher,
+                                    model,
                                     state,
-                                    settings.pv_labels,
+                                    settings,
+                                    &mut rng,
+                                    alternative,
                                 )
                             },
                             &|| stop.load(Ordering::Relaxed) != 0,
@@ -715,7 +832,9 @@ pub fn run(args: Args) -> Result<()> {
         "published_games":manifest.shards.iter().map(|s| s.counts.games).sum::<u64>(),
         "wall_seconds":seconds, "games_per_hour":new_counts.games as f64*3600./seconds,
         "worker_game_seconds":worker_time.as_secs_f64(),
-        "worker_outside_search_seconds":worker_time.saturating_sub(Duration::from_nanos(new_counts.search_ns)).as_secs_f64(),
+        "worker_outside_search_seconds":worker_time.saturating_sub(Duration::from_nanos(new_counts.search_ns)).saturating_sub(Duration::from_nanos(alternative.elapsed_ns.load(Ordering::Relaxed))).as_secs_f64(),
+        "alternative_nodes":alternative.nodes.load(Ordering::Relaxed),
+        "alternative_search_seconds":alternative.elapsed_ns.load(Ordering::Relaxed) as f64/1e9,
         "publication_seconds":publication_time.as_secs_f64(),
         "eligible_roots_per_hour":new_counts.eligible_roots as f64*3600./seconds})
     );
@@ -757,6 +876,8 @@ mod tests {
                     },
                     multipv: 1,
                     multipv_margin: 60,
+                    multipv_prob: 50,
+                    multipv_nodes: 25,
                     pv_labels: 0,
                     shard_games: 2,
                     compression_level: 1,
@@ -808,6 +929,7 @@ mod tests {
                             kind: ScoreKind::Search,
                         }),
                         pv: Vec::new(),
+                        alternative: None,
                         nodes: 10,
                         elapsed_ns: 12345,
                     })
@@ -947,6 +1069,7 @@ mod tests {
                         kind: ScoreKind::Search,
                     }),
                     pv: vec![action],
+                    alternative: None,
                     nodes: 10,
                     elapsed_ns: 1,
                 })
@@ -962,5 +1085,167 @@ mod tests {
         verify_record(&record, &settings).unwrap();
         // A directory generated with a smaller K does not accept these records.
         verify_record(&record, &zero.settings).unwrap_err();
+    }
+
+    /// A game that searches a second line at `score` and plays it when `sampled`.
+    fn sampled_fixture(settings: &Settings, score: i32, sampled: bool) -> Record {
+        selfplay::generate(
+            Record::new(
+                &settings.game,
+                &settings.player,
+                0,
+                selfplay::derive_seed(settings.seed, 0),
+            )
+            .unwrap(),
+            &settings.game,
+            &mut |state: &engine::State| {
+                let legal = state.legal_actions();
+                Ok(Decision {
+                    action: legal[usize::from(sampled)],
+                    label: Some(Label {
+                        action: legal[0],
+                        score: 42,
+                        depth: 2,
+                        kind: ScoreKind::Search,
+                    }),
+                    pv: Vec::new(),
+                    alternative: Some((legal[1], score)),
+                    nodes: 10,
+                    elapsed_ns: 1,
+                })
+            },
+            &|| false,
+            &mut |_| Ok(()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn multipv_sampling_belongs_to_the_identity_and_is_verified_against_it() {
+        let one = fixture().identity;
+        let mut two = one.clone();
+        two.settings.multipv = 2;
+        two.settings.multipv_prob = 100;
+        two.settings.multipv_nodes = 40;
+        // --resume compares the whole identity: sampled games are their own records.
+        assert_ne!(one, two);
+        let json = serde_json::to_string(&two.settings).unwrap();
+        assert!(
+            json.contains("\"multipv\":2")
+                && json.contains("\"multipv_prob\":100")
+                && json.contains("\"multipv_nodes\":40")
+        );
+
+        let settings = two.settings.clone();
+        let record = sampled_fixture(&settings, 5, true);
+        let mut counts = Counts::default();
+        counts.add(&record);
+        assert_eq!(counts.alternative_roots, record.roots.len() as u64);
+        verify_record(&record, &settings).unwrap();
+        // A single-line directory records no alternatives at all.
+        verify_record(&record, &one.settings).unwrap_err();
+        // The played alternative is within the margin of the label it replaced.
+        let mut narrow = settings.clone();
+        narrow.multipv_margin = 30;
+        verify_record(&record, &narrow).unwrap_err();
+        verify_record(&sampled_fixture(&narrow, 20, true), &narrow).unwrap();
+        // A move the record cannot account for is rejected.
+        let mut bad = record.clone();
+        for root in &mut bad.roots {
+            root.alternative = None;
+        }
+        bad.verify().unwrap();
+        verify_record(&bad, &settings).unwrap_err();
+        // An alternative that was searched and left unplayed needs no margin.
+        let spare = sampled_fixture(&narrow, -29_000, false);
+        assert!(spare
+            .roots
+            .iter()
+            .all(|r| r.alternative.is_some() && r.played_action == r.searched_best));
+        verify_record(&spare, &narrow).unwrap();
+    }
+
+    /// One game as a worker generates it: the real search on the example network.
+    fn searched_game(model: &nnue::Model, settings: &Settings, id: u64) -> (Record, u64) {
+        let mut searcher = Searcher::new(settings.hash_mib);
+        let seed = selfplay::derive_seed(settings.seed, id);
+        let mut rng = StdRng::seed_from_u64(selfplay::derive_seed(seed, 2));
+        let cost = AlternativeCost::default();
+        let record = selfplay::generate(
+            Record::new(&settings.game, &settings.player, id, seed).unwrap(),
+            &settings.game,
+            &mut |state| searched_decision(&mut searcher, model, state, settings, &mut rng, &cost),
+            &|| false,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        (record, cost.nodes.load(Ordering::Relaxed))
+    }
+
+    /// Everything a replay must reproduce; the wall clock is the one thing it cannot.
+    fn without_timings(record: &Record) -> serde_json::Value {
+        let mut record = record.clone();
+        for root in &mut record.roots {
+            root.elapsed_ns = 0;
+        }
+        serde_json::to_value(record).unwrap()
+    }
+
+    #[test]
+    fn sampling_plays_the_second_line_at_full_probability_and_never_at_zero() {
+        let bytes = fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../models/nnue/examples/example.nnue"
+        ))
+        .unwrap();
+        let model = nnue::Model::from_bytes(&bytes).unwrap();
+        let mut settings = fixture().identity.settings;
+        settings.nodes = 2_000;
+        settings.game = Config {
+            opening_plies: 2,
+            random_moves: 0,
+            random_from: 2,
+            random_to: 8,
+            max_plies: 10,
+        };
+        settings.multipv = 2;
+        settings.multipv_margin = 10_000;
+        settings.multipv_prob = 100;
+        let eligible = |root: &&Root| {
+            root.ply >= settings.game.opening_plies && root.score_kind == ScoreKind::Search
+        };
+
+        let (always, cost) = searched_game(&model, &settings, 0);
+        assert!(always.roots.iter().filter(eligible).count() >= 3);
+        assert!(always.roots.iter().filter(eligible).all(|r| r
+            .alternative
+            .is_some_and(|(a, _)| Some(a) == r.played_action)));
+        assert!(cost > 0 && cost <= always.roots.len() as u64 * settings.nodes);
+        verify_record(&always, &settings).unwrap();
+        // The sampler's stream is the game's own: the same seed replays the same game.
+        assert_eq!(
+            without_timings(&always),
+            without_timings(&searched_game(&model, &settings, 0).0)
+        );
+
+        // Everything is searched and recorded as before; nothing is played.
+        let mut never = settings.clone();
+        never.multipv_prob = 0;
+        let (never, prob_zero_cost) = searched_game(&model, &never, 0);
+        assert!(never
+            .roots
+            .iter()
+            .filter(eligible)
+            .all(|r| r.alternative.is_some() && r.played_action == r.searched_best));
+        assert!(prob_zero_cost > 0);
+        assert_ne!(never.game.moves, always.game.moves);
+
+        // One line only: nothing extra is searched and nothing extra is recorded.
+        let mut single = settings.clone();
+        single.multipv = 1;
+        let (plain, plain_cost) = searched_game(&model, &single, 0);
+        assert_eq!(plain_cost, 0);
+        assert!(plain.roots.iter().all(|r| r.alternative.is_none()));
+        verify_record(&plain, &single).unwrap();
     }
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{rpsi::Frame, End, GameRecord, RandomMoves};
 
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
@@ -60,6 +60,8 @@ pub struct Decision {
     pub label: Option<Label>,
     /// Principal variation of the labelled search, starting at the labelled move.
     pub pv: Vec<Action>,
+    /// The second line's move and score, when a multipv search looked for one.
+    pub alternative: Option<(Action, i32)>,
     pub nodes: u64,
     pub elapsed_ns: u64,
 }
@@ -82,6 +84,10 @@ pub struct Root {
     /// Labelled line from this root; empty unless --pv-labels asked for one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pv: Vec<Action>,
+    /// The best move other than `searched_best` and its score, when --multipv 2 searched
+    /// for one; `played_action` is this move when the sampler chose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<(Action, i32)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -362,6 +368,27 @@ impl Record {
                         line = child;
                     }
                 }
+                // Multipv sampling plays one of the two searched lines and records the second.
+                if let Some((alternative, _)) = root.alternative {
+                    let best = root
+                        .searched_best
+                        .ok_or_else(|| anyhow::anyhow!("alternative without a label"))?;
+                    ensure!(
+                        alternative != best && state.legal_moves().contains(alternative),
+                        "invalid alternative"
+                    );
+                    ensure!(
+                        action.is_none_or(|played| played == alternative || played == best),
+                        "played neither the searched best nor its alternative"
+                    );
+                } else if let (Some(best), Some(played)) = (root.searched_best, action) {
+                    // A bare substitution is the search's own late choice, never a sampled move;
+                    // the generation settings decide whether it is allowed (see the CLI's verify).
+                    ensure!(
+                        played == best || root.score_kind == ScoreKind::Search,
+                        "proved move replaced without an alternative"
+                    );
+                }
                 if action.is_none() {
                     ensure!(
                         self.game.end == End::Interrupted,
@@ -476,6 +503,7 @@ pub fn generate(
                 nodes: decision.nodes,
                 elapsed_ns: decision.elapsed_ns,
                 pv: decision.pv,
+                alternative: decision.alternative,
             });
         }
         emit(&event)?;
@@ -522,6 +550,7 @@ mod tests {
                 kind: ScoreKind::Search,
             }),
             pv: Vec::new(),
+            alternative: None,
             nodes: 10,
             elapsed_ns: 123,
         })
@@ -612,6 +641,7 @@ mod tests {
                             kind: ScoreKind::EngineProof,
                         }),
                         pv: Vec::new(),
+                        alternative: None,
                         nodes: 0,
                         elapsed_ns: 5,
                     })
@@ -707,8 +737,12 @@ mod tests {
         assert_eq!(record.roots[0].score_kind, ScoreKind::Unlabelled);
         record.verify().unwrap();
         // An unlabelled root has no best move, so it may not carry a line either.
-        let mut bad = record;
+        let mut bad = record.clone();
         bad.roots[0].pv = vec![state.legal_actions()[0]];
+        assert!(bad.verify().is_err());
+        // ... nor an alternative to a move it never chose.
+        let mut bad = record;
+        bad.roots[0].alternative = Some((state.legal_actions()[0], 8));
         assert!(bad.verify().is_err());
     }
 
@@ -785,6 +819,7 @@ mod tests {
                         kind: ScoreKind::Search,
                     }),
                     pv: vec![win],
+                    alternative: None,
                     nodes: 7,
                     elapsed_ns: 5,
                 })
@@ -799,5 +834,58 @@ mod tests {
         let mut bad = record;
         bad.roots[0].pv.push(win);
         assert!(bad.verify().is_err());
+    }
+
+    #[test]
+    fn a_sampled_alternative_is_recorded_as_the_move_it_played() {
+        let config = Config {
+            opening_plies: 0,
+            random_moves: 0,
+            max_plies: 4,
+            ..config()
+        };
+        // The label stays the main search's first move while the second line is played.
+        let record = generate(
+            Record::new(&config, "test", 0, 11).unwrap(),
+            &config,
+            &mut |state| {
+                let mut decision = first(state)?;
+                let second = state.legal_actions()[1];
+                decision.action = second;
+                decision.alternative = Some((second, 40));
+                Ok(decision)
+            },
+            &|| false,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!record.roots.is_empty());
+        assert!(record
+            .roots
+            .iter()
+            .all(|r| r.alternative.is_some() && r.played_action != r.searched_best));
+        record.verify().unwrap();
+        let root = record.initial.state().unwrap();
+        // The second line is a different move from the label's.
+        let mut bad = record.clone();
+        bad.roots[0].alternative = Some((record.roots[0].searched_best.unwrap(), 40));
+        assert!(bad.verify().is_err());
+        // It must be legal at the root it was searched from.
+        let illegal = (0..648u16)
+            .find(|&a| !root.legal_moves().contains(a))
+            .unwrap();
+        let mut bad = record.clone();
+        bad.roots[0].alternative = Some((illegal, 40));
+        assert!(bad.verify().is_err());
+        // The move played is one of the two lines, never a third.
+        let mut bad = record.clone();
+        bad.roots[0].alternative = Some((root.legal_actions()[2], 40));
+        assert!(bad.verify().is_err());
+        // Recording no alternative at all is the ordinary single-line record.
+        let mut plain = record;
+        for r in &mut plain.roots {
+            r.alternative = None;
+        }
+        plain.verify().unwrap();
     }
 }
