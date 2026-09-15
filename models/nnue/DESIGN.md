@@ -876,3 +876,6 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   and .49 (control and width arms play stage 1 only); the choice is by pooled score. The same lane-b budget as
   the flat 200-opening screen (about 4,000 games), spent on the contenders: the finalists end with 800 games
   instead of 400 and the losers with 200. First used by round 3's screen (loop_r03_screen, stage 1 pinned 16:02).
+  Two guards added 17:15 after round 3's stage 2 re-admitted a net dropped at stage 1 (its 200-game error bar
+  was wider): a net dropped at a stage stays dropped, and the last stage takes at most four contenders by pooled
+  score (round 3's stage 3 had run eight of ten: 3,200 games where four would have been 1,600).
