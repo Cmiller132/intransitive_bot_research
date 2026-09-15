@@ -822,3 +822,17 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   round 1 tests gen5's data directly against the accepted network); the loop took the lane 01:14 when the
   queue drained; a Windows update rebooted the machine 01:33 and the loop was restarted 04:20 with its
   generators resumed from their records.
+  On the user's list of 2026-09-15 09:05 (claude_notes 09:25): the hold test is off (HOLD_LTC; a gain_stc
+  accept promotes at once and the arena's regression alert is the guard: about 90 minutes of lane b saved
+  per promoted round), the conv distillation sets conv_13_25_2m and conv_26_40_2m leave every mixture from
+  round 3 (DROPPED_SETS, the other sets keeping their proportions; the lineage's own 100k-node labels are
+  the teacher now), control rounds add a control seed replica and the mean of the two controls
+  (control_soup, screened for attribution of the averaging), a from-scratch H1024 arm trains again once the
+  lineage's fresh rows reach 40 M (WIDTH_RETEST_ROWS; reported only, item 53's question at a larger corpus),
+  the trainer exports an exponential moving average of the weights on request (Config.ema, commit 4cccc20;
+  the `ema` variant at .999 screened beside pool), and the generator records the first K principal-variation
+  positions of every search label (`--pv-labels`, schema 2, commit f88ed35; the search unchanged, checked
+  move for move against the accepted binary) for the importer's `--pv-rows` line rows (kind TEACHER, source 7,
+  weight .5, roots first among duplicates): the pv_ab_01 A/B on identical games decides whether the loop's
+  imports use them. Generation measured 2,050-2,240 games/h per full 16-thread lane at 100k nodes, about
+  4,300 games/h and 0.95 M rows/h with both lanes.
