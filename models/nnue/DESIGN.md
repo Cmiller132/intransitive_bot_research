@@ -808,7 +808,13 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   network in the candidate seat (hold; rule sprt_reject = not two points worse), both met promote;
   then a deployment ladder against the deployed pair (sequential accept at 240k, the 250 ms four-thread
   site-like test at .5, an anchor reading); both deploy rules met write a proposal. The two budgets
-  are six apart as fishtest's STC and LTC; it never deploys. Started 2026-09-14 21:00, redesigned code
+  are six apart as fishtest's STC and LTC. Since 2026-09-15 08:00 (the user's instruction) a proposal
+  deploys the network to the arena by itself as the next nnue_N seat (runs/nnue_plan/deploy_arena.py: the
+  seat-local capture-history build of nnue_3, one thread, 200k fixed nodes; the site bot is not touched;
+  refused after a search change until the seat binary is rebuilt for Linux). Round 1 (2026-09-15, on gen5's
+  2.72 M rows) promoted the soup of its four continuations: screen .530 [.491, .569], gain .527 [.507, .547]
+  accepted in 736 pairs at 40k nodes, hold .513 [.488, .538] at 240k (the incumbent could not show +2 in 384
+  pairs); its deploy ladder followed. Started 2026-09-14 21:00, redesigned code
   from 2026-09-15 00:50. The queue was trimmed 22:55 on the user's word (gen5_round never preregistered:
   round 1 tests gen5's data directly against the accepted network); the loop took the lane 01:14 when the
   queue drained; a Windows update rebooted the machine 01:33 and the loop was restarted 04:20 with its
