@@ -63,7 +63,10 @@ sidecar carries the arm's config, the epoch its source names and the file's
 hash. Rule types: `lower_bound_above` and
 `score_at_least` (fixed-count matches only: the paired bootstrap lower
 bound above, or the score at least, the threshold in every named match) and
-`sprt_accept` (sequential matches only: every named test accepted). The
+`sprt_accept` (sequential matches only: every named test accepted) and
+`sprt_reject` (every named test rejected: with the incumbent in the candidate
+seat this reads "the newcomer is not two points worse", the non-regression
+gate; inconclusive is neither). The
 verdict verifies the pinned inputs and records numbers, rule outcomes and
 an audit of every match's recorded games reconciled with its report (the
 journal's protocol, digest and provenance against the report, the manifest
@@ -104,7 +107,7 @@ from .paths import data_dir, run_dir, sha256
 LOCK = "runs/nnue_plan/compute_lock"
 TERMINAL = ("accept", "reject", "inconclusive", "invalid")  # the stop reasons of `bot eval --sprt`
 FIXED_RULES = ("lower_bound_above", "score_at_least")
-SEQUENTIAL_RULES = ("sprt_accept",)
+SEQUENTIAL_RULES = ("sprt_accept", "sprt_reject")
 
 
 def workspace_root() -> Path:
@@ -1159,8 +1162,10 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
             outcome = all(m["interval"][0] > rule["threshold"] for m in named)
         elif rule["type"] == "score_at_least":
             outcome = all(m["score"] >= rule["threshold"] for m in named)
-        else:
+        elif rule["type"] == "sprt_accept":
             outcome = all(m.get("stop_reason") == "accept" for m in named)
+        else:  # sprt_reject: the test rejected the candidate's gain (a non-regression reading with the seats swapped)
+            outcome = all(m.get("stop_reason") == "reject" for m in named)
         rules.append({**rule, "complete": complete, "met": outcome})
     out = {
         "experiment": experiment["name"],

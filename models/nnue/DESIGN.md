@@ -362,7 +362,9 @@ malformed journal or record is a structured problem of its match, never an excep
 that cannot be read gives an unknown pair count in the timing, never a fabricated one. The verdict
 records, per match, the numbers, the descriptive counts (endings, the first mover's score, distinct
 openings, mean plies), the problems and validity; per rule (`lower_bound_above` and `score_at_least`
-for fixed-count matches, `sprt_accept` for sequential ones) whether it is complete and met; a
+for fixed-count matches, `sprt_accept` and `sprt_reject` for sequential ones; the latter, with the
+incumbent in the candidate seat, is the non-regression gate: the newcomer is not two points worse) whether it
+is complete and met; a
 sequential test's bootstrap interval is descriptive only.
 
 Every `bot eval` runs inside a Windows job object (created suspended, assigned, then resumed, so

@@ -476,6 +476,38 @@ def test_a_fixed_simulation_match_is_judged_by_its_budget(workspace, monkeypatch
             experiment.validate(broken)
 
 
+def test_sprt_reject_is_the_swapped_seat_non_regression_gate(workspace, monkeypatch):
+    """With the incumbent in the candidate seat, the test's reject (no two-point gain for the incumbent) is
+    the rule's met; accept and inconclusive are not."""
+    root = workspace
+    for stop, met in (("reject", True), ("accept", False), ("inconclusive", False)):
+        directory = root / "runs" / "nnue_gauntlets" / f"nonreg_{stop}"
+        directory.mkdir(parents=True)
+        spec = manifest(root)
+        spec["name"] = f"nonreg_{stop}"
+        spec["arms"] = []
+        spec["matches"] = [
+            {"tag": "hold", "candidate": "base.exe", "reference": "patch.exe", "sims": 96, "sprt": True, "seed": 7}
+        ]
+        spec["rules"] = [{"name": "hold", "type": "sprt_reject", "matches": ["hold"]}]
+        spec["identities"] = experiment.identities(spec)
+        file = directory / "experiment.json"
+        file.write_text(json.dumps(spec), encoding="utf-8")
+        calls: list = []
+        outcomes = {"hold": ([20, 40, 60, 30, 10], stop)}
+        monkeypatch.setattr(experiment, "launch", scripted_launch(calls, outcomes))
+        monkeypatch.setattr(experiment, "nice", lambda mask: None)
+        assert experiment.main(["run", str(file)]) == 0
+        assert calls and calls[0][calls[0].index("--sims") + 1] == "96" and "--sprt" in calls[0]
+        verdict = json.loads((directory / "verdict.json").read_text(encoding="utf-8"))
+        hold = verdict["matches"][0]
+        assert hold["valid"] and hold["stop_reason"] == stop and hold["sims"] == 96
+        rule = verdict["rules"][0]
+        assert rule["complete"] and rule["met"] is met
+    with pytest.raises(ValueError, match="sequential matches only"):
+        experiment.validate({**spec, "matches": [{**spec["matches"][0], "sprt": False, "pairs": 2}]})
+
+
 def test_a_cuda_arm_is_given_the_gpu_and_a_cpu_run_is_not():
     cpu = {"arms": [{"run": "a", "train": {"config": {"device": "cpu"}}}, {"run": "b"}]}
     assert experiment.visible_devices(cpu) == "-1" and experiment.visible_devices({}) == "-1"
@@ -489,6 +521,7 @@ def test_manifest_validation(workspace):
         {"rules": [{"name": "x", "type": "lower_bound_above", "threshold": 0.5, "matches": ["q"]}]},
         {"rules": [{"name": "x", "type": "sprt_accept", "matches": ["m50"]}]},
         {"rules": [{"name": "x", "type": "sprt_accept", "matches": ["nothing"]}]},
+        {"rules": [{"name": "x", "type": "sprt_reject", "matches": ["qf"]}]},
         {"rules": [{"name": "x", "type": "elo", "matches": ["m50"]}]},
         {"matches": [{**spec["matches"][2], "pairs": 10}]},
         {"matches": [spec["matches"][0], spec["matches"][0]]},
