@@ -41,6 +41,9 @@ pub struct Args {
     multipv: u32,
     #[arg(long, default_value_t = 60)]
     multipv_margin: i32,
+    /// Record the first K principal-variation actions with every search label.
+    #[arg(long, default_value_t = 0)]
+    pv_labels: u32,
     #[arg(long, default_value_t = 1024)]
     max_plies: u32,
     #[arg(long)]
@@ -66,6 +69,7 @@ struct Settings {
     game: Config,
     multipv: u32,
     multipv_margin: i32,
+    pv_labels: u32,
     shard_games: u64,
     compression_level: u32,
     max_depth: u8,
@@ -96,6 +100,7 @@ struct Counts {
     censored: u64,
     nodes: u64,
     search_ns: u64,
+    pv_positions: u64,
 }
 impl Counts {
     fn add(&mut self, r: &Record) {
@@ -106,6 +111,7 @@ impl Counts {
         self.censored += u64::from(r.censored);
         self.nodes += r.roots.iter().map(|r| r.nodes).sum::<u64>();
         self.search_ns += r.roots.iter().map(|r| r.elapsed_ns).sum::<u64>();
+        self.pv_positions += r.roots.iter().map(|r| r.pv.len() as u64).sum::<u64>();
     }
     fn merge(&mut self, other: &Self) {
         self.games += other.games;
@@ -115,6 +121,7 @@ impl Counts {
         self.censored += other.censored;
         self.nodes += other.nodes;
         self.search_ns += other.search_ns;
+        self.pv_positions += other.pv_positions;
     }
 }
 
@@ -239,7 +246,11 @@ fn recover_journal(path: &Path, initial: &Record) -> Result<Record> {
     Ok(record)
 }
 
-fn decision(result: nnue::search::SearchResult, state: &engine::State) -> Result<Decision> {
+fn decision(
+    result: nnue::search::SearchResult,
+    state: &engine::State,
+    pv_labels: u32,
+) -> Result<Decision> {
     let action = result.action.context("NNUE returned no legal action")?;
     let label = result
         .completed_root()
@@ -258,9 +269,19 @@ fn decision(result: nnue::search::SearchResult, state: &engine::State) -> Result
                     kind: ScoreKind::EngineProof,
                 })
         });
+    // Never a line from a different iteration than the score it is labelled with.
+    let pv = match label {
+        Some(label)
+            if label.kind == ScoreKind::Search && result.pv.first() == Some(&label.action) =>
+        {
+            result.pv.iter().copied().take(pv_labels as usize).collect()
+        }
+        _ => Vec::new(),
+    };
     Ok(Decision {
         action,
         label,
+        pv,
         nodes: result.nodes,
         elapsed_ns: result
             .elapsed
@@ -293,11 +314,9 @@ fn verify_record(record: &Record, settings: &Settings) -> Result<()> {
             && record.game.plies <= settings.game.max_plies
             && (record.game.end != r#match::End::PlyCap
                 || record.game.plies == settings.game.max_plies)
-            && record
-                .roots
-                .iter()
-                .all(|root| root.nodes <= settings.nodes
-                    && root.completed_depth <= settings.max_depth),
+            && record.roots.iter().all(|root| root.nodes <= settings.nodes
+                && root.completed_depth <= settings.max_depth
+                && root.pv.len() <= settings.pv_labels as usize),
         "record differs from effective settings"
     );
     record.verify()
@@ -508,6 +527,7 @@ pub fn run(args: Args) -> Result<()> {
         },
         multipv: args.multipv,
         multipv_margin: args.multipv_margin,
+        pv_labels: args.pv_labels,
         shard_games: args.shard_games,
         compression_level: 1,
         max_depth: 64,
@@ -626,6 +646,7 @@ pub fn run(args: Args) -> Result<()> {
                                         },
                                     ),
                                     state,
+                                    settings.pv_labels,
                                 )
                             },
                             &|| stop.load(Ordering::Relaxed) != 0,
@@ -736,6 +757,7 @@ mod tests {
                     },
                     multipv: 1,
                     multipv_margin: 60,
+                    pv_labels: 0,
                     shard_games: 2,
                     compression_level: 1,
                     max_depth: 64,
@@ -785,6 +807,7 @@ mod tests {
                             depth: 1,
                             kind: ScoreKind::Search,
                         }),
+                        pv: Vec::new(),
                         nodes: 10,
                         elapsed_ns: 12345,
                     })
@@ -890,5 +913,54 @@ mod tests {
         empty.verify().unwrap();
         assert!(empty.game.moves.is_empty() && empty.censored && empty.outcome.is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pv_labels_belong_to_the_identity_and_bound_every_recorded_line() {
+        let zero = fixture().identity;
+        let mut three = zero.clone();
+        three.settings.pv_labels = 3;
+        // --resume compares the whole identity, so a different K refuses the directory.
+        assert_ne!(zero, three);
+        let json = serde_json::to_string(&three).unwrap();
+        assert_ne!(json, serde_json::to_string(&zero).unwrap());
+        assert!(json.contains("\"pv_labels\":3"));
+
+        let settings = three.settings.clone();
+        let record = selfplay::generate(
+            Record::new(
+                &settings.game,
+                &settings.player,
+                0,
+                selfplay::derive_seed(settings.seed, 0),
+            )
+            .unwrap(),
+            &settings.game,
+            &mut |state: &engine::State| {
+                let action = state.legal_actions()[0];
+                Ok(Decision {
+                    action,
+                    label: Some(Label {
+                        action,
+                        score: 5,
+                        depth: 2,
+                        kind: ScoreKind::Search,
+                    }),
+                    pv: vec![action],
+                    nodes: 10,
+                    elapsed_ns: 1,
+                })
+            },
+            &|| false,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!record.roots.is_empty() && record.roots.iter().all(|r| r.pv.len() == 1));
+        let mut counts = Counts::default();
+        counts.add(&record);
+        assert_eq!(counts.pv_positions, record.roots.len() as u64);
+        verify_record(&record, &settings).unwrap();
+        // A directory generated with a smaller K does not accept these records.
+        verify_record(&record, &zero.settings).unwrap_err();
     }
 }

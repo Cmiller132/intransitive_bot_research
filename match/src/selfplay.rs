@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{rpsi::Frame, End, GameRecord, RandomMoves};
 
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
@@ -58,6 +58,8 @@ pub struct Label {
 pub struct Decision {
     pub action: Action,
     pub label: Option<Label>,
+    /// Principal variation of the labelled search, starting at the labelled move.
+    pub pv: Vec<Action>,
     pub nodes: u64,
     pub elapsed_ns: u64,
 }
@@ -77,6 +79,9 @@ pub struct Root {
     pub completed_depth: u8,
     pub nodes: u64,
     pub elapsed_ns: u64,
+    /// Labelled line from this root; empty unless --pv-labels asked for one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pv: Vec<Action>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -341,6 +346,22 @@ impl Record {
                         }
                     }
                 }
+                if !root.pv.is_empty() {
+                    ensure!(
+                        root.pv.first().copied() == root.searched_best,
+                        "pv does not start at the labelled move"
+                    );
+                    let mut line = state.clone();
+                    for (index, &step) in root.pv.iter().enumerate() {
+                        ensure!(line.legal_moves().contains(step), "illegal pv action");
+                        let (child, outcome) = apply(&Rules::SITE, &line, step);
+                        ensure!(
+                            outcome == Outcome::Ongoing || index + 1 == root.pv.len(),
+                            "pv continues past a terminal position"
+                        );
+                        line = child;
+                    }
+                }
                 if action.is_none() {
                     ensure!(
                         self.game.end == End::Interrupted,
@@ -454,6 +475,7 @@ pub fn generate(
                 completed_depth: decision.label.map_or(0, |l| l.depth),
                 nodes: decision.nodes,
                 elapsed_ns: decision.elapsed_ns,
+                pv: decision.pv,
             });
         }
         emit(&event)?;
@@ -499,9 +521,25 @@ mod tests {
                 depth: 1,
                 kind: ScoreKind::Search,
             }),
+            pv: Vec::new(),
             nodes: 10,
             elapsed_ns: 123,
         })
+    }
+    /// The first-legal-action line from `state`, stopping at a terminal position.
+    fn line(state: &State, length: usize) -> Vec<Action> {
+        let mut pv = Vec::new();
+        let mut state = state.clone();
+        for _ in 0..length {
+            let action = state.legal_actions()[0];
+            pv.push(action);
+            let (child, outcome) = apply(&Rules::SITE, &state, action);
+            if outcome != Outcome::Ongoing {
+                break;
+            }
+            state = child;
+        }
+        pv
     }
     fn custom(state: &State, config: &Config) -> Record {
         let mut record = Record::new(config, "test", 0, 7).unwrap();
@@ -573,6 +611,7 @@ mod tests {
                             depth: 0,
                             kind: ScoreKind::EngineProof,
                         }),
+                        pv: Vec::new(),
                         nodes: 0,
                         elapsed_ns: 5,
                     })
@@ -667,5 +706,98 @@ mod tests {
         assert_eq!(record.roots[0].root_score, None);
         assert_eq!(record.roots[0].score_kind, ScoreKind::Unlabelled);
         record.verify().unwrap();
+        // An unlabelled root has no best move, so it may not carry a line either.
+        let mut bad = record;
+        bad.roots[0].pv = vec![state.legal_actions()[0]];
+        assert!(bad.verify().is_err());
+    }
+
+    #[test]
+    fn principal_variations_replay_and_broken_lines_are_rejected() {
+        let config = Config {
+            opening_plies: 0,
+            random_moves: 0,
+            max_plies: 2,
+            ..config()
+        };
+        let record = generate(
+            Record::new(&config, "test", 0, 5).unwrap(),
+            &config,
+            &mut |s| {
+                let mut decision = first(s)?;
+                decision.pv = line(s, 3);
+                Ok(decision)
+            },
+            &|| false,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(record.roots[0].pv.len(), 3);
+        record.verify().unwrap();
+        // The line must start at the labelled move, even when the substitute is legal.
+        let root = record.initial.state().unwrap();
+        let mut bad = record.clone();
+        bad.roots[0].pv[0] = root.legal_actions()[1];
+        assert!(bad.verify().is_err());
+        // Every continuation must be legal where it is played.
+        let child = apply(&Rules::SITE, &root, record.roots[0].pv[0]).0;
+        let illegal = (0..648u16)
+            .find(|&a| !child.legal_moves().contains(a))
+            .unwrap();
+        let mut bad = record.clone();
+        bad.roots[0].pv[1] = illegal;
+        assert!(bad.verify().is_err());
+        // Recording no line at all stays legal.
+        let mut empty = record.clone();
+        empty.roots[0].pv.clear();
+        empty.verify().unwrap();
+    }
+
+    #[test]
+    fn a_principal_variation_may_not_continue_past_a_terminal_position() {
+        let config = Config {
+            opening_plies: 0,
+            random_moves: 0,
+            max_plies: 4,
+            ..config()
+        };
+        let state = State {
+            board: {
+                let mut b = [Cell::Empty; 81];
+                b[79] = Cell::Own(Piece::Rock);
+                b[20] = Cell::Enemy(Piece::Paper);
+                b
+            },
+            ply: 0,
+            since_capture: 0,
+        };
+        let win = engine::notation::action_between(79, 80).unwrap();
+        let record = generate(
+            custom(&state, &config),
+            &config,
+            &mut |_| {
+                Ok(Decision {
+                    action: win,
+                    label: Some(Label {
+                        action: win,
+                        score: 29_999,
+                        depth: 1,
+                        kind: ScoreKind::Search,
+                    }),
+                    pv: vec![win],
+                    nodes: 7,
+                    elapsed_ns: 5,
+                })
+            },
+            &|| false,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(record.game.end, End::Goal);
+        assert_eq!(record.roots[0].pv, vec![win]);
+        record.verify().unwrap();
+        let mut bad = record;
+        bad.roots[0].pv.push(win);
+        assert!(bad.verify().is_err());
     }
 }
