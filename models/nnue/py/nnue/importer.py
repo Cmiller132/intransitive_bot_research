@@ -348,7 +348,9 @@ def import_human(file: Path, out: str, seed: int) -> Path:
 SELFPLAY_KINDS = {"search": data.KIND_TEACHER, "engine_proof": data.KIND_PROOF}
 
 
-def import_selfplay(records: list[Path], out: str, min_ply: int, seed: int) -> Path:
+def import_selfplay(
+    records: list[Path], out: str, min_ply: int, seed: int, pv_rows: int = 0, pv_weight: float = 0.5
+) -> Path:
     """The searched roots of `bot selfplay` games (the published shards listed
     in each directory's manifest) as labelled rows: target = tanh(root_score /
     score_scale) from the mover's view, the score of the last completed
@@ -356,17 +358,41 @@ def import_selfplay(records: list[Path], out: str, min_ply: int, seed: int) -> P
     the mover's view where the game's result is real (not censored) and the
     root lies after the last random deviation; rows from ply >= min_ply;
     duplicate (board, clock state) rows dropped, the first kept. Game ids are
-    unique across directories (directory index in the high byte)."""
-    boards: list[np.ndarray] = []
-    since_all: list[int] = []
-    plies: list[int] = []
-    games: list[int] = []
-    outcomes: list[int] = []
-    outcome_ok: list[bool] = []
-    targets: list[float] = []
-    kinds: list[int] = []
-    clocks: list[int] = []
+    unique across directories (directory index in the high byte).
+
+    With `pv_rows` K > 0 the first K positions along a root's recorded
+    principal variation (`pv`, from `bot selfplay --pv-labels`) become rows
+    too: the root's value sign-flipped per ply from the mover's view, kind
+    TEACHER, source SOURCE_SELFPLAY_LINE, weight `pv_weight`, no outcome. A
+    line stops before a terminal position or an illegal action; a line
+    position that is also a searched root keeps the root's label (root rows
+    come first among duplicates). With K = 0 recorded lines are ignored, so
+    two imports of the same games differ only in the line rows."""
+    import engine
+
+    fields = (
+        "board",
+        "since_capture",
+        "ply",
+        "capture_clock",
+        "target",
+        "kind",
+        "game",
+        "outcome",
+        "outcome_ok",
+        "weight",
+        "source",
+    )
+    root_rows: dict[str, list] = {k: [] for k in fields}
+    line_rows: dict[str, list] = {k: [] for k in fields}
+
+    def add(sink: dict[str, list], *values) -> None:
+        for k, v in zip(fields, values, strict=True):
+            sink[k].append(v)
+
     counts = {"games": 0, "censored": 0, "roots": 0, "labelled": 0, "eligible": 0, "mismatched": 0}
+    if pv_rows:
+        counts.update(line_rows=0, line_duplicates=0, line_terminal=0, line_illegal=0)
     ends: dict[str, int] = {}
     manifests = []
     for index, directory in enumerate(records):
@@ -416,55 +442,85 @@ def import_selfplay(records: list[Path], out: str, min_ply: int, seed: int) -> P
                         counts["eligible"] += 1
                         board, since, _, _ = roots[ply]
                         mover = int(root["mover"])
-                        boards.append(board)
-                        since_all.append(since)
-                        plies.append(ply)
-                        games.append(game)
-                        clocks.append(clock)
-                        targets.append(float(np.tanh(float(root["root_score"]) / scale)))
-                        kinds.append(kind)
+                        target = float(np.tanh(float(root["root_score"]) / scale))
                         if censored:
-                            outcomes.append(0)
-                            outcome_ok.append(False)
+                            outcome, outcome_ok = 0, False
                         else:
                             result = int(record["outcome"])
-                            outcomes.append(result if mover == 0 else -result)
-                            outcome_ok.append(ply >= after)
-    if not boards:
+                            outcome, outcome_ok = (result if mover == 0 else -result), ply >= after
+                        source = data.SOURCE_SELFPLAY
+                        add(root_rows, board, since, ply, clock, target, kind, game, outcome, outcome_ok, 1.0, source)
+                        if not pv_rows or not root.get("pv"):
+                            continue
+                        b, s, p, sign = board.tolist(), since, ply, 1.0
+                        for action in root["pv"][:pv_rows]:
+                            action = int(action)
+                            legal = engine.legal_mask(b)
+                            if action >= len(legal) or not legal[action]:
+                                counts["line_illegal"] += 1
+                                break
+                            child, s, p, terminal = engine.apply(b, s, p, action, clock)
+                            sign = -sign
+                            if terminal != 0:
+                                counts["line_terminal"] += 1
+                                break
+                            b = list(child)
+                            counts["line_rows"] += 1
+                            add(
+                                line_rows,
+                                np.array(b, dtype=np.uint8),
+                                s,
+                                p,
+                                clock,
+                                target * sign,
+                                data.KIND_TEACHER,
+                                game,
+                                0,
+                                False,
+                                pv_weight,
+                                data.SOURCE_SELFPLAY_LINE,
+                            )
+    if not root_rows["board"]:
         raise SystemExit("no labelled roots at or after the minimum ply")
+    merged = {k: root_rows[k] + line_rows[k] for k in fields}  # roots first: they win among duplicates
     rows = {
-        "board": np.stack(boards).astype(np.uint8),
-        "since_capture": np.array(since_all, dtype=np.uint16),
-        "ply": np.array(plies, dtype=np.uint16),
-        "capture_clock": np.array(clocks, dtype=np.uint16),
-        "target": np.clip(np.array(targets, dtype=np.float32), -1, 1),
-        "kind": np.array(kinds, dtype=np.uint8),
-        "game": np.array(games, dtype=np.uint32),
-        "outcome": np.array(outcomes, dtype=np.int8),
-        "outcome_ok": np.array(outcome_ok, dtype=np.bool_),
+        "board": np.stack(merged["board"]).astype(np.uint8),
+        "since_capture": np.array(merged["since_capture"], dtype=np.uint16),
+        "ply": np.array(merged["ply"], dtype=np.uint16),
+        "capture_clock": np.array(merged["capture_clock"], dtype=np.uint16),
+        "target": np.clip(np.array(merged["target"], dtype=np.float32), -1, 1),
+        "kind": np.array(merged["kind"], dtype=np.uint8),
+        "game": np.array(merged["game"], dtype=np.uint32),
+        "outcome": np.array(merged["outcome"], dtype=np.int8),
+        "outcome_ok": np.array(merged["outcome_ok"], dtype=np.bool_),
+        "weight": np.array(merged["weight"], dtype=np.float32),
+        "source": np.array(merged["source"], dtype=np.uint8),
     }
     _, first = np.unique(context_hash(rows["board"], rows["since_capture"], rows["capture_clock"]), return_index=True)
     first.sort()
+    if pv_rows:
+        line = rows["source"] == data.SOURCE_SELFPLAY_LINE
+        counts["line_duplicates"] = int(line.sum()) - int(line[first].sum())
     rows = {k: v[first] for k, v in rows.items()}
     n = len(first)
-    rows.update(
-        weight=np.ones(n, dtype=np.float32),
-        source=np.full(n, data.SOURCE_SELFPLAY, dtype=np.uint8),
-        orbit=orbit_hash(rows["board"]),
-    )
+    rows["orbit"] = orbit_hash(rows["board"])
     rows["split"] = assign_splits(rows["game"], rows["orbit"], seed)
     counts["unique"] = n
+    sources = {data.SOURCE_SELFPLAY: "searched roots of bot selfplay games"}
+    if pv_rows:
+        sources[data.SOURCE_SELFPLAY_LINE] = "principal-variation positions, the root's value sign-flipped per ply"
     target = data_dir(out)
     data.write(
         target,
         rows,
         {
             "producer": "selfplay",
-            "sources": {data.SOURCE_SELFPLAY: "searched roots of bot selfplay games"},
+            "sources": sources,
             "records": manifests,
             "label": "tanh(root_score / score_scale) of the last completed iteration, mover's view; proofs as PROOF",
             "outcome": "mover's view; outcome_ok only for real results at or after the last random deviation",
             "min_ply": min_ply,
+            **({"pv_rows": pv_rows, "pv_weight": pv_weight} if pv_rows else {}),
             "rules": {"capture_clock": int(rows["capture_clock"][0]), "repetition_draw": False},
             "counts": counts,
             "ends": ends,
@@ -493,6 +549,8 @@ def main(argv: list[str] | None = None) -> None:
     selfplay.add_argument("--out", required=True, help="dataset name under runs/nnue_data")
     selfplay.add_argument("--min-ply", type=int, default=16, help="first ply whose roots become training rows")
     selfplay.add_argument("--seed", type=int, default=20260909)
+    selfplay.add_argument("--pv-rows", type=int, default=0, help="principal-variation positions per root as rows")
+    selfplay.add_argument("--pv-weight", type=float, default=0.5, help="the weight of a line row")
     args = parser.parse_args(argv)
     if args.command == "conv":
         span = tuple(int(x) for x in args.iterations.split("-")) if args.iterations else None
@@ -500,7 +558,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "human":
         import_human(args.file, args.out, args.seed)
     else:
-        import_selfplay(args.records, args.out, args.min_ply, args.seed)
+        import_selfplay(args.records, args.out, args.min_ply, args.seed, args.pv_rows, args.pv_weight)
 
 
 if __name__ == "__main__":

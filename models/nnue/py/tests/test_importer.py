@@ -239,10 +239,11 @@ SELFPLAY_MOVES_B = [
 ]  # a second game's prefix
 
 
-def selfplay_record(game_id: int, censored: bool, moves: list[str]) -> dict:
+def selfplay_record(game_id: int, censored: bool, moves: list[str], pv: int = 0) -> dict:
     """A game record in the generator's schema: searched roots from ply 8 with
     scores from the mover's view (+300 for player 0, -120 for player 1), one
-    unlabelled root at ply 20, one engine proof at ply 30."""
+    unlabelled root at ply 20, one engine proof at ply 30. With `pv` > 0 every
+    searched root carries the game's next `pv` moves as its line."""
     from nnue.games import replay
 
     roots_replay, _ = replay(moves)
@@ -268,6 +269,7 @@ def selfplay_record(game_id: int, censored: bool, moves: list[str]) -> dict:
                 "completed_depth": 6 if score is not None else 0,
                 "nodes": 250000,
                 "elapsed_ns": 1,
+                **({"pv": [a for _, _, _, a in roots_replay[ply : ply + pv]]} if pv and kind == "search" else {}),
             }
         )
     return {
@@ -373,3 +375,58 @@ def test_selfplay_interrupted_games_import_as_censored_without_an_outcome_ply(tm
     assert rows["outcome_ok"][~cut].any()
     provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["counts"]["censored"] == 1 and provenance["counts"]["games"] == 2
+
+
+def test_selfplay_line_rows_follow_the_principal_variation(tmp_path, monkeypatch):
+    """--pv-rows K: the first K positions of a root's line become rows with the root's value sign-flipped per
+    ply (kind TEACHER, source SOURCE_SELFPLAY_LINE, weight 0.5, no outcome); a line position that is also a
+    searched root keeps the root's label; --pv-rows 0 ignores recorded lines (the A/B on identical games)."""
+    import engine
+
+    from nnue import data
+    from nnue.games import replay
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    write_selfplay_records(
+        tmp_path / "gen",
+        [selfplay_record(0, False, SELFPLAY_MOVES, pv=3), selfplay_record(1, True, SELFPLAY_MOVES_B, pv=3)],
+    )
+    roots_only = import_selfplay([tmp_path / "gen"], "roots", 16, 3, pv_rows=0)
+    with_lines = import_selfplay([tmp_path / "gen"], "lines", 16, 3, pv_rows=3)
+    a = {name: np.load(roots_only / f"{name}.npy") for name in data.FIELDS}
+    b = {name: np.load(with_lines / f"{name}.npy") for name in data.FIELDS}
+    assert len(a["board"]) == 38 and not (a["source"] == data.SOURCE_SELFPLAY_LINE).any() and np.all(a["weight"] == 1)
+    line = b["source"] == data.SOURCE_SELFPLAY_LINE
+    for name in data.FIELDS:  # the root rows are the roots-only import, in its order
+        assert np.array_equal(a[name], b[name][~line]), name
+    # Every line position from plies 16..35 is a searched root (a duplicate, the root's row kept) except ply 20
+    # (the unlabelled root) and ply 36 (past the last root): two line rows per game.
+    assert sorted(zip(b["game"][line].tolist(), b["ply"][line].tolist(), strict=True)) == [
+        (0, 20),
+        (0, 36),
+        (1, 20),
+        (1, 36),
+    ]
+    assert np.all(b["kind"][line] == data.KIND_TEACHER) and np.all(b["weight"][line] == 0.5)
+    assert not b["outcome_ok"][line].any() and np.all(b["outcome"][line] == 0)
+    # The first line row at a position wins among lines: ply 20 comes from root 17 (mover 1, -120) three plies
+    # on, ply 36 from root 33 (the same): tanh(-120 / 600) * (-1)^3.
+    assert np.allclose(b["target"][line], np.tanh(120 / 600))
+    for game, moves in ((0, SELFPLAY_MOVES), (1, SELFPLAY_MOVES_B)):
+        boards, _ = replay(moves)
+        by_ply = {ply: board for board, _, ply, _ in boards}
+        board35, since35, _, action35 = boards[35]
+        child, _, _, _ = engine.apply(board35.tolist(), since35, 35, action35, 200)
+        by_ply[36] = np.array(list(child), dtype=np.uint8)
+        for board, ply, g in zip(b["board"][line], b["ply"][line], b["game"][line], strict=True):
+            if int(g) == game:
+                assert np.array_equal(board, by_ply[int(ply)]), (game, ply)
+    provenance = json.loads((with_lines / "provenance.json").read_text(encoding="utf-8"))
+    counts = provenance["counts"]
+    # 16 searched roots at plies 16..33 with three line positions each, root 34 with two, root 35 with one
+    assert counts["line_rows"] == 2 * (16 * 3 + 2 + 1) and counts["line_duplicates"] == counts["line_rows"] - 4
+    assert counts["line_terminal"] == 0 and counts["line_illegal"] == 0 and counts["unique"] == 42
+    assert provenance["pv_rows"] == 3 and provenance["pv_weight"] == 0.5 and "7" in provenance["sources"]
+    plain = json.loads((roots_only / "provenance.json").read_text(encoding="utf-8"))
+    assert "pv_rows" not in plain and "line_rows" not in plain["counts"] and "7" not in plain["sources"]

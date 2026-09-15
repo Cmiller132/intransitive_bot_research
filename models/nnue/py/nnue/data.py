@@ -42,6 +42,7 @@ TRAIN, VALIDATION, TEST = range(3)
 # generator's searched roots; labels keep the producer.
 SOURCE_CONV, SOURCE_PROTOTYPE_REPLAY, SOURCE_PROTOTYPE_SEARCHED, SOURCE_STUDENT, SOURCE_HUMAN = 1, 2, 3, 4, 5
 SOURCE_SELFPLAY = 6  # searched roots of `bot selfplay` games (nnue.importer selfplay)
+SOURCE_SELFPLAY_LINE = 7  # positions along a root's principal variation, the root's value sign-flipped per ply
 
 
 IDS_FILE = "ids8.npy"  # optional cache: the format-8 feature ids of every row, (N, 2, SLOTS) int16

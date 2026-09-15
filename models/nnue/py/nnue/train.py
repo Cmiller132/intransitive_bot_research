@@ -9,6 +9,13 @@ the best network.
 Every field of `Config` is a flag; `runs/<name>/config.json` records the values
 used. A run holds `latest.pt`, `best.pt`, `best.nnue` (+ `.json`) and
 `log.csv` with one row per epoch.
+
+With `--ema d` (0 < d < 1) an exponential moving average of the weights, begun
+at the end of the warmup and moved a little toward the live weights after
+every step, is the network of record: it is validated, saved as the
+checkpoint's `model` and exported; the live weights ride along as `live` so a
+resume continues the descent exactly. Leela's and KataGo's published networks
+are averaged weights; the average is the cheapest variance reduction there is.
 """
 
 from __future__ import annotations
@@ -61,6 +68,8 @@ class Config:
     resume: str = ""  # a latest.pt to continue exactly
     stop_epoch: int = 0  # stop after this many epochs (0: run to `epochs`); the schedule is unchanged
     widen_outgoing: float = 0.0  # widening from a narrower init: the new readout and dense columns are +-this
+    ema: float = 0.0  # decay per step of the weight average that is the network of record (0: off; 0.999 = a
+    # window of about a thousand steps, one epoch of the H512 recipe)
 
 
 def parse(argv: list[str]) -> tuple[str, list[tuple[str, float]], Config]:
@@ -197,6 +206,18 @@ def initial_model(config: Config) -> NNUE:
     return model
 
 
+def ema_update(average: NNUE, live: NNUE, decay: float) -> None:
+    """The average moves toward the live weights by (1 - decay); integer buffers are copied."""
+    with torch.no_grad():
+        for a, b in zip(average.parameters(), live.parameters(), strict=True):
+            a.mul_(decay).add_(b, alpha=1.0 - decay)
+        for a, b in zip(average.buffers(), live.buffers(), strict=True):
+            if a.is_floating_point():
+                a.mul_(decay).add_(b, alpha=1.0 - decay)
+            else:
+                a.copy_(b)
+
+
 def truncate_log(path: Path, epochs: int) -> None:
     """Keeps the header and the first `epochs` rows: a row written before a
     crash that lost its checkpoint goes, the checkpoint stays the authority."""
@@ -226,6 +247,8 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     total_steps = config.epochs * config.steps_per_epoch
     step, first_epoch, best, stale = 0, 0, float("inf"), 0
+    average: NNUE | None = None  # the weight average (config.ema > 0), the model of record once it has begun
+    ema_started: int | None = None
     provenance = {name: sha256(data_dir(name) / "provenance.json") for name, _ in parts}
     # A run is bound to its datasets' provenance and its init file; a resume must present the same.
     inputs = {"data": parts, "datasets": provenance, "init_sha256": sha256(Path(config.init)) if config.init else None}
@@ -238,7 +261,11 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
         same = {**defaults, **saved["config"], **volatile} == {**asdict(config), **volatile}
         if not same or any(saved.get(k) != v for k, v in inputs.items()):
             raise ValueError("resume with the settings, init and datasets the run was started with")
-        model.load_state_dict(saved["model"])
+        model.load_state_dict(saved["live"] if "live" in saved else saved["model"])
+        if "live" in saved:  # the checkpoint's model is the average; the live weights continue the descent
+            average = copy.deepcopy(model)
+            average.load_state_dict(saved["model"])
+            ema_started = saved.get("ema_started")
         optimizer.load_state_dict(saved["optimizer"])
         step, first_epoch, best, stale = saved["step"], saved["epoch"] + 1, saved["best"], saved["stale"]
         torch.set_rng_state(saved["torch_rng"])
@@ -265,11 +292,18 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
                 raise RuntimeError("non-finite loss or gradient")
             optimizer.step()
             model.constrain()
+            if config.ema > 0:
+                if average is None and step >= config.warmup_steps:
+                    average, ema_started = copy.deepcopy(model), step  # begun from the live weights, not the init
+                elif average is not None:
+                    ema_update(average, model, config.ema)
             step += 1
             for k, v in {"loss": float(loss.detach()), **parts_of_loss}.items():
                 sums[k] = sums.get(k, 0.0) + v
         model.eval()
-        metrics = {name: evaluate(model, d, table, config.val_rows) for name, d, _ in validation}
+        record_model = model if average is None else average  # what is validated, checkpointed and exported
+        record_model.eval()
+        metrics = {name: evaluate(record_model, d, table, config.val_rows) for name, d, _ in validation}
         shares = sum(share for _, _, share in validation)
         objective = (
             sum((metrics[name]["selection"] or metrics[name])["mse"] * share for name, _, share in validation) / shares
@@ -291,7 +325,8 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
         print(json.dumps(record), flush=True)
         log_row(out / "log.csv", record)
         payload = {
-            "model": model.state_dict(),
+            "model": record_model.state_dict(),
+            **({"live": model.state_dict(), "ema_started": ema_started} if average is not None else {}),
             "optimizer": optimizer.state_dict(),
             "step": step,
             "epoch": epoch,
@@ -307,7 +342,7 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
         if improved:
             save(out / "best.pt", payload)
             export_module.export(
-                copy.deepcopy(model).cpu(),
+                copy.deepcopy(record_model).cpu(),
                 out / "best.nnue",
                 {"run": run, "epoch": epoch, "objective": objective, "config": asdict(config), **inputs},
             )

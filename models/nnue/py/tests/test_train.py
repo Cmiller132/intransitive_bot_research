@@ -132,3 +132,40 @@ def test_id_cache_reproduces_the_encoder(sets, tmp_path):
     assert torch.equal(with_cache, fresh)
     out = train("cached", sets, tiny(epochs=1))
     assert (out / "best.nnue").exists()
+
+
+def test_ema_exports_the_average_and_keeps_the_live_weights(sets, tmp_path):
+    """--ema: the checkpoint's model is the average (begun at the end of the warmup), the live weights ride
+    along, and best.nnue is the export of the average; without --ema nothing changes."""
+    out = train("ema", sets, tiny(ema=0.9))
+    latest = torch.load(out / "latest.pt", weights_only=False)
+    assert "live" in latest and latest["ema_started"] == 2 and latest["config"]["ema"] == 0.9
+    assert any(not torch.equal(latest["model"][k], latest["live"][k]) for k in latest["model"])
+    best = torch.load(out / "best.pt", weights_only=False)
+    average = NNUE(32)
+    average.load_state_dict(best["model"])
+    export.export(average, tmp_path / "average.nnue", {})
+    assert (tmp_path / "average.nnue").read_bytes() == (out / "best.nnue").read_bytes()
+    plain = torch.load(train("plain", sets, tiny()) / "latest.pt", weights_only=False)
+    assert "live" not in plain and "ema_started" not in plain and plain["config"]["ema"] == 0.0
+
+
+def test_ema_resume_reproduces_the_uninterrupted_run(sets):
+    straight = train("ema_straight", sets, tiny(ema=0.9))
+    first = train("ema_split", sets, tiny(ema=0.9, stop_epoch=1))
+    assert train("ema_split", sets, tiny(ema=0.9, resume=str(first / "latest.pt"))) == first
+    a = torch.load(straight / "latest.pt", weights_only=False)
+    b = torch.load(first / "latest.pt", weights_only=False)
+    assert a["epoch"] == b["epoch"] == 1 and a["ema_started"] == b["ema_started"] == 2
+    for key in ("model", "live"):
+        for name, value in a[key].items():
+            assert torch.equal(value, b[key][name]), (key, name)
+
+
+def test_resume_across_the_ema_fields_introduction(sets):
+    """A checkpoint written before the field existed resumes: the missing field reads as its default."""
+    first = train("old", sets, tiny(stop_epoch=1))
+    saved = torch.load(first / "latest.pt", weights_only=False)
+    del saved["config"]["ema"]
+    torch.save(saved, first / "latest.pt")
+    train("old", sets, tiny(resume=str(first / "latest.pt")))
