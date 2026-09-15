@@ -630,6 +630,19 @@ that record.
     repaid. Width is closed at this data size; exit_check_a3 is not run. Audited by Claude alone;
     co-signature pending.
 
+49. Exit condition, second clause: the deployment pair at 250 ms with four threads (2026-09-14;
+    runs/nnue_gauntlets/exit_250ms_b2_ch; pinned manifest 0c3e0eed..., verdict.json 8d1f5a0e..., the
+    runner's original 1cf1e1d0... kept as verdict.runner.json): c2_search_capture_history.exe
+    (d00ab30f...) playing b2_format8_s2:epoch20 (ba8e0b93...) against the frozen gate 6 build
+    (e4e0d5ff...) playing mb_a (2e275215...), rpsi seats with four player threads each, two concurrent
+    games, 250 ms, 250 pairs: 227 wins, 183 draws, 90 losses, .637 [.607, .667], 500 games valid, 250
+    distinct openings, first mover .533, mean 288 plies (Goal 316, CaptureClock 183, Elimination 1).
+    exit_250ms_4t (.60) met: the second clause of the exit condition (section 7) is met by the same pair
+    as the first; the third (the seat's 200k fixed nodes, exit_200k_b2_ch) follows in the queue. The
+    draw share rises from 23 % at 100 ms to 37 % here and the games run longer. Audited mechanically
+    by the loop (runs/nnue_plan/autoloop.py audit: runner and re-judgement agree); Claude's reading;
+    co-signature pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -690,12 +703,28 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   under the capture-history search, a seat-local Linux build of master e7251b5, c2efc2e4...) deployed
   2026-09-14 17:31 on the user's decision as a third seat at the same fixed 200k nodes, one thread;
   nnue_1 and nnue_2 unchanged as references. The Henhen site bot Vlad_NNUE runs the same pair and
-  binary since 2026-09-14 23:46 UTC (six threads, 1000 ms; README).
+  binary since 2026-09-14 23:46 UTC (six threads; README). Its per-move cap was raised from 1000 to
+  3000 ms on 2026-09-15 01:00 UTC on the user's decision: under the site's 60 s + 1 s clock the seat's
+  budget formula (match/src/rpsi.rs `move_budget_ms`: 0.8 x increment + clock/30 - 150 ms, floor
+  `--move-ms` 1000) targets about 2.6 s early in a game, and the old cap made every move exactly
+  1000 ms and never spent the bank; the floor is unchanged, so the seat spends more only while its
+  clock allows it. Unmeasured on the clock (no clock model in `bot eval`); the site ladder is the
+  reading.
 - Exit condition, its first clause met by the deployment candidate of item 47 (the capture-history
-  build with b2_format8_s2:epoch20, .661 at 100 ms), the other two preregistered after it
-  (exit_250ms_b2_ch 0c3e0eed..., running from 16:15; exit_200k_b2_ch ba282170..., under the runner's
-  fixed-simulation match mode, c32a695): at least
+  build with b2_format8_s2:epoch20, .661 at 100 ms) and its second by the same pair (item 49:
+  exit_250ms_b2_ch 0c3e0eed..., .637 [.607, .667] at 250 ms with four threads, judged 20:55); the
+  third (exit_200k_b2_ch ba282170..., under the runner's fixed-simulation match mode, c32a695) is
+  running from 20:55: at least
   65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
   deployment is the user's decision.
+- The improvement loop (runs/nnue_plan/autoloop.py, rewritten 2026-09-14 after the review of its
+  skeleton; runs/nnue_loop/ holds its state, log, digest, proposals and alerts): self-play from the
+  accepted network on both CCDs at idle priority, a fixed held-out set no arm trains on
+  (heldout_loop), every round four mixture variants of the accepted network trained on the GPU and
+  screened on that set, the screen's choice against the accepted network under the lock (the 50 ms
+  sequential test as the screen, a fixed 100 ms match at .5 over 150 pairs as the guard; both met
+  promote), generations pooled across null rounds, a deployment-candidate test after every
+  promotion; it never deploys. Started 2026-09-14 21:xx to take over the lane once the queue drains
+  and gen5_round is judged (its endpoint adopted if promotion_gen5 is met).

@@ -261,8 +261,11 @@ runs/nnue_plan/ (untracked).
 `Vlad_NNUE` on https://rps.henhen1227.com/bots runs the arena's `nnue_3`
 pair (b2_format8_s2:epoch20 under the capture-history search, the same Linux
 binary as the arena seat; since 2026-09-14 23:46 UTC, `nnue_2`'s network and
-then `mb_a` before) with the engine name `Vlad NNUE`, six search threads and a
-1000 ms move budget.
+then `mb_a` before) with the engine name `Vlad NNUE`, six search threads, a
+1000 ms floor per move and, since 2026-09-15 01:00 UTC, a 3000 ms cap: under
+the site's 60 s + 1 s clock the seat's own budget formula (`move_budget_ms` in
+match/src/rpsi.rs) decides the move time between the two, where the old
+1000 ms cap had fixed every move at one second.
 It runs in its own container, separately from the arena and the other site
 bots. Henhen usernames cannot contain spaces.
 
