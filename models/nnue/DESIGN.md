@@ -860,3 +860,10 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   whether the deeper label is needed: NODES stays 25k, ROUND_ROWS 6 M root rows. The arena the same hour: nnue_5
   settled at 252.9 +-30.8 after 616 games, delta -2.9 against nnue_4 (not confirmed, no regression), the second
   promotion in a row whose 40k-node gain test passed and whose arena reading sits under the +30 bar.
+  The PV rows' own control (2026-09-15 15:30, the user): every pool or parent set with line rows gets a
+  roots-only twin (`<set>_roots`: the same records imported without --pv-rows, so its rows are exactly the set's
+  root rows and its share is the set's), and one arm per round, pool_roots, trains the pool mixture on the twins.
+  It is screened and can take the gate like any arm; pool against pool_roots at the screen and on the held-out
+  MSE is a running A/B of the PV rows on identical games (about 11 GPU minutes and 4 lane-b minutes per round,
+  one 8-minute import per batch). The arm is skipped in a round whose twins are not all imported. Multipv
+  sampling has no such control: it changes the games, so its test is a separate generation.
