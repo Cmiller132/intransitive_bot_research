@@ -19,18 +19,22 @@
 #   NODES [100000]      search nodes per move: the label budget (the research loop's value)
 #   THREADS [all cores] games in flight, and the trainer's threads; one game per core is the model
 #   HASH [64]           transposition table MiB per game in flight
-#   EPOCHS [20] STEPS [1000] BATCH [8192] LR [0.0001] WARMUP [200]   the H512 continuation recipe
+#   EPOCHS [20] BATCH [8192] LR [0.0001]   the H512 continuation recipe's schedule (cosine to a floor, QAT from epoch 1)
+#   PASSES [4]          passes over the training rows: STEPS = rows x PASSES / (BATCH x EPOCHS) unless STEPS is set
+#   STEPS [] WARMUP []  steps per epoch and warmup steps; sized from the data when unset (WARMUP a tenth of the
+#                       steps, at most 200). The research loop's fixed 20 x 1,000 steps is 200 passes over one
+#                       3,200-game batch and overfits it (the loop mixes each batch with 13 M older rows; you don't)
 #   DEVICE [cpu]        cpu is the tested path; mps may work with a recent PyTorch
 #   EXTRA_DATA []       more "<set>:<share>" entries for the training mixture, space separated (earlier sets)
 #   PAIRS [100]         evaluation openings, two games each      SIMS [8]   evaluation budget, units of 2,500 nodes
-#   SEED [1]            generation, training and evaluation seed
+#   SEED [1]            generation, training and evaluation seed (change it for every new batch: the generator is
+#                       deterministic, so the same seed from the same network replays the same games)
 #   PY [python3]        the interpreter with the nnue and engine packages   BOT [target/release/bot]
 #
 # Rates: about 130 games per core-hour at 100k nodes (a 16-core machine makes about 2,200 games/h; 250k nodes is
-# 2.5 times slower). The full training recipe (20 x 1,000 steps at batch 8192, H512) is 11 minutes on a desktop
-# GPU and hours on a CPU: for a first pass on a CPU use EPOCHS=4 STEPS=250 BATCH=2048. Evaluation at SIMS=8
-# PAIRS=100 takes a few minutes. A smoke test of the whole pipeline: GAMES=8 NODES=5000 EPOCHS=1 STEPS=5 BATCH=256
-# WARMUP=2 PAIRS=2 SIMS=1 (under a minute).
+# 2.5 times slower). Training sized to one 3,200-game batch is a few minutes on a GPU and longer on a CPU
+# (BATCH=2048 on a small machine). Evaluation at SIMS=8 PAIRS=100 takes a few minutes. A smoke test of the whole
+# pipeline: GAMES=8 NODES=5000 EPOCHS=1 STEPS=5 BATCH=256 WARMUP=2 PAIRS=2 SIMS=1 (under a minute).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -44,10 +48,11 @@ fi
 HASH="${HASH:-64}"
 SEED="${SEED:-1}"
 EPOCHS="${EPOCHS:-20}"
-STEPS="${STEPS:-1000}"
+STEPS="${STEPS:-}"
 BATCH="${BATCH:-8192}"
 LR="${LR:-0.0001}"
-WARMUP="${WARMUP:-200}"
+WARMUP="${WARMUP:-}"
+PASSES="${PASSES:-4}"
 DEVICE="${DEVICE:-cpu}"
 EXTRA_DATA="${EXTRA_DATA:-}"
 PAIRS="${PAIRS:-100}"
@@ -95,9 +100,20 @@ if [ ! -f "runs/nnue_data/$SET/ids8.npy" ]; then
 fi
 
 # ---- 4. train -----------------------------------------------------------------------------------------------------------
+rows_of() { "$PY" -c "import json, sys; print(json.load(open('runs/nnue_data/%s/provenance.json' % sys.argv[1]))['rows'])" "$1"; }
 DATA_ARGS="--data $SET:1.0"
-for entry in $EXTRA_DATA; do DATA_ARGS="$DATA_ARGS --data $entry"; done
-say "4/5 training $NAME from $NET on $SET${EXTRA_DATA:+ + $EXTRA_DATA} ($EPOCHS x $STEPS steps, batch $BATCH, $DEVICE)"
+ROWS="$(rows_of "$SET")"
+for entry in $EXTRA_DATA; do DATA_ARGS="$DATA_ARGS --data $entry"; ROWS=$((ROWS + $(rows_of "${entry%%:*}"))); done
+if [ -z "$STEPS" ]; then  # PASSES passes over every training row, spread over the epochs
+  STEPS=$(( (ROWS * PASSES + BATCH * EPOCHS - 1) / (BATCH * EPOCHS) ))
+  [ "$STEPS" -lt 10 ] && STEPS=10
+fi
+if [ -z "$WARMUP" ]; then  # a tenth of the run, at most 200 steps
+  WARMUP=$(( STEPS * EPOCHS / 10 ))
+  [ "$WARMUP" -gt 200 ] && WARMUP=200
+  [ "$WARMUP" -lt 1 ] && WARMUP=1
+fi
+say "4/5 training $NAME from $NET on $SET${EXTRA_DATA:+ + $EXTRA_DATA}: $ROWS rows, $EPOCHS x $STEPS steps at batch $BATCH ($((STEPS * EPOCHS * BATCH / (ROWS > 0 ? ROWS : 1))) passes), warmup $WARMUP, $DEVICE"
 "$PY" -m nnue.train --run "$NAME" --init "$NET" $DATA_ARGS --hidden "$HIDDEN" --version 8 \
   --batch "$BATCH" --steps_per_epoch "$STEPS" --epochs "$EPOCHS" --lr "$LR" --weight_decay 1e-5 \
   --warmup_steps "$WARMUP" --lr_floor 0.15 --qat_start_epoch 1 --raw_weight 0.02 --symmetry_weight 0.2 \

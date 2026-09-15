@@ -67,12 +67,19 @@ GAMES=8 NODES=5000 EPOCHS=1 STEPS=5 BATCH=256 WARMUP=2 PAIRS=2 SIMS=1 \
   models/nnue/quickstart.sh models/nnue/examples/example.nnue smoke
 ```
 
-A first real pass sized for a CPU trainer (generation is the long part,
-about 1.5 hours on a 16-core machine; training some minutes):
+A first real pass (generation is the long part, about 1.5 hours on a
+16-core machine; training sizes itself to the data and takes minutes):
 
 ```
-GAMES=3200 EPOCHS=4 STEPS=250 BATCH=2048 models/nnue/quickstart.sh models/nnue/examples/example.nnue first
+models/nnue/quickstart.sh models/nnue/examples/example.nnue first
 ```
+
+On a machine with little memory add `BATCH=2048`. Training makes about
+four passes over the rows (`PASSES`), so one 3,200-game batch is a few
+hundred optimiser steps; the research loop's fixed 20 x 1,000 steps would
+be 200 passes over the same batch and overfits it, which is what the
+script did before 2026-09-15. If you ran it before then, rerun with the
+new defaults.
 
 The script prints each step with a timestamp and ends with a line like
 
@@ -117,41 +124,57 @@ setting, and a format 6 file trains as format 8.
 | `NODES` | 100000 | search nodes per move, the label's budget | the research loop's value; 250k gives slightly better labels at 2.5 times the cost, below 50k the labels get noisy |
 | `THREADS` | all cores | games in flight, and the trainer's threads | one game per core is the model; efficiency cores are slower but add throughput; `sysctl -n hw.perflevel0.logicalcpu` counts performance cores if you want only those |
 | `HASH` | 64 | transposition table per game in flight, MiB | 16 games use 1 GiB; lower it on a small machine, it costs little strength |
-| `EPOCHS` | 20 | training epochs | the recipe; a CPU pass at 4 first |
-| `STEPS` | 1000 | optimiser steps per epoch | with `BATCH`, the compute: `EPOCHS x STEPS x BATCH` rows sampled; aim for three to five passes over the data |
-| `BATCH` | 8192 | rows per step | 2048 on a CPU; time per step scales with it |
+| `EPOCHS` | 20 | training epochs, one validation and checkpoint each | the recipe; fewer epochs means coarser `best.nnue` selection, not less training |
+| `PASSES` | 4 | passes over the training rows | the amount of training: `STEPS` is derived from it; 3 to 5 is the range that does not memorise a batch |
+| `STEPS` | from the data | optimiser steps per epoch: `rows x PASSES / (BATCH x EPOCHS)` | set it only to override the sizing; `EPOCHS x STEPS x BATCH` rows are sampled |
+| `BATCH` | 8192 | rows per step | 2048 on a small machine; time per step scales with it |
 | `LR` | 0.0001 | peak learning rate, cosine to 15 % after `WARMUP` steps | the continuation rate; from scratch 3e-4 |
-| `WARMUP` | 200 | linear warmup steps | shorten for tiny runs |
+| `WARMUP` | from the data | linear warmup steps, a tenth of the run and at most 200 | set it only to override |
 | `DEVICE` | cpu | the trainer's device | cpu is the tested path; `mps` may work with a recent PyTorch, try it on the smoke test first; `cuda` on a machine with an NVIDIA GPU |
 | `EXTRA_DATA` | | more `<set>:<share>` entries in the training mixture, space separated | on later iterations keep the earlier sets, for example `EXTRA_DATA="selfplay_first:1.0"`; shares are relative weights of the sampling mixture |
 | `PAIRS` | 100 | evaluation openings, two games each (seats swapped) | 400 for a decision, 100 for a reading |
 | `SIMS` | 8 | evaluation budget in units of 2,500 nodes | 8 is 20k nodes (fast); 16 is 40k, the research loop's gate |
-| `SEED` | 1 | the generation, training and evaluation seed | change it for another sample of games |
+| `SEED` | 1 | the generation, training and evaluation seed | change it for every new batch: the generator is deterministic, so the same seed from the same network replays the same games |
 | `PY`, `BOT` | python3, target/release/bot | the interpreter and the binary | a virtual environment's interpreter, a differently built binary |
 
 Rates to plan with: about 130 games per core-hour at 100k nodes (a 16-core
 machine makes about 2,200 games/h, so 3,200 games take about 1.5 hours and
-12,800 about 6); 250k nodes is 2.5 times slower. Training the full recipe
-is 11 minutes on a desktop GPU and hours on a CPU, which is why the first
-pass above is scaled down.
+12,800 about 6); 250k nodes is 2.5 times slower. Training sized to one
+3,200-game batch is a few hundred steps: a few minutes on a GPU or with
+`DEVICE=mps`, longer on a CPU. The research loop's own fixed recipe
+(20 x 1,000 steps at batch 8192, 11 minutes on a desktop GPU) only makes
+sense over its 17 M-row mixture.
 
 ## Iterating
 
-```
-models/nnue/quickstart.sh runs/first/best.nnue second
-EXTRA_DATA="selfplay_first:1.0" models/nnue/quickstart.sh runs/second/best.nnue third
-```
-
 Adopt a network as the next start only when the interval's lower bound is
 above zero (about score .57 at `PAIRS=100`, .535 at `PAIRS=400`; there is
-no other factor). Otherwise generate more games from the same start (a new
-name, another `SEED`) and train on both sets with `EXTRA_DATA`: one 3,200
-game batch from an already strong network often lands between .48 and .53,
-which is neither a gain nor a regression at that sample size, and two or
-three batches together usually decide it. The research loop keeps the
-older self-play sets and a share of human games in every mixture and
-weights fresh rows three times an old row; the script's mixture is
-whatever you pass.
+no other factor). One 3,200-game batch from an already strong network
+often lands between .48 and .53, which is neither a gain nor a regression
+at that sample size; two or three batches together usually decide it. So
+the sequence is: a batch; if it does not clear the line, another batch
+from the **same** start with another `SEED`, trained together with the
+first; only a network that cleared the line becomes a start.
+
+```
+models/nnue/quickstart.sh models/nnue/examples/example.nnue first
+# first scores .52 at PAIRS=100: not adopted, so a second batch from the same start, both in the mixture
+SEED=2 EXTRA_DATA="selfplay_first:1.0" PAIRS=400 models/nnue/quickstart.sh models/nnue/examples/example.nnue first_v2
+# first_v2 clears .535 over 800 games: the next start, with every earlier batch kept in the mixture
+SEED=3 EXTRA_DATA="selfplay_first:1.0 selfplay_first_v2:1.0" models/nnue/quickstart.sh runs/first_v2/best.nnue second
+```
+
+The dataset names carry the `selfplay_` prefix, the shares are relative
+weights, and `STEPS` is sized from the total rows each time, so a growing
+mixture gets proportionally more steps at the same four passes.
+
+Keep every batch. The research loop mixes each fresh batch with 13 M
+older self-play rows and human games, which anchors the network; the
+quick start has only the batches you pass, and a continuation trained on
+one small batch alone drifts away from what the starting network knew.
+The sign in `log.csv` is an `objective` that bottoms after one or two
+epochs and rises while `loss` keeps falling; the cure is fewer passes and
+more batches, never more epochs.
 
 Training's own numbers are in `runs/<name>/log.csv`, one row per epoch:
 `loss` is the training loss, each `<set>.mse` column is the validation
@@ -183,8 +206,11 @@ rows; both are off by default and under test in the research loop).
   about 230 moves, so at 100k nodes a core finishes a game in roughly half
   a minute; at the CLI's own default of 250k it takes over a minute. Check
   `NODES`.
-- Training looks slow: the default recipe is sized for a GPU; use the CPU
-  settings above, or `DEVICE=mps`.
-- The score is below .5: a single small batch from a strong network often
-  does not improve it; more games, the earlier sets in the mixture, or a
-  bigger evaluation before concluding anything.
+- Training looks slow: `BATCH=2048` on a small machine, or `DEVICE=mps`;
+  check the step count the script prints, it should be a few hundred for
+  one batch, not thousands.
+- The score is below .5, or `objective` in `log.csv` rises from epoch one
+  or two: the run trained past the data (too many passes, or `STEPS` set
+  by hand), or the mixture holds only one small batch. Keep `PASSES` at
+  4, pass every earlier batch in `EXTRA_DATA`, start from the last network
+  that cleared the line, and evaluate with `PAIRS=400` before concluding.
