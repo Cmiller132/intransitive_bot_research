@@ -836,3 +836,17 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   weight .5, roots first among duplicates): the pv_ab_01 A/B on identical games decides whether the loop's
   imports use them. Generation measured 2,050-2,240 games/h per full 16-thread lane at 100k nodes, about
   4,300 games/h and 0.95 M rows/h with both lanes.
+  On the user's word of 2026-09-15 11:00 (claude_notes 11:05), without their A/Bs: the importer turns the
+  three recorded line positions of every root into rows (PV_ROWS 3, weight .5) from the next pool import,
+  and generation samples a near-best alternative from the next job (the c4 build runs/nnue_bins/c4_multipv.exe,
+  commit 4bae8b8: `--multipv 2 --multipv-margin 30 --multipv-prob 50 --multipv-nodes 25`, schema 3; at
+  multipv 1 its records equal c3's move for move; a dry run played the alternative at 28.5 % of eligible
+  plies for +24 % nodes and +18 % search time per root). The pool is measured in searched-root rows
+  (root_rows: the round trigger, the width-retest count and the mixture shares ignore line rows, so PV rows
+  add positions per game without moving the cadence or the recipe's shares). pv_ab_01 and the multipv A/B
+  are not run: the screen, the gain test and the arena judge the combined change round by round, and a null
+  streak is the signal to revisit either. The same morning the label-budget test nodes_ab_01
+  (make_nodes_ab_manifest.py) took both lanes: three generations at the same node total from the r01 soup
+  (3,200 games at 100k nodes, 12,800 at 25k, 32,000 at 10k), each trained as a pool-recipe continuation with
+  identical mixtures except the fresh set; the cheapest arm that beats the 100k arm under the sequential
+  test at 40k becomes NODES for new jobs.
