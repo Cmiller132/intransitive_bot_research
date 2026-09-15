@@ -354,3 +354,22 @@ def test_selfplay_roots_become_labelled_rows_from_the_movers_view(tmp_path, monk
         "mismatched": 0,
         "unique": 38,
     }
+
+
+def test_selfplay_interrupted_games_import_as_censored_without_an_outcome_ply(tmp_path, monkeypatch):
+    """A game the generator preserved across an interruption (the 2026-09-15 reboot): end Interrupted, no outcome
+    and outcome_after_ply null. Its searched roots are rows with outcome_ok False; the import must not crash."""
+    from nnue import data
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    interrupted = selfplay_record(1, True, SELFPLAY_MOVES_B)
+    interrupted.update(end="Interrupted", outcome_after_ply=None)
+    write_selfplay_records(tmp_path / "gen", [selfplay_record(0, False, SELFPLAY_MOVES), interrupted])
+    target = import_selfplay([tmp_path / "gen"], "sp", 16, 3)
+    rows = {name: np.load(target / f"{name}.npy") for name in data.FIELDS}
+    cut = rows["game"] == 1
+    assert cut.sum() == 19 and not rows["outcome_ok"][cut].any() and np.all(rows["outcome"][cut] == 0)
+    assert rows["outcome_ok"][~cut].any()
+    provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["counts"]["censored"] == 1 and provenance["counts"]["games"] == 2

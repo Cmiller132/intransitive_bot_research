@@ -399,7 +399,8 @@ def import_selfplay(records: list[Path], out: str, min_ply: int, seed: int) -> P
                     clock = int(record.get("capture_clock", SITE_CLOCK))
                     roots, _ = replay(record["moves"], clock)
                     game = (index << 24) | int(record["game_id"])
-                    after = int(record.get("outcome_after_ply", 0))
+                    # None for a game the generator recorded as interrupted (censored: no outcome, 2026-09-15)
+                    after = int(record.get("outcome_after_ply") or 0)
                     for root in record["roots"]:
                         counts["roots"] += 1
                         kind = SELFPLAY_KINDS.get(root.get("score_kind"))
