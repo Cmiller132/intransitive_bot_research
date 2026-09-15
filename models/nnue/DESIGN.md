@@ -645,6 +645,19 @@ that record.
     by the loop (runs/nnue_plan/autoloop.py audit: runner and re-judgement agree); Claude's reading;
     co-signature pending.
 
+50. Exit condition, third clause: the deployment pair at the seat's 200k fixed nodes (2026-09-14;
+    runs/nnue_gauntlets/exit_200k_b2_ch; pinned manifest ba282170..., verdict.json 91e7303c..., the
+    runner's original 0b33e986... kept as verdict.runner.json): c2_search_capture_history.exe
+    (d00ab30f...) playing b2_format8_s2:epoch20 (ba8e0b93...) against the frozen gate 6 build
+    (e4e0d5ff...) playing mb_a (2e275215...), rpsi seats with one player thread each, eight concurrent
+    games, 80 simulations (200k nodes) per move, 250 pairs: 234 wins, 145 draws, 121 losses, .613
+    [.580, .647], 500 games valid, 250 distinct openings, first mover .563, mean 259 plies (Goal 353,
+    CaptureClock 145, Elimination 2). exit_80sims_1t (.60) met: the third and last clause of the exit
+    condition (section 7) is met by the same pair as the first two. The draw share is 29 % here, between
+    the 23 % at 100 ms and the 37 % at 250 ms with four threads. Judged 21:53 by the queue's runner and
+    audited mechanically by the loop (runner and re-judgement agree); Claude's reading; co-signature
+    pending.
+
 ## 7. Open hypotheses (the agreed programme, runs/nnue_plan/step_plan_final.md)
 
 The state of each is written next to it: proposed, implemented, correctness-verified or
@@ -714,9 +727,10 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   reading.
 - Exit condition, its first clause met by the deployment candidate of item 47 (the capture-history
   build with b2_format8_s2:epoch20, .661 at 100 ms) and its second by the same pair (item 49:
-  exit_250ms_b2_ch 0c3e0eed..., .637 [.607, .667] at 250 ms with four threads, judged 20:55); the
-  third (exit_200k_b2_ch ba282170..., under the runner's fixed-simulation match mode, c32a695) is
-  running from 20:55: at least
+  exit_250ms_b2_ch 0c3e0eed..., .637 [.607, .667] at 250 ms with four threads, judged 20:55) and the
+  third by the same pair (item 50: exit_200k_b2_ch ba282170..., .613 [.580, .647] at the seat's 200k
+  fixed nodes under the runner's fixed-simulation match mode, judged 21:53): all three clauses are met.
+  The clauses were: at least
   65 % against frozen mb_a at 100 ms over 500 games,
   confirmed at 250 ms with four threads at 60 % or more over 500 games (two concurrent games), plus
   a confirmation at the seat's 200k fixed nodes, paired intervals reported at each budget;
