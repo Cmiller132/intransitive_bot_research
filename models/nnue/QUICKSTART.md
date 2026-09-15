@@ -105,11 +105,24 @@ before concluding anything; a gain of 20 Elo is a score of about .53,
 which 200 games cannot see. `bootstrap_interval` in `eval.json` is the same
 idea computed by resampling pairs and should agree.
 
-Rerunning the same command resumes: generation continues from its records
-(the same settings are required; a different `NODES` or `GAMES` means a new
-name), import and encode are skipped when their outputs exist, training
-starts over into the same run directory, evaluation reruns. To retrain from
-a clean slate under the same name, delete `runs/<name>/`.
+Rerunning the same command resumes: an unfinished batch continues from its
+records (the same binary and settings are required; a different `NODES` or
+`GAMES` means a new name), a finished batch is never regenerated, import
+and encode are skipped when their outputs exist, training runs again into
+the same run directory, evaluation reruns. Delete `runs/<name>/` before a
+retrain so the run starts clean rather than appending to the old log.
+
+That is also how to retrain on batches you already have without new games,
+for example after a change to the training defaults, or to train on two
+batches together:
+
+```
+rm -rf runs/first
+EXTRA_DATA="selfplay_second:1.0" PAIRS=400 models/nnue/quickstart.sh models/nnue/examples/example.nnue first
+```
+
+Generation is skipped because `first` is complete, training starts from the
+example on both datasets, and the evaluation is against the example.
 
 ## Configuring
 

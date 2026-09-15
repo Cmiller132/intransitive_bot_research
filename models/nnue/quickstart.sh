@@ -83,11 +83,21 @@ SET="selfplay_$NAME"
 echo "network $NET (H$HIDDEN)  name $NAME  games $GAMES  nodes $NODES  threads $THREADS  device $DEVICE"
 
 # ---- 1. generate ----------------------------------------------------------------------------------------------------
-say "1/5 generating $GAMES games at $NODES nodes per move, $THREADS in flight -> $RECORDS"
 RESUME=""
-if [ -f "$RECORDS/manifest.json" ]; then RESUME="--resume"; fi
-"$BOT" selfplay --player "nnue:$NET?hash=$HASH" --nodes "$NODES" --games "$GAMES" --threads "$THREADS" --seed "$SEED" \
-  --opening-plies 8 --random-moves 2 --random-from 8 --random-to 40 --records "$RECORDS" $RESUME
+DONE=0
+if [ -f "$RECORDS/manifest.json" ]; then
+  RESUME="--resume"
+  DONE="$("$PY" -c "import json, sys; m = json.load(open(sys.argv[1])); print(1 if m.get('complete') else 0)" "$RECORDS/manifest.json")"
+fi
+if [ "$DONE" = 1 ]; then
+  # a finished batch is never regenerated (a resume needs the identical binary and settings, and there is nothing
+  # to add): rerunning a name retrains on its records; delete runs/$NAME first for a clean training run
+  say "1/5 $RECORDS is complete: generation skipped"
+else
+  say "1/5 generating $GAMES games at $NODES nodes per move, $THREADS in flight -> $RECORDS"
+  "$BOT" selfplay --player "nnue:$NET?hash=$HASH" --nodes "$NODES" --games "$GAMES" --threads "$THREADS" --seed "$SEED" \
+    --opening-plies 8 --random-moves 2 --random-from 8 --random-to 40 --records "$RECORDS" $RESUME
+fi
 
 # ---- 2. import, 3. encode ---------------------------------------------------------------------------------------------
 say "2/5 importing the searched roots -> runs/nnue_data/$SET"
