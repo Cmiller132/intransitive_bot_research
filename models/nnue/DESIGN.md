@@ -850,3 +850,13 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   (3,200 games at 100k nodes, 12,800 at 25k, 32,000 at 10k), each trained as a pool-recipe continuation with
   identical mixtures except the fresh set; the cheapest arm that beats the 100k arm under the sequential
   test at 40k becomes NODES for new jobs.
+  Run as 25k against 50k (the user 11:20: 100k "safely too high"; the 10k batch stopped at 9,984 games, unused;
+  the 25k batch capped at 6,400 games and the 50k batch 3,200, about 37 G nodes each; the loop meanwhile switched
+  to 25k with multipv and PV labels at 11:12 and had both lanes back by 12:02). Verdict 13:42 (nodes_ab_01_train
+  pinned 12:15, nodes_ab_01 pinned 12:37, both arms from the r01 soup under the pool recipe): 25k arm .504 [.464,
+  .545] and 50k arm .515 [.475, .555] against the r01 soup at 20k over 400 games each; 25k against 50k at 40k
+  .497 [.479, .515] over 1,920 games, the sequential test undecided at its cap. The preregistered tie-break named
+  the reference arm's 50k; the user chose 25k (13:50) for the rows and the round cadence, the arena to decide
+  whether the deeper label is needed: NODES stays 25k, ROUND_ROWS 6 M root rows. The arena the same hour: nnue_5
+  settled at 252.9 +-30.8 after 616 games, delta -2.9 against nnue_4 (not confirmed, no regression), the second
+  promotion in a row whose 40k-node gain test passed and whose arena reading sits under the +30 bar.
