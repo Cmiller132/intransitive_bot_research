@@ -81,11 +81,22 @@ candidate score 0.532 over 200 games (wins 96, draws 21, losses 83); margin 0.06
 ```
 
 A score above .5 means the new network beat the starting one at the
-evaluation budget; the interval is on the margin (candidate minus
-reference, in game points per opening pair), and a result whose interval
-excludes zero is a real difference at that sample size. At `PAIRS=100`
-(200 games) the score's noise is about plus or minus .07; `PAIRS=400`
-halves it.
+evaluation budget. The margin is the same result on a different scale:
+the mean over opening pairs of (candidate points minus reference points)
+divided by two, so margin = 2 x (score - .5), and the interval is its
+95 % interval over pairs. The rule is the interval's lower bound: above
+zero, the new network is better at that sample size; below zero, worse;
+straddling zero, not yet known. In score terms that needs about
+
+| `PAIRS` | games | score for the interval to clear zero |
+|---|---|---|
+| 100 | 200 | about .57 (margin .14) |
+| 400 | 800 | about .535 (margin .07) |
+
+Between .50 and that line, run the evaluation again with `PAIRS=400`
+before concluding anything; a gain of 20 Elo is a score of about .53,
+which 200 games cannot see. `bootstrap_interval` in `eval.json` is the same
+idea computed by resampling pairs and should agree.
 
 Rerunning the same command resumes: generation continues from its records
 (the same settings are required; a different `NODES` or `GAMES` means a new
@@ -131,12 +142,25 @@ models/nnue/quickstart.sh runs/first/best.nnue second
 EXTRA_DATA="selfplay_first:1.0" models/nnue/quickstart.sh runs/second/best.nnue third
 ```
 
-Adopt a network as the next start only when its score is above .5 with the
-margin interval clear of zero; otherwise generate more games from the same
-start (a new name, another `SEED`) and train on both sets with
-`EXTRA_DATA`. The research loop keeps the older self-play sets and a share
-of human games in every mixture and weights fresh rows three times an old
-row; the script's mixture is whatever you pass.
+Adopt a network as the next start only when the interval's lower bound is
+above zero (about score .57 at `PAIRS=100`, .535 at `PAIRS=400`; there is
+no other factor). Otherwise generate more games from the same start (a new
+name, another `SEED`) and train on both sets with `EXTRA_DATA`: one 3,200
+game batch from an already strong network often lands between .48 and .53,
+which is neither a gain nor a regression at that sample size, and two or
+three batches together usually decide it. The research loop keeps the
+older self-play sets and a share of human games in every mixture and
+weights fresh rows three times an old row; the script's mixture is
+whatever you pass.
+
+Training's own numbers are in `runs/<name>/log.csv`, one row per epoch:
+`loss` is the training loss, each `<set>.mse` column is the validation
+error on that dataset's held-out rows, and `objective` is their
+share-weighted mean, the number that picks `best.nnue` (the epoch where
+`objective` was lowest). Its absolute level depends on the data and the
+network, so compare epochs within one run, not runs on different data. A
+validation error that rises while the training loss keeps falling means
+the run is memorising, and more data is worth more than more epochs.
 
 Two more `bot selfplay` flags worth knowing: `--verify` replays a records
 directory through the engine and checks every hash and label
