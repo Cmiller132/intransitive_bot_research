@@ -172,6 +172,20 @@ records with the values their searches completed (source 6). The two label domai
 producer-rule rows as recorded, site-rule rows (clock 200, no shaping) from fresh searches; a recipe
 names what it mixes and at what share.
 
+Two opt-in switches of `selfplay` (2026-09-16, both off by default and the default import pinned
+byte-for-byte by `test_selfplay_defaults_are_the_bytes_of_the_importer_before_the_options`):
+`--quiet` drops the positions a static evaluator should not be asked about, at roots and along PV
+lines alike: the best move captures, the mover faces a goal threat (`engine::tactics::goal_threat`
+mirrored in Python), the score sits in the mate band, or, with `--quiet-margin M --static-net
+<file>`, the search score differs from the file's own static value by more than M score units
+(roots only). The reasons partition the drops and are counted in the set's provenance.
+`--tablebase-labels` (with `--tablebase-data <dir>` or `NNUE_TABLEBASE_DATA`, `--tablebase-cmd`
+default `bot tb-probe`) gives every row of at most five pieces the exact value of the endgame
+tablebase through the JSONL contract in `nnue/tablebase.py`: the target becomes +1, 0 or -1 from the
+mover's view with kind PROOF and weight 1; an unknown position keeps its search label; the prober
+binary's sha256 and a tablebase-data identity go into the provenance. The prober is resolved before a
+record is opened.
+
 ### 4.3 Labelling
 
 `python -m nnue.label --input <set> --out <set> --engine <spec> [--sims N] [--workers W] [--rows N]
