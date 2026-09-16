@@ -964,5 +964,7 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   label switch follows it.
   Search track A (runs/nnue_plan/STRENGTH_PLAN_2026-09-16.md, one mechanism per build, A/B'd at 40k against
   c4_multipv on the same net on CPUs 0-15 under a private lock): continuation history (c5a) rejected, .499
-  [.483, .516] after 992 pairs; correction history (c5b, against c5a) and the tablebase probe (c5t, timed at
-  250 ms with a four-piece ceiling) under test.
+  [.483, .516] after 992 pairs; correction history (c5b, against c5a) rejected, .470 [.440, .500] after 304
+  pairs (about 20 Elo worse as implemented: keyed by both sides' material and clock bucket plus an attacked-set
+  hash, applied to stand-pat and the futility evals); the tablebase probe (c5t, timed at 250 ms with a four-piece
+  ceiling) under test; singular extensions with probcut (c5c) building on the c4 search.
