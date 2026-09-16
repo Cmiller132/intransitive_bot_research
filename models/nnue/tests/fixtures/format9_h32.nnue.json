@@ -1,0 +1,15 @@
+{
+  "format": "RPSNNUE1",
+  "version": 9,
+  "features": 13648,
+  "hidden": 32,
+  "buckets": 8,
+  "dense": 32,
+  "qa": 255,
+  "qb": 64,
+  "eval_scale": 600.0,
+  "purpose": "Python/Rust parity of the format 9 reader, goal rows, head selection and refresh (py/tests/test_fixtures9.py rebuilds it)",
+  "formula": "numpy default_rng(20260916) in file order: bias in 64..127; weights in -15..15; then per head readout in -7..7, readout bias in -64..64, dense in -128..127, dense bias in (-16..16) x 255 x 32, residual in -16..16",
+  "bytes": 892548,
+  "sha256": "524449f6acbc2479fae07416e8ca677fbe7b1087c66f101a81a2f7b3cf568d60"
+}
