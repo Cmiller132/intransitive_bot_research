@@ -892,3 +892,22 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   confirmed 19:56; new seats are judged against nnue_6. A confirmation now deploys the network to the site bot
   Vlad_NNUE (deploy_site.py; auto_site_deploy): nnue_6 has been the site bot since 18:11 (a swap the user had
   paused was already running when the interruption arrived; the user ordered the deployment at 19:50).
+  Round 4 (the first control round on the new ladder; pool loop_08+09+10, 7.5 M root rows): held-out pool .01013
+  against pool_roots .01029 (the first PV-rows reading, for the line rows); the controls at or below the parent on
+  the held-out (the fresh data carries the fit gain) but best on the million-node deep set; the staged screen chose
+  pool_s3 at .536 over 800 games and the gain test at 40k rejected it, .486 [.463, .510] over 544 pairs: the first
+  null round (the winner's curse on the screen's pick, and the node gap between the 25k screen and the 40k gain);
+  the increment doubled to 12 M untested root rows. Round 5 (the whole pool loop_08..15, 12.07 M untested root
+  rows): held-out .01007-.01008 for ema, pool and pool_roots (the PV pair tied); the deep-set fit drifted the other
+  way for the second round running (parent .00807, round 4's arms .0081, round 5's .0084; the same 18,355-position
+  file), the label-depth tension in numbers. The screen's stage-1 leader human2x (.593 over 200) ended at .542 over
+  800; the choice rule then took pool_roots at .5475 over 200 games, a net dropped at stage 1, because choose() ranked
+  every candidate by pooled score regardless of the stages played: fixed 2026-09-16 02:43 (the choice is among the
+  nets that played the last stage played; a dropped net keeps only the small-sample reading that dropped it). The
+  gain test had accepted pool_roots anyway, .556 [.523, .589] over 240 pairs at 40k, the fastest accept so far;
+  promoted and deployed as nnue_7 at 02:42, judged against nnue_6. A second defect surfaced at that promotion: the
+  twin arm's mixture names loop_NN_roots, so the pool kept loop_08..15 as if untaught (the next round would have
+  spread the pool share over ten sets, eight of them already learned); promote() now lets a twin stand for its
+  source (learned_sets), and the state was corrected under a stop (pool = loop_16, loop_17). The lineage's history
+  is roots-only from here: the roots-only twin is the net that passed at 40k while the line-row nets tied it on the
+  held-out; the PV-rows A/B continues on the new pool sets.
