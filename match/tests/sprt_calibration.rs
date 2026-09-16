@@ -1,5 +1,5 @@
 //! Seeded pair-distribution calibration of the production sequential stopping rule.
-use r#match::sprt::{State, Stop, BATCH, CAP, FIRST_CHECK, SCORES};
+use r#match::sprt::{Bounds, State, Stop, BATCH, CAP, FIRST_CHECK, SCORES};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[test]
@@ -48,7 +48,7 @@ fn calibrated_pair_distributions() {
                 }
                 state.counts[cell] += 1;
                 if pair >= FIRST_CHECK && pair.is_multiple_of(BATCH) {
-                    state.check(pair);
+                    state.check(pair, &Bounds::default());
                 }
                 if state.stop_reason != Stop::Running {
                     let index = match state.stop_reason {

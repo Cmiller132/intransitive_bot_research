@@ -66,7 +66,7 @@ fn scripted_journal_and_report_agree_with_c1() {
         );
     }
     let mut config = EvalConfig {
-        pairs: sprt::CAP,
+        pairs: sprt::Bounds::default().cap,
         move_ms: Some(50),
         opening_plies: 2,
         seed: 2026091225,
@@ -74,6 +74,7 @@ fn scripted_journal_and_report_agree_with_c1() {
         sequential: Some(Sequential {
             journal: scratch.0.join("generated.jsonl"),
             resume: false,
+            bounds: sprt::Bounds::default(),
             provenance: expected["sequential"]["protocol"]["provenance"].clone(),
         }),
         ..EvalConfig::default()

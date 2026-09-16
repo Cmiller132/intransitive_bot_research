@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -54,10 +54,18 @@ impl Journal {
             let mut offset = reader.read_until(b'\n', &mut bytes)? as u64;
             ensure!(bytes.last() == Some(&b'\n'), "incomplete journal header");
             let header: Header = serde_json::from_slice(&bytes)?;
-            ensure!(
-                header.protocol_digest == protocol_digest && header.protocol == *protocol,
-                "resume protocol differs (settings, openings or artifact hashes)"
-            );
+            if header.protocol_digest != protocol_digest || header.protocol != *protocol {
+                let bounds = |protocol: &Value| {
+                    let test = &protocol["test"];
+                    format!("s0 {} s1 {} cap {}", test["s0"], test["s1"], test["cap"])
+                };
+                let (recorded, requested) = (bounds(&header.protocol), bounds(protocol));
+                ensure!(
+                    recorded == requested,
+                    "resume bounds differ: the journal has {recorded}, the options give {requested}"
+                );
+                bail!("resume protocol differs (settings, openings or artifact hashes)");
+            }
             loop {
                 bytes.clear();
                 let size = reader.read_until(b'\n', &mut bytes)?;

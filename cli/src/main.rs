@@ -41,7 +41,7 @@ enum Command {
         /// The named eval reference, relative to the workspace root.
         #[arg(long, default_value = "sq:weights/sq_g128.onnx")]
         reference: String,
-        /// Fixed-count mode defaults to 32; sequential mode fixes its own cap.
+        /// Fixed-count mode defaults to 32; sequential mode plays to --sprt-cap.
         #[arg(long)]
         pairs: Option<usize>,
         #[command(flatten)]
@@ -257,12 +257,14 @@ fn main() -> Result<()> {
         } => {
             move_clock(sims, move_ms)?;
             ensure!(player_threads > 0, "player-threads must be positive");
+            let sequential = sequential.config(&candidate, &reference, player_threads)?;
             let config = EvalConfig {
                 rules: Rules::SITE,
-                pairs: pairs.unwrap_or(if sequential.sprt.is_some() {
-                    r#match::sprt::CAP
-                } else {
-                    32
+                // Sequential mode plays up to its own cap; fixed counts default to 32.
+                pairs: pairs.unwrap_or_else(|| {
+                    sequential
+                        .as_ref()
+                        .map_or(32, |sequential| sequential.bounds.cap)
                 }),
                 sims: sims.unwrap_or(32),
                 move_ms,
@@ -272,7 +274,7 @@ fn main() -> Result<()> {
                 seed,
                 threads,
                 stream,
-                sequential: sequential.config(&candidate, &reference, player_threads)?,
+                sequential,
             };
             let per_thread = player_threads;
             let candidate_factory: Box<PlayerFactory> =

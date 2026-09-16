@@ -11,6 +11,46 @@ pub const CAP: usize = 3008;
 pub const BOUND: f64 = 2.944_438_979_166_440_3;
 const ZERO_CELL: f64 = 1e-3;
 
+/// The hypotheses and the pair cap of one test; the constants are its defaults.
+/// The batch size, the first check and the likelihood bounds stay fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bounds {
+    pub s0: f64,
+    pub s1: f64,
+    pub cap: usize,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self {
+            s0: S0,
+            s1: S1,
+            cap: CAP,
+        }
+    }
+}
+
+impl Bounds {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.s0.is_finite()
+                && self.s1.is_finite()
+                && 0. < self.s0
+                && self.s0 < self.s1
+                && self.s1 < 1.,
+            "sequential hypotheses must satisfy 0 < s0 < s1 < 1, got s0 {} and s1 {}",
+            self.s0,
+            self.s1
+        );
+        ensure!(
+            self.cap.is_multiple_of(BATCH) && self.cap >= FIRST_CHECK,
+            "sequential cap must be a multiple of {BATCH} and at least {FIRST_CHECK}, got {}",
+            self.cap
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stop {
@@ -47,23 +87,23 @@ impl State {
     }
 
     /// Called only after retiring an entire batch in opening-id order.
-    pub fn check(&mut self, pairs: usize) {
+    pub fn check(&mut self, pairs: usize, bounds: &Bounds) {
         if self.stop_reason != Stop::Running || pairs < FIRST_CHECK || !pairs.is_multiple_of(BATCH)
         {
             return;
         }
-        if self.counts.iter().sum::<u64>() != pairs as u64 || pairs > CAP {
+        if self.counts.iter().sum::<u64>() != pairs as u64 || pairs > bounds.cap {
             self.invalidate("pentanomial count differs from complete pairs or exceeds cap");
             return;
         }
-        match llr(self.counts, S0, S1) {
+        match llr(self.counts, bounds.s0, bounds.s1) {
             Ok(value) => {
                 self.llr = Some(value);
                 self.stop_reason = if value >= BOUND {
                     Stop::Accept
                 } else if value <= -BOUND {
                     Stop::Reject
-                } else if pairs == CAP {
+                } else if pairs >= bounds.cap {
                     Stop::Inconclusive
                 } else {
                     Stop::Running
@@ -162,17 +202,18 @@ mod tests {
 
     #[test]
     fn checks_wait_for_complete_batches_and_do_not_override_stops() {
+        let bounds = Bounds::default();
         let mut state = State::default();
         state.counts[4] = 127;
-        state.check(127);
+        state.check(127, &bounds);
         assert_eq!(state.stop_reason, Stop::Running);
         state.counts[4] = 128;
-        state.check(128);
+        state.check(128, &bounds);
         assert_eq!(state.stop_reason, Stop::Accept);
-        state.check(CAP);
+        state.check(CAP, &bounds);
         assert_eq!(state.stop_reason, Stop::Accept);
         state.invalidate("forfeit");
-        state.check(CAP);
+        state.check(CAP, &bounds);
         assert_eq!(state.stop_reason, Stop::Invalid);
     }
 
@@ -182,8 +223,92 @@ mod tests {
             counts: [1474, 0, 0, 0, 1534],
             ..State::default()
         };
-        state.check(CAP);
+        state.check(CAP, &Bounds::default());
         assert_eq!(state.stop_reason, Stop::Inconclusive);
         assert!(state.llr.unwrap().abs() < BOUND);
+    }
+
+    #[test]
+    fn default_bounds_are_the_constants_and_validation_rejects_the_rest() {
+        assert_eq!(
+            Bounds::default(),
+            Bounds {
+                s0: S0,
+                s1: S1,
+                cap: CAP
+            }
+        );
+        Bounds::default().validate().unwrap();
+        for bounds in [
+            Bounds {
+                s1: S0,
+                ..Bounds::default()
+            },
+            Bounds {
+                s0: 0.,
+                ..Bounds::default()
+            },
+            Bounds {
+                s1: 1.,
+                ..Bounds::default()
+            },
+            Bounds {
+                s1: f64::NAN,
+                ..Bounds::default()
+            },
+            Bounds {
+                cap: FIRST_CHECK - BATCH,
+                ..Bounds::default()
+            },
+            Bounds {
+                cap: CAP + 1,
+                ..Bounds::default()
+            },
+        ] {
+            assert!(bounds.validate().is_err(), "{bounds:?}");
+        }
+    }
+
+    #[test]
+    fn a_smaller_cap_stops_there_and_a_higher_target_needs_more_evidence() {
+        // Even pairs: undecided, and the cap alone decides when to give up.
+        let mut state = State {
+            counts: [64, 0, 0, 0, 64],
+            ..State::default()
+        };
+        state.check(FIRST_CHECK, &Bounds::default());
+        assert_eq!(state.stop_reason, Stop::Running);
+        state.check(
+            FIRST_CHECK,
+            &Bounds {
+                cap: FIRST_CHECK,
+                ..Bounds::default()
+            },
+        );
+        assert_eq!(state.stop_reason, Stop::Inconclusive);
+        assert!(state.llr.unwrap().abs() < BOUND);
+
+        // The same counts are weaker evidence for a higher upper hypothesis:
+        // a marginal edge accepted at 0.52 keeps the test running at 0.55.
+        let counts = [0, 2, 114, 12, 0];
+        let mut lenient = State {
+            counts,
+            ..State::default()
+        };
+        lenient.check(FIRST_CHECK, &Bounds::default());
+        let mut demanding = State {
+            counts,
+            ..State::default()
+        };
+        demanding.check(
+            FIRST_CHECK,
+            &Bounds {
+                s1: 0.55,
+                ..Bounds::default()
+            },
+        );
+        assert!(demanding.llr.unwrap() < lenient.llr.unwrap());
+        assert_eq!(lenient.stop_reason, Stop::Accept);
+        assert_eq!(demanding.stop_reason, Stop::Running);
     }
 }

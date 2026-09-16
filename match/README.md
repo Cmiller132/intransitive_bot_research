@@ -70,13 +70,16 @@ matches, and the site adapter all go through it. It knows the engine and the
 
 Fixed-count game records are written as JSON lines when a path is given.
 
-`EvalConfig.sequential` enables the fixed paired SPRT (requires `pairs=3008`
-and at most 16 workers). It supplies a journal path, resume flag and artifact
-provenance from the caller; the CLI hashes the actual engine/network files.
-The protocol fixes score hypotheses .50/.52, alpha=beta=.05, ±log(19) likelihood
-bounds, a first check at 128 pairs and subsequent 16-pair batches. The
-expectation-constrained multinomial MLE replaces zero counts by .001. Every
-batch finishes both colours and retires in opening-id order before stopping.
+`EvalConfig.sequential` enables the paired SPRT (requires `pairs` equal to the
+cap of its `sprt::Bounds` and at most 16 workers). It supplies a journal path,
+resume flag, bounds and artifact provenance from the caller; the CLI hashes the
+actual engine/network files. `sprt::Bounds` carries the null and upper score
+hypotheses and the pair cap, defaulting to .50/.52 and 3,008 pairs (a cap is a
+multiple of 16 and at least 128); the protocol records all three. The protocol
+fixes alpha=beta=.05, ±log(19) likelihood bounds, a first check at 128 pairs
+and subsequent 16-pair batches. The expectation-constrained multinomial MLE
+replaces zero counts by .001. Every batch finishes both colours and retires in
+opening-id order before stopping.
 The shared runner holds at most one batch of full game records in memory.
 
 The sequential journal starts with the protocol and its SHA256, followed by
@@ -84,9 +87,10 @@ The sequential journal starts with the protocol and its SHA256, followed by
 file lock prevents concurrent writers. Resume verifies the full protocol and
 contiguous opening ids, replays the stopping rule, retains complete lines and
 truncates only a torn final line. Settings, opening hash and provenance must
-match. A terminal journal cannot be extended; forfeits/censored games and
-numerical failures report invalid, and a cap without crossing reports
-inconclusive. No forfeit is silently discarded from the report. The optional
+match, and a resume whose bounds differ from the journal's is refused by name.
+A terminal journal cannot be extended; forfeits/censored games and numerical
+failures report invalid, and a cap without crossing reports inconclusive. No
+forfeit is silently discarded from the report. The optional
 `Report.sequential` contains the protocol/digest, five complete-pair counts,
 LLR, stop reason and error. Bootstrap intervals at sequential stops are marked
 descriptive; fixed-count reporting remains unchanged.
