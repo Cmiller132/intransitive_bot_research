@@ -294,7 +294,13 @@ impl Model {
         (total.saturating_sub(2) * HEADS / 19).min(HEADS - 1)
     }
 
-    /// The bucket's readout bias and dense head; bucket 0 is held inline.
+    /// The bucket's readout, readout bias and dense head; bucket 0 is held
+    /// inline, and the selection stays out of the loops that use them.
+    #[inline]
+    fn readout(&self, bucket: usize) -> &[i16] {
+        let start = bucket * 2 * self.hidden;
+        &self.output[start..start + 2 * self.hidden]
+    }
     #[inline]
     fn head_bias(&self, bucket: usize) -> i32 {
         if bucket == 0 {
@@ -440,9 +446,11 @@ impl Model {
         );
         acc.state = FeatureState::new(board, since, clock);
         let ids = self.ids(board, acc.state);
-        self.fill_half(&ids[0], &mut acc.own) + self.fill_half(&ids[1], &mut acc.opponent)
+        let slots = self.slots();
+        self.fill_half(&ids[0][..slots], &mut acc.own)
+            + self.fill_half(&ids[1][..slots], &mut acc.opponent)
     }
-    fn fill_half(&self, ids: &[usize; SLOTS], dst: &mut [i32]) -> u64 {
+    fn fill_half(&self, ids: &[usize], dst: &mut [i32]) -> u64 {
         for (value, &bias) in dst.iter_mut().zip(&self.bias) {
             *value = bias as i32;
         }
@@ -509,7 +517,7 @@ impl Model {
         moved[from] = Cell::Empty;
         if self.requires_refresh(before, after, side) {
             let ids = self.ids(&engine::flip(&moved), after);
-            return (self.fill_half(&ids[side], dst), 0);
+            return (self.fill_half(&ids[side][..self.slots()], dst), 0);
         }
         let context = if self.features >= V8_FEATURES {
             after.contexts()[side]
@@ -627,33 +635,29 @@ impl Model {
     }
 
     pub fn sum_scalar(&self, acc: &Accumulator) -> i64 {
-        self.sum_scalar_at(acc, self.bucket(acc))
+        self.sum_scalar_with(acc, self.readout(self.bucket(acc)))
     }
 
-    fn sum_scalar_at(&self, acc: &Accumulator, bucket: usize) -> i64 {
-        let start = bucket * 2 * self.hidden;
+    fn sum_scalar_with(&self, acc: &Accumulator, output: &[i16]) -> i64 {
         let mut sum = 0i64;
         for (perspective, values) in [&acc.own, &acc.opponent].iter().enumerate() {
             for (j, &value) in values.iter().enumerate() {
                 let x = value.clamp(0, self.qa) as i64;
-                sum += x * x * self.output[start + perspective * self.hidden + j] as i64;
+                sum += x * x * output[perspective * self.hidden + j] as i64;
             }
         }
         sum
     }
 
     pub fn sum(&self, acc: &Accumulator) -> i64 {
-        self.sum_at(acc, self.bucket(acc))
+        self.sum_with(acc, self.readout(self.bucket(acc)))
     }
 
-    fn sum_at(&self, acc: &Accumulator, bucket: usize) -> i64 {
+    fn sum_with(&self, acc: &Accumulator, output: &[i16]) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Readout);
         #[cfg(target_arch = "x86_64")]
-        let start = bucket * 2 * self.hidden;
-        #[cfg(target_arch = "x86_64")]
         if self.vnni {
-            let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx512(&acc.own, &output[..self.hidden], self.qa)
                     + sum_avx512(&acc.opponent, &output[self.hidden..], self.qa);
@@ -661,33 +665,35 @@ impl Model {
         }
         #[cfg(target_arch = "x86_64")]
         if self.avx2 {
-            let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx2(&acc.own, &output[..self.hidden], self.qa)
                     + sum_avx2(&acc.opponent, &output[self.hidden..], self.qa);
             }
         }
-        self.sum_scalar_at(acc, bucket)
+        self.sum_scalar_with(acc, output)
     }
 
     pub fn raw(&self, acc: &Accumulator) -> f64 {
         let bucket = self.bucket(acc);
-        self.sum_at(acc, bucket) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
+        self.sum_with(acc, self.readout(bucket)) as f64
+            / (self.qa as f64 * self.qa as f64 * self.qb as f64)
             + self.head_bias(bucket) as f64 / self.qb as f64
-            + self.dense_sum(acc, bucket, self.avx2) as f64 / (self.qa as f64 * self.qb as f64)
+            + self.dense_sum(acc, self.head_dense(bucket), self.avx2) as f64
+                / (self.qa as f64 * self.qb as f64)
     }
 
     pub fn raw_scalar(&self, acc: &Accumulator) -> f64 {
         let bucket = self.bucket(acc);
-        self.sum_scalar_at(acc, bucket) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
+        self.sum_scalar_with(acc, self.readout(bucket)) as f64
+            / (self.qa as f64 * self.qa as f64 * self.qb as f64)
             + self.head_bias(bucket) as f64 / self.qb as f64
-            + self.dense_sum(acc, bucket, false) as f64 / (self.qa as f64 * self.qb as f64)
+            + self.dense_sum(acc, self.head_dense(bucket), false) as f64
+                / (self.qa as f64 * self.qb as f64)
     }
 
-    fn dense_sum(&self, acc: &Accumulator, bucket: usize, avx2: bool) -> i64 {
+    fn dense_sum(&self, acc: &Accumulator, head: &DenseHead, avx2: bool) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Dense);
-        let head = self.head_dense(bucket);
         let output = &head.output;
         if output.iter().all(|&w| w == 0) {
             return 0;

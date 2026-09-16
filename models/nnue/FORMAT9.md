@@ -100,9 +100,20 @@ and the NumPy oracle from the board.
 
 The crate keeps the first head's readout bias and dense layer inline in `Model`
 and the other seven in a boxed slice, and an evaluation computes its bucket once
-and passes it down: a one-head network reads the same fields from the same
-offsets it always did, and pays only an early return and a perfectly predicted
-branch for a feature it does not use.
+and hands the chosen readout slice and dense head to the loops that use them: a
+one-head network reads the same fields from the same offsets it always did, and
+pays only an early return and a perfectly predicted branch for a feature it does
+not use.
+
+Measured on the incumbent format 8 network
+(`runs/loop_r05_pool_roots/final.nnue`, `bot analyse` at 1,000,000 fixed nodes
+on the initial position, one search thread, this branch against the base commit
+built the same way): the two builds return an identical search — the same nodes,
+evaluations, root value, lines and network head — and the timings agree within
+the host's noise (minimum of twenty runs 865 ms base against 855 ms, fastest-five
+means 880 ms against 884 ms, median paired ratio 1.010). The host was running an
+A/B and the improvement loop throughout, and single runs ranged from 850 to
+1,320 ms, so nothing finer than about a percent is measurable there.
 
 ## Model and trainer
 
