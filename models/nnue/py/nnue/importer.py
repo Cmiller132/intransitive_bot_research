@@ -5,7 +5,7 @@ searched roots of `bot selfplay`.
     python -m nnue.importer conv --run runs/conv_g128 --out <set> [--iterations 13-25] [--children 16]
     python -m nnue.importer human --file <games_export.txt> --out <set>
     python -m nnue.importer selfplay --records <dir> --out <set> [--min-ply 16] [--pv-rows K]
-        [--quiet [--quiet-margin M --static-net <file>]]
+        [--quiet [--quiet-margin M --static-net <file>]] [--tablebase-labels]
 
 A conv window holds, per row, the position, the played action's lambda return
 and up to 16 visited root candidates with their completed Q. The importer
@@ -23,7 +23,10 @@ the broad coverage of human play that a teacher can relabel later.
 
 `selfplay --quiet` (off by default) keeps only the roots a static evaluator
 can be asked about: Stockfish's smart-fen-skipping and the margins of arXiv
-2412.17948, adapted to these rules (`quiet_reason`).
+2412.17948, adapted to these rules (`quiet_reason`). `selfplay
+--tablebase-labels` (also off by default) replaces the search label of every
+row the endgame tablebase can answer with its exact value, through the
+external prober whose contract is `nnue.tablebase`.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from . import data
+from . import data, tablebase
 from .features import orbit_hash
 from .games import DIRS, SITE_CLOCK, decode_export, replay
 from .paths import data_dir, sha256
@@ -448,6 +451,9 @@ def import_selfplay(
     quiet: bool = False,
     quiet_margin: float = 0.0,
     static_net: Path | None = None,
+    tablebase_labels: bool = False,
+    tablebase_cmd: str = tablebase.DEFAULT_COMMAND,
+    tablebase_data: Path = tablebase.DEFAULT_DATA,
 ) -> Path:
     """The searched roots of `bot selfplay` games (the published shards listed
     in each directory's manifest) as labelled rows: target = tanh(root_score /
@@ -475,7 +481,15 @@ def import_selfplay(
     dropped root contributes no rows at all, its line rows included; a kept
     root's line may still pass through a position whose own root was dropped.
     The default (`quiet` False) imports every eligible root, and the
-    provenance then holds nothing about the filter."""
+    provenance then holds nothing about the filter.
+
+    `tablebase_labels` relabels every row of the finished set that the endgame
+    tablebase can answer (at most five pieces, not terminal) with its exact
+    value: target +1, 0 or -1 from the mover's view, kind PROOF, weight 1. The
+    values come from the external prober `tablebase_cmd` over `tablebase_data`
+    (`nnue.tablebase` holds the JSONL contract); a row answered null keeps its
+    search label. The default (False) never runs the prober and leaves the
+    provenance without a tablebase block."""
     import engine
 
     if (quiet_margin or static_net) and not quiet:
@@ -630,6 +644,7 @@ def import_selfplay(
         counts["line_duplicates"] = int(line.sum()) - int(line[first].sum())
     rows = {k: v[first] for k, v in rows.items()}
     n = len(first)
+    probed = tablebase.relabel(rows, tablebase_cmd, tablebase_data) if tablebase_labels else None
     rows["orbit"] = orbit_hash(rows["board"])
     rows["split"] = assign_splits(rows["game"], rows["orbit"], seed)
     counts["unique"] = n
@@ -664,6 +679,7 @@ def import_selfplay(
                 if quiet
                 else {}
             ),
+            **({"tablebase": probed} if tablebase_labels else {}),
             "rules": {"capture_clock": int(rows["capture_clock"][0]), "repetition_draw": False},
             "counts": counts,
             "ends": ends,
@@ -707,6 +723,23 @@ def main(argv: list[str] | None = None) -> None:
         "by more than this many score units (off by default)",
     )
     selfplay.add_argument("--static-net", type=Path, default=None, help=".nnue file evaluated for --quiet-margin")
+    selfplay.add_argument(
+        "--tablebase-labels",
+        action="store_true",
+        help="give every row of at most five pieces the endgame tablebase's exact value (kind PROOF, weight 1)",
+    )
+    selfplay.add_argument(
+        "--tablebase-cmd",
+        default=tablebase.DEFAULT_COMMAND,
+        help=f"the prober, {tablebase.DEFAULT_COMMAND!r} by default; a leading `bot` is this workspace's release "
+        "binary, and the command is run as `<cmd> --data <dir> --input <jsonl> --output <jsonl>` (nnue.tablebase)",
+    )
+    selfplay.add_argument(
+        "--tablebase-data",
+        type=Path,
+        default=tablebase.DEFAULT_DATA,
+        help=f"the prober's data directory (default {tablebase.DEFAULT_DATA})",
+    )
     args = parser.parse_args(argv)
     if args.command == "conv":
         span = tuple(int(x) for x in args.iterations.split("-")) if args.iterations else None
@@ -724,6 +757,9 @@ def main(argv: list[str] | None = None) -> None:
             args.quiet,
             args.quiet_margin,
             args.static_net,
+            args.tablebase_labels,
+            args.tablebase_cmd,
+            args.tablebase_data,
         )
 
 

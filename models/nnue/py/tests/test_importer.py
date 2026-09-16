@@ -3,6 +3,7 @@ episode recovery across windows, context merging and split hygiene."""
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import engine
@@ -517,6 +518,7 @@ def endgame_records(directory) -> None:
     write_selfplay_records(directory, [searched_record(0, fixture_games()["endgame"])])
 
 
+STUB = Path(__file__).resolve().parent / "stub_prober.py"
 NET = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "format8_h32.nnue"
 # Game `quiet`, roots from ply 16: the recorded best move captures at these plies, the mover
 # faces a goal threat at these, and these carry a mate-band score (a search score and a proof).
@@ -535,6 +537,29 @@ def import_digest(target: Path, records: Path) -> dict[str, str]:
         "provenance": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "columns": hashlib.sha256(columns).hexdigest(),
     }
+
+
+def as_argument(path) -> str:
+    """A path inside a prober command line: forward slashes, quoted when it holds a space."""
+    text = str(path).replace("\\", "/")
+    return f'"{text}"' if " " in text else text
+
+
+def stub_command(subcommand: str = "") -> str:
+    """The stub prober (tests/stub_prober.py) as a --tablebase-cmd command line."""
+    return f"{as_argument(sys.executable)} {as_argument(STUB)}{' ' + subcommand if subcommand else ''}"
+
+
+def tablebase_key(board: np.ndarray, since_capture) -> str:
+    """The key the stub prober answers by (tests/stub_prober.py)."""
+    return ",".join(str(int(cell)) for cell in board) + f":{int(since_capture)}"
+
+
+def tablebase_data(directory: Path, answers: dict[str, int | None]) -> Path:
+    """A prober data directory holding those answers; every other position is null."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "answers.json").write_text(json.dumps(answers), encoding="utf-8")
+    return directory
 
 
 # --- --quiet (nnue.importer selfplay) -------------------------------------------
@@ -672,6 +697,104 @@ def test_quiet_margin_needs_a_static_net_and_the_flag(tmp_path, monkeypatch):
         import_selfplay([records], "a", 16, 3, quiet=True, quiet_margin=5.0)
     with pytest.raises(SystemExit):
         import_selfplay([records], "b", 16, 3, quiet_margin=5.0, static_net=NET)
+
+
+def test_tablebase_labels_give_small_positions_their_exact_value(tmp_path, monkeypatch):
+    """--tablebase-labels relabels every row of at most five pieces with the prober's value:
+    target +1/0/-1, kind PROOF, weight 1. A null answer keeps the search label, every other
+    row and every other column is the default import's, and the provenance counts by value."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    endgame_records(records)
+    plain = import_selfplay([records], "plain", 16, 3)
+    board, since = np.load(plain / "board.npy"), np.load(plain / "since_capture.npy")
+    small = np.flatnonzero(np.count_nonzero(board, axis=1) <= 5)
+    assert len(small) == 6  # the fixture game's last six roots
+    tb = tablebase_data(
+        tmp_path / "tb",
+        {tablebase_key(board[row], since[row]): value for row, value in zip(small[:3], (1, 0, -1), strict=True)},
+    )
+    labelled = import_selfplay(
+        [records], "tb", 16, 3, tablebase_labels=True, tablebase_cmd=stub_command(), tablebase_data=tb
+    )
+    for name in data.FIELDS:
+        if name not in ("target", "kind", "weight"):
+            assert np.array_equal(np.load(labelled / f"{name}.npy"), np.load(plain / f"{name}.npy")), name
+    target, kind, weight = (np.load(labelled / f"{name}.npy") for name in ("target", "kind", "weight"))
+    assert target[small[:3]].tolist() == [1.0, 0.0, -1.0]
+    assert np.all(kind[small[:3]] == data.KIND_PROOF) and np.all(weight[small[:3]] == 1.0)
+    rest = np.setdiff1d(np.arange(len(target)), small[:3])
+    for name, column in (("target", target), ("kind", kind), ("weight", weight)):
+        assert np.array_equal(column[rest], np.load(plain / f"{name}.npy")[rest]), name
+    probed = json.loads((labelled / "provenance.json").read_text(encoding="utf-8"))["tablebase"]
+    assert probed["eligible"] == 6 and probed["relabelled"] == {"1": 1, "0": 1, "-1": 1} and probed["unknown"] == 3
+    assert probed["max_pieces"] == 5 and probed["data"] == str(tb) and probed["command"] == stub_command()
+    # The prober saw the contract of nnue.tablebase: one {board, since_capture} per eligible row, in order.
+    seen = [json.loads(line) for line in (tb / "seen.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(seen) == 6 and all(sorted(p) == ["board", "since_capture"] for p in seen)
+    assert [p["board"] for p in seen] == board[small].tolist()
+    assert [p["since_capture"] for p in seen] == since[small].tolist()
+
+
+def test_tablebase_labels_without_a_small_position_never_run_the_prober(tmp_path, monkeypatch):
+    """The fixture game whose roots never fall below twelve pieces: no eligible row, no
+    subprocess (the command below would fail), and the provenance says so."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    quiet_records(records)
+    target = import_selfplay(
+        [records], "tb", 16, 3, tablebase_labels=True, tablebase_cmd="no-such-prober", tablebase_data=tmp_path
+    )
+    probed = json.loads((target / "provenance.json").read_text(encoding="utf-8"))["tablebase"]
+    assert probed["eligible"] == 0 and probed["argv"] is None and probed["relabelled"] == {"1": 0, "0": 0, "-1": 0}
+    plain = import_selfplay([records], "plain", 16, 3)
+    for name in data.FIELDS:
+        assert np.array_equal(np.load(target / f"{name}.npy"), np.load(plain / f"{name}.npy")), name
+
+
+def test_tablebase_probe_refuses_a_bad_answer(tmp_path):
+    """The contract is checked: a value that is not 1, 0, -1 or null, and an answer file with
+    the wrong number of lines, are both errors."""
+    from nnue import tablebase
+
+    board = np.zeros((2, 81), dtype=np.uint8)
+    board[:, 40], board[:, 71] = 1, 4
+    bad = tablebase_data(tmp_path / "bad", {tablebase_key(board[0], 0): 7})
+    with pytest.raises(ValueError):
+        tablebase.probe(board, [0, 0], stub_command(), bad)
+    # The command's subcommand form (`bot tb-probe`) runs, and an unanswered position is null.
+    assert tablebase.probe(board, [0, 0], stub_command("probe"), tablebase_data(tmp_path / "empty", {})) == [None] * 2
+
+
+def test_tablebase_labels_reach_the_command_line(tmp_path, monkeypatch):
+    from nnue import importer
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    endgame_records(records)
+    tb = tablebase_data(tmp_path / "tb", {})
+    importer.main(
+        [
+            "selfplay",
+            "--records",
+            str(records),
+            "--out",
+            "cli",
+            "--min-ply",
+            "16",
+            "--tablebase-labels",
+            "--tablebase-cmd",
+            stub_command(),
+            "--tablebase-data",
+            str(tb),
+        ]
+    )
+    provenance = json.loads((tmp_path / "data" / "cli" / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["tablebase"]["eligible"] == 6 and provenance["tablebase"]["unknown"] == 6
 
 
 def test_quiet_reaches_the_command_line(tmp_path, monkeypatch):
