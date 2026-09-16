@@ -911,3 +911,14 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   source (learned_sets), and the state was corrected under a stop (pool = loop_16, loop_17). The lineage's history
   is roots-only from here: the roots-only twin is the net that passed at 40k while the line-row nets tied it on the
   held-out; the PV-rows A/B continues on the new pool sets.
+  nnue_7 on the arena: 291.4 +-30.9 after 644 games, +21.1 over nnue_6, not confirmed (the +30 bar); nnue_6 stays
+  the confirmed seat and the site bot, nnue_7 the loop's parent. The 40k gain of +39 reading +21 at the arena's
+  200k is the third sign that the value of a 25k-labelled round fades with depth (with the deep-set drift and round
+  4's screen win at 25k rejected at 40k), so the user decided 2026-09-16 07:40: the label budget moves to 50k once
+  round 7 is over. The loop takes it as a switch (`set nodes_after 7:50000`; `set nodes <n>` for an immediate
+  change): new generator jobs search state.nodes per move, jobs in flight keep theirs, and an import never mixes
+  budgets in one set (an old budget's last jobs are flushed as their own set). The screen (20k), the gain test
+  (40k), the LTC (240k) and the held-out sets (100k and million-node labels) stay where they are, so the rounds
+  before and after the switch read on the same scales; the cost is about half the games per hour, so rounds run
+  about twice as slowly. Round 6 (pool loop_16+17+18) also trains the width retest arm, a from-scratch H1024 at
+  200 epochs, which held the round for three hours: a candidate for moving out of the round's critical path.
