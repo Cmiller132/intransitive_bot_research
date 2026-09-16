@@ -16,11 +16,40 @@ fn swap_side(c: u8) -> u8 {
 }
 
 const CLOCK_BOUNDS: [u32; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160];
-fn clock_rows(features: usize, since: u32, clock: u32) -> [usize; 2] {
+fn clock_rows(clock_base: usize, since: u32, clock: u32) -> [usize; 2] {
     [
-        features - 32 + CLOCK_BOUNDS.partition_point(|&b| b <= since) - 1,
-        features - 16 + CLOCK_BOUNDS.partition_point(|&b| b <= clock.saturating_sub(since)) - 1,
+        clock_base + CLOCK_BOUNDS.partition_point(|&b| b <= since) - 1,
+        clock_base
+            + CLOCK_BUCKETS
+            + CLOCK_BOUNDS.partition_point(|&b| b <= clock.saturating_sub(since))
+            - 1,
     ]
+}
+
+/// The two goal-corner rows of one perspective, in that perspective's frame:
+/// the occupant of its own goal (square 80: empty, or an opponent blocker,
+/// since one of its own pieces there has already won) and the occupant of the
+/// opponent's goal (square 0: empty, or one of its own pieces).
+fn goal_rows(base: usize, own_goal: u8, enemy_goal: u8) -> [usize; 2] {
+    let blocker = if (4..=6).contains(&own_goal) {
+        (own_goal - 3) as usize
+    } else {
+        0
+    };
+    let invader = if (1..=3).contains(&enemy_goal) {
+        enemy_goal as usize
+    } else {
+        0
+    };
+    [base + blocker, base + GOAL_STATES + invader]
+}
+
+fn swapped(code: u8) -> u8 {
+    if code == 0 {
+        0
+    } else {
+        swap_side(code)
+    }
 }
 use std::{fs, path::Path};
 
@@ -29,6 +58,17 @@ pub const HIDDEN_LANES: usize = 32;
 #[cfg(target_arch = "x86_64")]
 const DOT_CHUNK: usize = 4096;
 pub const DENSE_WIDTH: usize = 32;
+/// Feature slots per perspective: 20 pieces, 20 attacked pieces, two clock
+/// rows and, from version 9 on, two goal-corner rows.
+pub const SLOTS: usize = 44;
+const CLOCK_BUCKETS: usize = 16;
+const GOAL_STATES: usize = 4; // empty or one of the three piece types
+const CONTEXTS: usize = 27;
+const V6_FEATURES: usize = 1004;
+const V8_FEATURES: usize = CONTEXTS * FEATURES + FEATURES + 2 * CLOCK_BUCKETS; // 13,640
+const V9_FEATURES: usize = V8_FEATURES + 2 * GOAL_STATES; // 13,648
+/// Version 9 output buckets, selected by the pieces on the board.
+pub const HEADS: usize = 8;
 
 /// Reused by evaluations on one search thread, including scalar parity checks.
 struct DenseScratch {
@@ -53,6 +93,13 @@ pub struct DenseHead {
     pub output: Vec<i16>,
 }
 
+/// An output head beyond the first; version 9 carries seven of them.
+#[derive(Clone, Debug)]
+pub struct Head {
+    pub bias: i32,
+    pub dense: DenseHead,
+}
+
 #[derive(Clone, Debug)]
 pub struct Model {
     pub features: usize,
@@ -62,9 +109,13 @@ pub struct Model {
     pub eval_scale: f32,
     pub bias: Vec<i16>,
     pub weights: Vec<i16>,
+    /// One readout of 2H per head, head-major.
     pub output: Vec<i16>,
+    /// The first head's readout bias and dense layer stay inline, so a one-head
+    /// network reads them exactly as before; version 9's other seven follow.
     pub output_bias: i32,
     pub dense: DenseHead,
+    pub extra_heads: Box<[Head]>,
     avx2: bool,
     vnni: bool,
 }
@@ -144,32 +195,29 @@ impl Model {
         let buckets = u(32) as usize;
         let hidden = u(16) as usize;
         let features = u(12) as usize;
-        if !matches!((u(8), features), (6, 1004) | (8, 13640))
-            || [u(20), u(24)] != [255, 64]
+        if !matches!(
+            (u(8), features, buckets),
+            (6, V6_FEATURES, 1) | (8, V8_FEATURES, 1) | (9, V9_FEATURES, HEADS)
+        ) || [u(20), u(24)] != [255, 64]
             || f32::from_le_bytes(bytes[28..32].try_into().unwrap()) != 600.
-            || buckets != 1
         {
             return Err("unsupported NNUE format, dimensions, scales or buckets".into());
         }
         if !(32..=1024).contains(&hidden) || !hidden.is_multiple_of(HIDDEN_LANES) {
             return Err("hidden width must be a multiple of 32 in 32..1024".into());
         }
+        // One head is readout 2H i16, readout bias i32, dense weights 32*2H i8,
+        // dense biases 32 i32 and residual readout 32 i16; versions 6 and 8 carry
+        // the dense width u32 inside their single head, version 9 fixes it at 32.
+        let width_field = usize::from(features != V9_FEATURES);
+        let head = 68 * hidden + 196 + 4 * width_field;
         let expected = hidden
-            .checked_mul(2 * features + 66 + 4 * buckets)
-            .and_then(|v| v.checked_add(168 + 68 * buckets));
+            .checked_mul(2 * features + 2)
+            .and_then(|v| v.checked_add(36 + buckets * head));
         if expected != Some(bytes.len()) {
             return Err("invalid NNUE payload length".into());
         }
         let features_start = 36 + 2 * hidden;
-        let output_start = features_start + 2 * features * hidden;
-        let bias_start = output_start + buckets * 2 * hidden * 2;
-        let width_start = bias_start + buckets * 4;
-        let dense_start = width_start + 4;
-        let dense_bias_start = dense_start + 32 * 2 * hidden;
-        let residual_start = dense_bias_start + 32 * 4;
-        if u(width_start) != 32 {
-            return Err("unsupported dense width".into());
-        }
         let i16s = |a: usize, n: usize| {
             bytes[a..a + 2 * n]
                 .chunks_exact(2)
@@ -182,6 +230,32 @@ impl Model {
                 .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
                 .collect::<Vec<_>>()
         };
+        let mut output = Vec::with_capacity(buckets * 2 * hidden);
+        let mut heads = Vec::with_capacity(buckets);
+        for bucket in 0..buckets {
+            let at = features_start + 2 * features * hidden + bucket * head;
+            let bias_start = at + 4 * hidden;
+            let dense_start = bias_start + 4 + 4 * width_field;
+            let dense_bias_start = dense_start + 32 * 2 * hidden;
+            let residual_start = dense_bias_start + 32 * 4;
+            if width_field == 1 && u(bias_start + 4) != 32 {
+                return Err("unsupported dense width".into());
+            }
+            output.extend(i16s(at, 2 * hidden));
+            heads.push(Head {
+                bias: i32s(bias_start, 1)[0],
+                dense: DenseHead {
+                    weights: bytes[dense_start..dense_bias_start]
+                        .iter()
+                        .map(|&b| b as i8)
+                        .collect(),
+                    bias: i32s(dense_bias_start, 32),
+                    output: i16s(residual_start, 32),
+                },
+            });
+        }
+        let mut heads = heads.into_iter();
+        let first = heads.next().expect("every version has at least one head");
         Ok(Self {
             features,
             hidden,
@@ -190,19 +264,58 @@ impl Model {
             eval_scale: 600.,
             bias: i16s(36, hidden),
             weights: i16s(features_start, features * hidden),
-            output: i16s(output_start, buckets * 2 * hidden),
-            output_bias: i32s(bias_start, 1)[0],
-            dense: DenseHead {
-                weights: bytes[dense_start..dense_bias_start]
-                    .iter()
-                    .map(|&b| b as i8)
-                    .collect(),
-                bias: i32s(dense_bias_start, 32),
-                output: i16s(residual_start, 32),
-            },
+            output,
+            output_bias: first.bias,
+            dense: first.dense,
+            extra_heads: heads.collect(),
             avx2: has_avx2(),
             vnni: has_vnni(),
         })
+    }
+
+    /// Heads in the file: one before version 9, eight from it on.
+    pub fn heads(&self) -> usize {
+        1 + self.extra_heads.len()
+    }
+
+    /// The output bucket of an accumulator: the head is chosen by the pieces on
+    /// the board, `min(7, (total - 2) * 8 / 19)` over the totals 2..=20.
+    pub fn bucket(&self, acc: &Accumulator) -> usize {
+        if self.extra_heads.is_empty() {
+            return 0;
+        }
+        let total: usize = acc
+            .state
+            .counts
+            .iter()
+            .flatten()
+            .map(|&count| count as usize)
+            .sum();
+        (total.saturating_sub(2) * HEADS / 19).min(HEADS - 1)
+    }
+
+    /// The bucket's readout, readout bias and dense head; bucket 0 is held
+    /// inline, and the selection stays out of the loops that use them.
+    #[inline]
+    fn readout(&self, bucket: usize) -> &[i16] {
+        let start = bucket * 2 * self.hidden;
+        &self.output[start..start + 2 * self.hidden]
+    }
+    #[inline]
+    fn head_bias(&self, bucket: usize) -> i32 {
+        if bucket == 0 {
+            self.output_bias
+        } else {
+            self.extra_heads[bucket - 1].bias
+        }
+    }
+    #[inline]
+    fn head_dense(&self, bucket: usize) -> &DenseHead {
+        if bucket == 0 {
+            &self.dense
+        } else {
+            &self.extra_heads[bucket - 1].dense
+        }
     }
 
     pub fn backend(&self) -> &'static str {
@@ -239,7 +352,29 @@ impl Model {
     }
     #[inline]
     fn threat_feature(&self, piece: u8, square: usize) -> &[i16] {
-        self.row(self.features - 518 + (piece as usize - 1) * N_SQ + square)
+        self.row(self.attack_base() + (piece as usize - 1) * N_SQ + square)
+    }
+    /// The 486 attacked-piece rows follow the piece-square contexts.
+    #[inline]
+    fn attack_base(&self) -> usize {
+        if self.features >= V8_FEATURES {
+            CONTEXTS * FEATURES
+        } else {
+            FEATURES
+        }
+    }
+    #[inline]
+    fn clock_base(&self) -> usize {
+        self.attack_base() + FEATURES
+    }
+    /// The eight goal-corner rows of version 9, after the clock rows.
+    #[inline]
+    fn goal_base(&self) -> Option<usize> {
+        (self.features == V9_FEATURES).then(|| self.clock_base() + 2 * CLOCK_BUCKETS)
+    }
+    /// Feature slots per perspective: 44 from version 9 on, 42 before it.
+    pub fn slots(&self) -> usize {
+        SLOTS - 2 * usize::from(self.goal_base().is_none())
     }
     pub(crate) fn requires_refresh(
         &self,
@@ -247,20 +382,21 @@ impl Model {
         after: FeatureState,
         side: usize,
     ) -> bool {
-        self.features == 13640 && before.contexts()[side ^ 1] != after.contexts()[side]
+        self.features >= V8_FEATURES && before.contexts()[side ^ 1] != after.contexts()[side]
     }
 
     /// Active rows in the file layout; padding occupies the unused slots.
-    pub fn feature_ids(&self, board: &Board, since: u32, clock: u32) -> [[usize; 42]; 2] {
+    pub fn feature_ids(&self, board: &Board, since: u32, clock: u32) -> [[usize; SLOTS]; 2] {
         self.ids(board, FeatureState::new(board, since, clock))
     }
-    fn ids(&self, board: &Board, state: FeatureState) -> [[usize; 42]; 2] {
-        let contexts = if self.features == 13640 {
+    fn ids(&self, board: &Board, state: FeatureState) -> [[usize; SLOTS]; 2] {
+        let contexts = if self.features >= V8_FEATURES {
             state.contexts()
         } else {
             [0; 2]
         };
-        let mut ids = [[self.features; 42]; 2];
+        let attack = self.attack_base();
+        let mut ids = [[self.features; SLOTS]; 2];
         let (mut pieces, mut threats) = (0, 20);
         for (square, cell) in board.iter().enumerate() {
             let piece = cell.code();
@@ -274,15 +410,21 @@ impl Model {
                 + mirror_anti(square);
             pieces += 1;
             if is_attacked(board, square as u8) {
-                ids[0][threats] = self.features - 518 + (piece as usize - 1) * N_SQ + square;
-                ids[1][threats] = self.features - 518
-                    + (swap_side(piece) as usize - 1) * N_SQ
-                    + mirror_anti(square);
+                ids[0][threats] = attack + (piece as usize - 1) * N_SQ + square;
+                ids[1][threats] =
+                    attack + (swap_side(piece) as usize - 1) * N_SQ + mirror_anti(square);
                 threats += 1;
             }
         }
         for side in &mut ids {
-            side[40..].copy_from_slice(&clock_rows(self.features, state.since, state.clock));
+            side[40..42].copy_from_slice(&clock_rows(self.clock_base(), state.since, state.clock));
+        }
+        if let Some(base) = self.goal_base() {
+            let (own, enemy) = (board[80].code(), board[0].code());
+            // The opponent's frame reflects across the anti-diagonal, which
+            // exchanges the two corners, and swaps the colours.
+            ids[0][42..].copy_from_slice(&goal_rows(base, own, enemy));
+            ids[1][42..].copy_from_slice(&goal_rows(base, swapped(enemy), swapped(own)));
         }
         ids
     }
@@ -304,9 +446,11 @@ impl Model {
         );
         acc.state = FeatureState::new(board, since, clock);
         let ids = self.ids(board, acc.state);
-        self.fill_half(&ids[0], &mut acc.own) + self.fill_half(&ids[1], &mut acc.opponent)
+        let slots = self.slots();
+        self.fill_half(&ids[0][..slots], &mut acc.own)
+            + self.fill_half(&ids[1][..slots], &mut acc.opponent)
     }
-    fn fill_half(&self, ids: &[usize; 42], dst: &mut [i32]) -> u64 {
+    fn fill_half(&self, ids: &[usize], dst: &mut [i32]) -> u64 {
         for (value, &bias) in dst.iter_mut().zip(&self.bias) {
             *value = bias as i32;
         }
@@ -373,9 +517,9 @@ impl Model {
         moved[from] = Cell::Empty;
         if self.requires_refresh(before, after, side) {
             let ids = self.ids(&engine::flip(&moved), after);
-            return (self.fill_half(&ids[side], dst), 0);
+            return (self.fill_half(&ids[side][..self.slots()], dst), 0);
         }
-        let context = if self.features == 13640 {
+        let context = if self.features >= V8_FEATURES {
             after.contexts()[side]
         } else {
             0
@@ -418,15 +562,36 @@ impl Model {
                 added += 1;
             }
         }
-        for (old, new) in clock_rows(self.features, before.since, before.clock)
+        let clock_base = self.clock_base();
+        for (old, new) in clock_rows(clock_base, before.since, before.clock)
             .into_iter()
-            .zip(clock_rows(self.features, after.since, after.clock))
+            .zip(clock_rows(clock_base, after.since, after.clock))
         {
             if old != new {
                 self.add_row(dst, self.row(old), false);
                 self.add_row(dst, self.row(new), true);
                 added += 1;
                 removed += 1;
+            }
+        }
+        // A move onto, off or capturing on a goal corner changes two rows; the
+        // corners sit still under every other move, so the comparison is the work.
+        if let Some(base) = self.goal_base() {
+            let corners = |board: &Board| {
+                let (own, enemy) = (board[80].code(), board[0].code());
+                if side == 1 {
+                    goal_rows(base, own, enemy)
+                } else {
+                    goal_rows(base, swapped(enemy), swapped(own))
+                }
+            };
+            for (old, new) in corners(board).into_iter().zip(corners(&moved)) {
+                if old != new {
+                    self.add_row(dst, self.row(old), false);
+                    self.add_row(dst, self.row(new), true);
+                    added += 1;
+                    removed += 1;
+                }
             }
         }
         (added, removed)
@@ -470,24 +635,29 @@ impl Model {
     }
 
     pub fn sum_scalar(&self, acc: &Accumulator) -> i64 {
-        let start = 0;
+        self.sum_scalar_with(acc, self.readout(self.bucket(acc)))
+    }
+
+    fn sum_scalar_with(&self, acc: &Accumulator, output: &[i16]) -> i64 {
         let mut sum = 0i64;
         for (perspective, values) in [&acc.own, &acc.opponent].iter().enumerate() {
             for (j, &value) in values.iter().enumerate() {
                 let x = value.clamp(0, self.qa) as i64;
-                sum += x * x * self.output[start + perspective * self.hidden + j] as i64;
+                sum += x * x * output[perspective * self.hidden + j] as i64;
             }
         }
         sum
     }
 
     pub fn sum(&self, acc: &Accumulator) -> i64 {
+        self.sum_with(acc, self.readout(self.bucket(acc)))
+    }
+
+    fn sum_with(&self, acc: &Accumulator, output: &[i16]) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Readout);
         #[cfg(target_arch = "x86_64")]
         if self.vnni {
-            let start = 0;
-            let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx512(&acc.own, &output[..self.hidden], self.qa)
                     + sum_avx512(&acc.opponent, &output[self.hidden..], self.qa);
@@ -495,32 +665,35 @@ impl Model {
         }
         #[cfg(target_arch = "x86_64")]
         if self.avx2 {
-            let start = 0;
-            let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx2(&acc.own, &output[..self.hidden], self.qa)
                     + sum_avx2(&acc.opponent, &output[self.hidden..], self.qa);
             }
         }
-        self.sum_scalar(acc)
+        self.sum_scalar_with(acc, output)
     }
 
     pub fn raw(&self, acc: &Accumulator) -> f64 {
-        self.sum(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
-            + self.output_bias as f64 / self.qb as f64
-            + self.dense_sum(acc, self.avx2) as f64 / (self.qa as f64 * self.qb as f64)
+        let bucket = self.bucket(acc);
+        self.sum_with(acc, self.readout(bucket)) as f64
+            / (self.qa as f64 * self.qa as f64 * self.qb as f64)
+            + self.head_bias(bucket) as f64 / self.qb as f64
+            + self.dense_sum(acc, self.head_dense(bucket), self.avx2) as f64
+                / (self.qa as f64 * self.qb as f64)
     }
 
     pub fn raw_scalar(&self, acc: &Accumulator) -> f64 {
-        self.sum_scalar(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
-            + self.output_bias as f64 / self.qb as f64
-            + self.dense_sum(acc, false) as f64 / (self.qa as f64 * self.qb as f64)
+        let bucket = self.bucket(acc);
+        self.sum_scalar_with(acc, self.readout(bucket)) as f64
+            / (self.qa as f64 * self.qa as f64 * self.qb as f64)
+            + self.head_bias(bucket) as f64 / self.qb as f64
+            + self.dense_sum(acc, self.head_dense(bucket), false) as f64
+                / (self.qa as f64 * self.qb as f64)
     }
 
-    fn dense_sum(&self, acc: &Accumulator, avx2: bool) -> i64 {
+    fn dense_sum(&self, acc: &Accumulator, head: &DenseHead, avx2: bool) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Dense);
-        let head = &self.dense;
         let output = &head.output;
         if output.iter().all(|&w| w == 0) {
             return 0;

@@ -39,8 +39,8 @@ from torch.nn import functional as F  # noqa: E402
 
 from . import export as export_module  # noqa: E402
 from .data import KIND_RETURN, TRAIN, VALIDATION, Dataset, Mixture  # noqa: E402
-from .features import LAYOUTS, Layout, feature_ids, symmetry_table  # noqa: E402
-from .model import NNUE  # noqa: E402
+from .features import LAYOUTS, Layout, feature_ids, goal_ids, symmetry_table  # noqa: E402
+from .model import HEAD_RESIDUALS, NNUE  # noqa: E402
 from .paths import data_dir, run_dir, sha256  # noqa: E402
 
 
@@ -57,7 +57,8 @@ class Config:
     qat_start_epoch: int = 0  # fake quantisation from this epoch on
     raw_weight: float = 0.02  # weight of the bounded logit term beside the tanh mean squared error
     symmetry_weight: float = 0.2
-    version: int = 8  # the file format: 8 (27 opponent-material contexts) or 6 (the incumbent's layout)
+    version: int = 8  # the file format: 8 (27 opponent-material contexts), 6 (the incumbent's layout) or
+    # 9 (8 plus the goal-corner rows and the eight piece-count output heads)
     threads: int = 4
     device: str = "cpu"  # or cuda when the GPU is free; the file and the checkpoints are device-free
     seed: int = 0
@@ -104,19 +105,41 @@ def value_loss(raw: torch.Tensor, target: torch.Tensor, config: Config) -> torch
 
 def encode(rows: dict[str, np.ndarray], layout: Layout) -> torch.Tensor:
     """Feature ids in `layout` of a batch, from the dataset's id cache when it
-    has one (`python -m nnue.data encode <set>`), else from the boards."""
+    has one (`python -m nnue.data encode <set>`), else from the boards. A
+    format 9 batch also carries the boards, whose goal corners are two rows the
+    cache (a format 8 encoding) does not hold."""
     if "ids" in rows:
         ids = rows["ids"].astype(np.int64)
     else:
         ids = feature_ids(rows["board"], rows["since_capture"], rows["capture_clock"])
-    return torch.from_numpy(layout.rows(ids))
+    ids = layout.rows(ids)
+    if layout.goal:
+        ids = np.concatenate([ids, goal_ids(rows["board"])], axis=2)
+    return torch.from_numpy(ids)
+
+
+def parameter_groups(model: NNUE) -> list[torch.nn.Parameter] | list[dict]:
+    """The optimizer's groups: everything under the run's weight decay, except
+    the per-bucket head residuals, which get none. A sparse bucket contributes
+    a handful of rows to a batch, and decay between its rare updates would pull
+    its residual back toward the shared head for no reason of the data's (the
+    context residuals are dense by comparison: every position visits one). A
+    model without residuals returns the one flat list a format 6 or 8 run has
+    always been given, so its optimizer state and its resume are unchanged."""
+    residual = [getattr(model, name) for name in HEAD_RESIDUALS if getattr(model, name, None) is not None]
+    if not residual:
+        return list(model.parameters())
+    held = {id(parameter) for parameter in residual}
+    shared = [parameter for parameter in model.parameters() if id(parameter) not in held]
+    return [{"params": shared}, {"params": residual, "weight_decay": 0.0}]
 
 
 def step_loss(
     model: NNUE, rows: dict[str, np.ndarray], table: torch.Tensor, config: Config, qat: bool, rng: torch.Generator
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """The batch under two different random symmetries: the mean of both
-    value losses and the paired consistency term."""
+    value losses and the paired consistency term. A bucketed model also
+    reports how many rows of the batch each output head saw."""
     device = table.device
     ids = encode(rows, model.layout).to(device)
     n = len(ids)
@@ -130,7 +153,11 @@ def step_loss(
     value = ((value_loss(a, target, config) + value_loss(b, target, config)) * 0.5 * weight).sum() / norm
     consistency = (a.tanh() - b.tanh()).square().mean()
     loss = value + config.symmetry_weight * consistency
-    return loss, {"value": float(value.detach()), "consistency": float(consistency.detach())}
+    parts = {"value": float(value.detach()), "consistency": float(consistency.detach())}
+    if model.heads > 1:
+        occupancy = torch.bincount(model.buckets(ids), minlength=model.heads)
+        parts.update({f"bucket{head}": float(count) for head, count in enumerate(occupancy.tolist())})
+    return loss, parts
 
 
 @torch.no_grad()
@@ -195,9 +222,13 @@ def initial_model(config: Config) -> NNUE:
             model = model.widen_hidden(config.hidden, config.seed, config.widen_outgoing)
         elif model.hidden != config.hidden:
             raise ValueError(f"{config.init} has hidden {model.hidden}, config says {config.hidden}")
-        if model.version < config.version:
+        # 6 -> 8 repeats the piece rows into every context, 8 -> 9 adds the zero
+        # goal rows and eight copies of the one head; both keep the evaluation.
+        if model.version == 6 and config.version > 6:
             model = model.widen_contexts()
-        elif model.version != config.version:
+        if model.version == 8 and config.version == 9:
+            model = model.widen_buckets()
+        if model.version != config.version:
             raise ValueError(f"{config.init} is format {model.version}, config says {config.version}")
     else:
         model = NNUE(config.hidden, config.version)
@@ -237,14 +268,16 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     datasets = [(Dataset.open(data_dir(name), TRAIN), share) for name, share in parts]
     validation = [(name, Dataset.open(data_dir(name), VALIDATION), share) for name, share in parts]
     # With id caches everywhere a step needs two small columns and the ids; gathering every column (the
-    # 81-byte board above all) from the memory maps made the trainer page instead of compute.
+    # 81-byte board above all) from the memory maps made the trainer page instead of compute. Format 9
+    # adds the board, whose goal corners the format 8 id cache does not encode.
     lean = all("ids" in dataset.rows for dataset, _ in datasets)
-    mixture = Mixture(datasets, config.batch, config.seed, ("target", "weight") if lean else None)
+    columns = ("target", "weight") + (("board",) if LAYOUTS[config.version].goal else ())
+    mixture = Mixture(datasets, config.batch, config.seed, columns if lean else None)
     device = torch.device(config.device)
     rng = torch.Generator().manual_seed(config.seed + 1)
     model = initial_model(config).to(device)
     table = torch.from_numpy(symmetry_table(model.layout)).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    optimizer = torch.optim.AdamW(parameter_groups(model), lr=config.lr, weight_decay=config.weight_decay)
     total_steps = config.epochs * config.steps_per_epoch
     step, first_epoch, best, stale = 0, 0, float("inf"), 0
     average: NNUE | None = None  # the weight average (config.ema > 0), the model of record once it has begun

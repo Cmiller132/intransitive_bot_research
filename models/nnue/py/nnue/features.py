@@ -14,14 +14,20 @@ row layout is the file version's (`Layout`):
   the square is attacked by an adjacent enemy that beats it;
 - 16 elapsed-clock rows (bucket of `since_capture`) and 16 remaining-clock
   rows (bucket of `clock - since_capture`), shared by both perspectives;
+- from format 9 on, eight goal-corner rows: four for the occupant of the
+  perspective's own goal (square 80 in its frame: empty, or an opponent
+  blocker) and four for the occupant of the opponent's goal (square 0:
+  empty, or one of its own pieces), one of each active per perspective;
 - one padding row after the last feature.
 
-Every perspective has 42 slots: 20 pieces, 20 attacked pieces and the two
-clock rows. `feature_ids` encodes format 8; `Layout.rows` maps its ids onto
-a format-6 table, so one id cache serves both. The Rust crate indexes the
-same rows (runs/nnue_plan/format8_contract.md is the shared contract);
-`tests/test_features.py` checks the encoder against a slow enumeration and
-the perspective exchange.
+Every perspective has 42 slots (44 from format 9 on): 20 pieces, 20 attacked
+pieces, the two clock rows and the two goal rows. `feature_ids` encodes
+format 8 and `Layout.rows` maps its ids onto a format-6 or format-9 table, so
+one id cache serves every version; `feature_ids9` appends the goal rows, which
+need the board. The Rust crate indexes the same rows
+(runs/nnue_plan/format8_contract.md and models/nnue/FORMAT9.md are the shared
+contracts); `tests/test_features.py` checks the encoder against a slow
+enumeration and the perspective exchange.
 """
 
 from __future__ import annotations
@@ -38,14 +44,21 @@ CLOCK_BOUNDS = np.array([0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 1
 CLOCK_BUCKETS = len(CLOCK_BOUNDS)
 MAX_PIECES = 20
 SLOTS = 2 * MAX_PIECES + 2
+GOAL_STATES = 4  # a goal corner is empty or holds one of the three piece types
+GOAL_GROUPS = 2  # the perspective's own goal (square 80) and the opponent's (square 0)
+GOAL_ROWS = GOAL_GROUPS * GOAL_STATES
+HEADS = 8  # version 9 output buckets, chosen by the pieces on the board
 
 
 @dataclass(frozen=True)
 class Layout:
-    """The row bases of one file version's feature table."""
+    """The row bases of one file version's feature table, its feature slots
+    per perspective and its number of output heads."""
 
     version: int
     contexts: int
+    goal: bool = False
+    heads: int = 1
 
     @property
     def attack_base(self) -> int:
@@ -60,8 +73,17 @@ class Layout:
         return self.elapsed_base + CLOCK_BUCKETS
 
     @property
-    def features(self) -> int:
+    def goal_base(self) -> int:
+        """Where the goal rows begin; the end of the table without them."""
         return self.remaining_base + CLOCK_BUCKETS
+
+    @property
+    def features(self) -> int:
+        return self.goal_base + (GOAL_ROWS if self.goal else 0)
+
+    @property
+    def slots(self) -> int:
+        return SLOTS + (GOAL_GROUPS if self.goal else 0)
 
     @property
     def pad(self) -> int:
@@ -69,16 +91,21 @@ class Layout:
 
     def rows(self, ids: np.ndarray) -> np.ndarray:
         """This layout's ids from format-8 ids (`feature_ids`): a format-6
-        table drops the context and shifts the attacked, clock and padding rows."""
-        if self.contexts == CONTEXTS:
+        table drops the context and shifts the attacked, clock and padding rows;
+        a format-9 table keeps every shared row and only moves the padding,
+        since its goal rows come after them (`feature_ids9` appends those)."""
+        if self.contexts == CONTEXTS and not self.goal:
             return ids
         ids = np.asarray(ids)
+        if self.goal:
+            return np.where(ids == FORMAT8.pad, self.pad, ids)
         return np.where(ids < FORMAT8.attack_base, ids % PIECE_ROWS, ids - (FORMAT8.attack_base - self.attack_base))
 
 
 FORMAT6 = Layout(6, 1)
 FORMAT8 = Layout(8, CONTEXTS)
-LAYOUTS = {6: FORMAT6, 8: FORMAT8}
+FORMAT9 = Layout(9, CONTEXTS, goal=True, heads=HEADS)
+LAYOUTS = {6: FORMAT6, 8: FORMAT8, 9: FORMAT9}
 
 # Anti-diagonal reflection (the opponent's frame), the diagonal reflection
 # (a board symmetry) and the colour swap of cell codes.
@@ -157,6 +184,34 @@ def feature_ids(board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray)
     return ids
 
 
+def goal_ids(board: np.ndarray) -> np.ndarray:
+    """(N, 2, 2) int64 format-9 goal rows of both perspectives: the occupant of
+    the perspective's own goal (square 80 in its frame, where only an opponent
+    piece can stand without the game being over) and of the opponent's goal
+    (square 0, where only one of its own pieces can stand). Anything else on
+    those squares is an already-decided position and reads as empty."""
+    frames = perspectives(board).reshape(-1, 2, 81)
+    own = frames[:, :, 80].astype(np.int64)
+    enemy = frames[:, :, 0].astype(np.int64)
+    blocker = np.where((own >= 4) & (own <= 6), own - 3, 0)
+    invader = np.where((enemy >= 1) & (enemy <= 3), enemy, 0)
+    return np.stack([FORMAT9.goal_base + blocker, FORMAT9.goal_base + GOAL_STATES + invader], axis=2)
+
+
+def feature_ids9(board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray) -> np.ndarray:
+    """(N, 2, 44) int64 format-9 feature ids: the 42 shared slots with the
+    padding row moved to `FORMAT9.pad`, then the two goal rows."""
+    ids = FORMAT9.rows(feature_ids(board, since_capture, clock))
+    return np.concatenate([ids, goal_ids(board)], axis=2)
+
+
+def piece_bucket(pieces: np.ndarray, heads: int = HEADS) -> np.ndarray:
+    """The output head of a position with `pieces` pieces on the board:
+    `min(heads - 1, (pieces - 2) * heads // 19)` over the totals 2..20."""
+    pieces = np.asarray(pieces, dtype=np.int64)
+    return np.minimum(np.maximum(pieces - 2, 0) * heads // 19, heads - 1)
+
+
 def transform_board(board: np.ndarray, symmetry: int) -> np.ndarray:
     """Board under symmetry `k` in 0..5: `k // 3` reflects across the diagonal,
     `k % 3` renames the piece types cyclically. Every such board is played
@@ -175,7 +230,8 @@ def symmetry_table(layout: Layout = FORMAT8) -> np.ndarray:
     """(6, features + 1) permutation of the layout's feature ids under every
     symmetry; it commutes with both perspectives, so `table[k, ids]` are the
     ids of the transformed position. A type renaming also renames the
-    context's counts; clock and padding rows map to themselves."""
+    context's counts and a goal corner's occupant; the diagonal reflection
+    fixes both corners; clock and padding rows map to themselves."""
     table = np.tile(np.arange(layout.features + 1), (6, 1))
     f = np.arange(layout.elapsed_base)
     base = np.where(f < layout.attack_base, 0, layout.attack_base)
@@ -183,11 +239,16 @@ def symmetry_table(layout: Layout = FORMAT8) -> np.ndarray:
     piece, square = divmod(rest, 81)
     side, kind = divmod(piece, 3)
     counts = np.stack([c % 3, c // 3 % 3, c // 9])
+    states = np.arange(GOAL_STATES)
     for k in range(6):
         m = k % 3
         sq = DIAG[square] if k // 3 else square
         renamed = counts[(0 - m) % 3] + 3 * counts[(1 - m) % 3] + 9 * counts[(2 - m) % 3]
         table[k, f] = base + PIECE_ROWS * renamed + (side * 3 + (kind + m) % 3) * 81 + sq
+        if layout.goal:
+            for group in range(GOAL_GROUPS):
+                at = layout.goal_base + GOAL_STATES * group
+                table[k, at + states] = at + np.where(states == 0, 0, (states - 1 + m) % 3 + 1)
     return table
 
 

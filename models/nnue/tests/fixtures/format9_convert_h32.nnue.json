@@ -1,0 +1,19 @@
+{
+  "format": "RPSNNUE1",
+  "version": 9,
+  "features": 13648,
+  "hidden": 32,
+  "buckets": 8,
+  "dense": 32,
+  "qa": 255,
+  "qb": 64,
+  "eval_scale": 600.0,
+  "purpose": "the migration fixture: `python -m nnue.export convert --to 9 format8_h32.nnue` (py/tests/test_fixtures9.py rebuilds it); it evaluates every position exactly as format8_h32.nnue",
+  "converted_from": {
+    "file": "format8_h32.nnue",
+    "sha256": "8c30fc8a3aba6f0b5e468e8e694619b018d1ab01407911452dc905ae6cdfd732",
+    "version": 8
+  },
+  "bytes": 892548,
+  "sha256": "a503a0d6521f038043eb74d2b9df6d1ebb847a8613addacbd9f7c4a4545e8477"
+}

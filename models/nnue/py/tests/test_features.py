@@ -1,6 +1,6 @@
 """The feature encoder against a slow enumeration, the material contexts,
-the perspective exchange, the format-6 row map, the symmetry tables and the
-clock buckets."""
+the perspective exchange, the format-6 row map, the format-9 goal rows, the
+symmetry tables and the clock buckets."""
 
 import numpy as np
 import pytest
@@ -11,6 +11,9 @@ from nnue.features import (
     CONTEXTS,
     FORMAT6,
     FORMAT8,
+    FORMAT9,
+    GOAL_ROWS,
+    GOAL_STATES,
     MAX_PIECES,
     PIECE_ROWS,
     SLOTS,
@@ -18,7 +21,9 @@ from nnue.features import (
     clock_bucket,
     context,
     feature_ids,
+    feature_ids9,
     orbit_hash,
+    piece_bucket,
     symmetry_table,
     transform_board,
 )
@@ -163,6 +168,45 @@ def test_symmetry_table_matches_transformed_boards(layout):
         assert np.array_equal(np.sort(table[k, ids], axis=-1), np.sort(moved, axis=-1)), k
     assert np.array_equal(transform_board(boards, 0), boards)
     assert CONTEXTS == 27
+
+
+def cornered_boards(seed=17, count=24):
+    """Boards covering every combination of goal-corner occupants: only one of
+    the mover's own pieces may stand on square 0 and only an enemy on square 80,
+    so those are the sixteen combinations the encoder can meet in play."""
+    boards = random_boards(seed, count, 2, 19)
+    for n, board in enumerate(boards):
+        board[0] = (0, 1, 2, 3)[n % 4]
+        board[80] = (0, 4, 5, 6)[n // 4 % 4]
+    return boards
+
+
+def test_symmetry_table_renames_the_goal_corners_of_format9():
+    boards = cornered_boards()
+    since, clock = np.full(len(boards), 40), np.full(len(boards), 200)
+    ids = feature_ids9(boards, since, clock)
+    table = symmetry_table(FORMAT9)
+    assert table.shape == (6, FORMAT9.features + 1)
+    # Both groups and every occupant of each are present, so the goal columns
+    # of the table are exercised and not only its identity entries.
+    assert {int(i) - FORMAT9.goal_base for i in ids[..., 42:].reshape(-1)} == set(range(GOAL_ROWS))
+    for k in range(6):
+        assert np.array_equal(np.sort(table[k]), np.arange(FORMAT9.features + 1))
+        moved = feature_ids9(transform_board(boards, k), since, clock)
+        # The goal rows sit in fixed slots: they match position by position. The
+        # diagonal reflection (k // 3) fixes squares 0 and 80, so a corner's
+        # occupant is renamed within its group and the two groups never swap.
+        assert np.array_equal(table[k, ids][..., 42:], moved[..., 42:]), k
+        assert np.all(table[k, ids][..., 42] < FORMAT9.goal_base + GOAL_STATES), k
+        assert np.all(table[k, ids][..., 43] >= FORMAT9.goal_base + GOAL_STATES), k
+        assert np.array_equal(np.sort(table[k, ids], axis=-1), np.sort(moved, axis=-1)), k
+        # A symmetry moves and renames pieces but never adds or removes one.
+        assert np.array_equal(
+            piece_bucket(np.count_nonzero(transform_board(boards, k), axis=1)),
+            piece_bucket(np.count_nonzero(boards, axis=1)),
+        ), k
+    # A renaming really moves the rows: the identity is the only fixed table.
+    assert not np.array_equal(table[1, ids][..., 42:], ids[..., 42:])
 
 
 def test_orbit_hash_is_constant_on_an_orbit():

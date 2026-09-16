@@ -20,6 +20,7 @@ pub struct Position {
     pub raw: Option<f64>,
     pub raw6: Option<f64>,
     pub context: Option<[usize; 2]>,
+    pub bucket: Option<usize>,
     pub ids: Option<[Vec<usize>; 2]>,
 }
 
@@ -81,20 +82,34 @@ pub fn run(
         if let Some(expected) = request.context {
             ensure!(expected == contexts, "context mismatch at row {row}");
         }
+        if let Some(expected) = request.bucket {
+            ensure!(
+                expected == model.bucket(&acc),
+                "output bucket mismatch at row {row}"
+            );
+        }
         if let Some(expected) = &request.ids {
+            // The oracle numbers its rows in the model's own layout, except for
+            // format 6, whose ids are compared in the format 8 numbering.
+            let slots = model.slots();
+            let pad = if model.features == 13648 {
+                13648
+            } else {
+                13640
+            };
             for side in 0..2 {
                 ensure!(
-                    expected[side].len() == 42,
-                    "expected 42 feature slots at row {row}"
+                    expected[side].len() == slots,
+                    "expected {slots} feature slots at row {row}"
                 );
                 ensure!(
-                    expected[side].iter().all(|&id| id <= 13640),
+                    expected[side].iter().all(|&id| id <= pad),
                     "invalid feature id at row {row}"
                 );
                 let mut expected: Vec<_> = expected[side]
                     .iter()
                     .copied()
-                    .filter(|&id| id != 13640)
+                    .filter(|&id| id != pad)
                     .collect();
                 expected.sort_unstable();
                 ensure!(
@@ -158,7 +173,7 @@ pub fn run(
                 children += 1;
             }
         }
-        let mut response = serde_json::json!({"row":row,"raw":raw,"score":model.evaluate(&acc),"context":contexts,"ids":ids.map(|ids| ids.to_vec()),"incremental_children":children});
+        let mut response = serde_json::json!({"row":row,"raw":raw,"score":model.evaluate(&acc),"context":contexts,"bucket":model.bucket(&acc),"ids":ids.map(|ids| ids[..model.slots()].to_vec()),"incremental_children":children});
         if let Some(nodes) = nodes {
             ensure!(
                 request.clock == 200,
