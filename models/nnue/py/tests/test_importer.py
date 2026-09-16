@@ -1,7 +1,9 @@
 """The conv window importer on a synthetic run: children through the engine,
 episode recovery across windows, context merging and split hygiene."""
 
+import hashlib
 import json
+from pathlib import Path
 
 import engine
 import numpy as np
@@ -430,3 +432,254 @@ def test_selfplay_line_rows_follow_the_principal_variation(tmp_path, monkeypatch
     assert provenance["pv_rows"] == 3 and provenance["pv_weight"] == 0.5 and "7" in provenance["sources"]
     plain = json.loads((roots_only / "provenance.json").read_text(encoding="utf-8"))
     assert "pv_rows" not in plain and "line_rows" not in plain["counts"] and "7" not in plain["sources"]
+
+
+# --- the record fixtures of tests/fixtures/selfplay_games.json ------------------
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+MATE = 30_000  # models/nnue/src/search.rs MATE; the mate band is |score| >= MATE - MAX_PLY
+OPENING_PLIES = 8
+
+
+def fixture_games() -> dict[str, list[str]]:
+    """The two generated games the option tests import (see the file's note)."""
+    return json.loads((FIXTURES / "selfplay_games.json").read_text(encoding="utf-8"))
+
+
+def searched_record(
+    game_id: int, moves: list[str], *, search_mate: tuple[int, ...] = (), proof: tuple[int, ...] = (), pv: int = 0
+) -> dict:
+    """A generator record over `moves` whose every root from ply 8 carries the
+    move the game played as its `searched_best` and a score from the mover's
+    view; the roots at `search_mate` carry a mate-band search score and those
+    at `proof` an engine proof. With `pv` > 0 a root's line is the game's next
+    `pv` moves."""
+    from nnue.games import replay
+
+    roots_replay, _ = replay(moves)
+    roots = []
+    for _board, since, ply, action in roots_replay[OPENING_PLIES:]:
+        mover = ply % 2
+        kind, score = "search", (300 - 4 * ply if mover == 0 else -(120 + 4 * ply))
+        if ply in search_mate:
+            score = MATE - 5
+        if ply in proof:
+            kind, score = "engine_proof", MATE - 1
+        roots.append(
+            {
+                "ply": ply,
+                "mover": mover,
+                "since_capture": since,
+                "capture_clock": 200,
+                "board_fingerprint": 0,
+                "searched_best": int(action),
+                "played_action": int(action),
+                "root_score": score,
+                "score_kind": kind,
+                "completed_depth": 6,
+                "nodes": 250000,
+                "elapsed_ns": 1,
+                **({"pv": [int(a) for _, _, _, a in roots_replay[ply : ply + pv]]} if pv else {}),
+            }
+        )
+    return {
+        "first": "nnue:a",
+        "second": "nnue:a",
+        "winner": 0,
+        "schema": 1,
+        "seed": 1,
+        "end": "Goal",
+        "plies": len(moves),
+        "moves": moves,
+        "capture_clock": 200,
+        "random_plies": list(range(OPENING_PLIES)),
+        "random_plan": [],
+        "random_skipped": [],
+        "game_id": game_id,
+        "roots": roots,
+        "opening_plies": OPENING_PLIES,
+        "censored": False,
+        "outcome": 1,
+        "outcome_after_ply": OPENING_PLIES,
+    }
+
+
+def quiet_records(directory, pv: int = 0) -> None:
+    """The `quiet` fixture game as one record: capturing best moves, goal
+    threats from ply 44, a mate-band search score at ply 25, a proof at 27."""
+    write_selfplay_records(
+        directory, [searched_record(0, fixture_games()["quiet"], search_mate=(25,), proof=(27,), pv=pv)]
+    )
+
+
+def endgame_records(directory) -> None:
+    """The `endgame` fixture game as one record: its last roots hold five pieces."""
+    write_selfplay_records(directory, [searched_record(0, fixture_games()["endgame"])])
+
+
+NET = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "format8_h32.nnue"
+# Game `quiet`, roots from ply 16: the recorded best move captures at these plies, the mover
+# faces a goal threat at these, and these carry a mate-band score (a search score and a proof).
+CAPTURE_PLIES = {17, 18, 33, 34, 36, 38}
+THREAT_PLIES = {44, 45, 46}
+MATE_PLIES = {25, 27}
+
+
+def import_digest(target: Path, records: Path) -> dict[str, str]:
+    """The dataset's bytes: every column's file and the provenance text with
+    the records directory (a temporary path) masked."""
+    text = (target / "provenance.json").read_text(encoding="utf-8")
+    text = text.replace(json.dumps(str(records))[1:-1], "<records>")
+    columns = b"".join((target / f"{name}.npy").read_bytes() for name in sorted(data.FIELDS))
+    return {
+        "provenance": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "columns": hashlib.sha256(columns).hexdigest(),
+    }
+
+
+# --- --quiet (nnue.importer selfplay) -------------------------------------------
+
+# Digests of the default import of the fixtures, taken from the importer before --quiet and
+# --tablebase-labels existed: the live pipeline's hourly import must keep writing these bytes.
+DEFAULT_DIGESTS = {
+    "quiet": {
+        "provenance": "79e76ccfbd521c7951ed88af5c907bf61c8b988a6c5c4cc9f9ca6178c7b4c6ab",
+        "columns": "076b1c768789276c2810014d4c52fb0c2cddb58d41502ba305b333aa0c114a07",
+    },
+    "quiet_pv3": {
+        "provenance": "badfdbc34bb3fd1dcff92c18f67746522250895b7723158453821d7ef60de267",
+        "columns": "076b1c768789276c2810014d4c52fb0c2cddb58d41502ba305b333aa0c114a07",
+    },
+    "endgame": {
+        "provenance": "86decb43b475fed7b1b4f4317353d711fb09a11c7704dc354b7acda9a35a5045",
+        "columns": "bcb284769f02f163c2418e7dfb7e7ba46e4804a9f391e0380ce2905adfa02613",
+    },
+}
+
+
+def test_selfplay_defaults_are_the_bytes_of_the_importer_before_the_options(tmp_path, monkeypatch):
+    """Every default import writes the same rows and the same provenance as it did before
+    --quiet and --tablebase-labels were added (the digests above), and its provenance says
+    nothing about either option."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    for label, build, kwargs in (
+        ("quiet", lambda d: quiet_records(d), {}),
+        ("quiet_pv3", lambda d: quiet_records(d, pv=3), {"pv_rows": 3}),
+        ("endgame", endgame_records, {}),
+    ):
+        records = tmp_path / f"gen_{label}"
+        build(records)
+        target = import_selfplay([records], f"set_{label}", 16, 3, **kwargs)
+        assert import_digest(target, records) == DEFAULT_DIGESTS[label], label
+        provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+        assert "quiet" not in provenance and "tablebase" not in provenance
+
+
+def test_goal_threat_is_the_engines_predicate():
+    """importer.goal_threat is engine::tactics::goal_threat on the dataset's cell codes:
+    an enemy beside the mover's home corner that may step onto it."""
+    from nnue.importer import goal_threat
+
+    def board(**cells):
+        b = np.zeros(81, dtype=np.uint8)
+        for square, code in cells.items():
+            b[int(square[1:])] = code
+        return b
+
+    assert goal_threat(board(s1=4))  # an enemy rock beside the empty corner
+    assert goal_threat(board(s9=5)) and goal_threat(board(s10=6))
+    assert not goal_threat(board(s11=4, s20=5))  # not beside the corner
+    assert not goal_threat(board(s1=1, s9=2, s10=3))  # the mover's own pieces
+    assert goal_threat(board(s0=1, s1=5))  # enemy paper takes the rock on the corner
+    assert not goal_threat(board(s0=1, s1=6))  # the rock on the corner beats the scissors
+    assert not goal_threat(board(s0=1, s1=4))  # rock does not beat rock
+    assert goal_threat(board(s0=3, s1=4)) and not goal_threat(board(s0=2, s1=4))
+    assert not goal_threat(board(s0=4, s1=5))  # the corner is already the opponent's
+
+
+def test_quiet_drops_capturing_goal_threat_and_mate_roots(tmp_path, monkeypatch):
+    """--quiet keeps the roots a static evaluator can be asked about: the plies whose recorded
+    best move captures, whose mover faces a goal threat and whose score is in the mate band are
+    the ones missing, each counted once under its first reason."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    quiet_records(records)
+    plain = import_selfplay([records], "plain", 16, 3)
+    filtered = import_selfplay([records], "filtered", 16, 3, quiet=True)
+    all_plies = set(np.load(plain / "ply.npy").tolist())
+    kept = set(np.load(filtered / "ply.npy").tolist())
+    dropped = CAPTURE_PLIES | THREAT_PLIES | MATE_PLIES
+    assert all_plies == set(range(16, 47)) and kept == all_plies - dropped
+    # The one proof of the fixture is a mate-band score: --quiet leaves no proof row behind.
+    assert not (np.load(filtered / "kind.npy") == data.KIND_PROOF).any()
+    quiet = json.loads((filtered / "provenance.json").read_text(encoding="utf-8"))["quiet"]
+    assert quiet["skipped"] == {"capture": 6, "goal_threat": 3, "mate": 2, "margin": 0}
+    assert quiet["roots_kept"] == len(kept) == 20 and quiet["margin"] is None and quiet["static_net"] is None
+
+
+def test_quiet_drops_a_roots_line_rows_with_it(tmp_path, monkeypatch):
+    """A dropped root contributes no rows at all: with --pv-rows 3 the line rows fall from 87
+    to the 60 of the twenty surviving roots (a kept root's line may still pass through a
+    position whose own root was dropped, so those positions come back as line rows)."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    quiet_records(records, pv=3)
+    plain = import_selfplay([records], "plain", 16, 3, pv_rows=3)
+    filtered = import_selfplay([records], "filtered", 16, 3, pv_rows=3, quiet=True)
+    counts = json.loads((filtered / "provenance.json").read_text(encoding="utf-8"))["counts"]
+    assert json.loads((plain / "provenance.json").read_text(encoding="utf-8"))["counts"]["line_rows"] == 87
+    assert counts["line_rows"] == 60 and counts["line_terminal"] == 0
+    source = np.load(filtered / "source.npy")
+    roots = np.load(filtered / "ply.npy")[source == data.SOURCE_SELFPLAY]
+    assert set(roots.tolist()) == set(range(16, 47)) - (CAPTURE_PLIES | THREAT_PLIES | MATE_PLIES)
+
+
+def test_quiet_margin_measures_the_static_net(tmp_path, monkeypatch):
+    """--quiet-margin M drops a root whose search score differs from --static-net's static
+    evaluation by more than M score units: a margin past every difference drops none, a margin
+    inside them drops some (the fixture net's differences run from 270 to 782 score units),
+    and the provenance names the file."""
+    from nnue.importer import import_selfplay
+    from nnue.paths import sha256
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    quiet_records(records)
+    plain = import_selfplay([records], "plain", 16, 3, quiet=True)
+    wide = import_selfplay([records], "wide", 16, 3, quiet=True, quiet_margin=1e9, static_net=NET)
+    narrow = import_selfplay([records], "narrow", 16, 3, quiet=True, quiet_margin=500.0, static_net=NET)
+    assert np.array_equal(np.load(wide / "ply.npy"), np.load(plain / "ply.npy"))
+    tight = json.loads((narrow / "provenance.json").read_text(encoding="utf-8"))["quiet"]
+    assert json.loads((wide / "provenance.json").read_text(encoding="utf-8"))["quiet"]["skipped"]["margin"] == 0
+    assert 0 < tight["skipped"]["margin"] < 20 and tight["margin"] == 500.0
+    assert tight["static_net"] == {"path": str(NET), "sha256": sha256(NET)}
+    assert set(np.load(narrow / "ply.npy").tolist()) < set(np.load(plain / "ply.npy").tolist())
+
+
+def test_quiet_margin_needs_a_static_net_and_the_flag(tmp_path, monkeypatch):
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    quiet_records(records)
+    with pytest.raises(SystemExit):
+        import_selfplay([records], "a", 16, 3, quiet=True, quiet_margin=5.0)
+    with pytest.raises(SystemExit):
+        import_selfplay([records], "b", 16, 3, quiet_margin=5.0, static_net=NET)
+
+
+def test_quiet_reaches_the_command_line(tmp_path, monkeypatch):
+    from nnue import importer
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    records = tmp_path / "gen"
+    quiet_records(records)
+    importer.main(["selfplay", "--records", str(records), "--out", "cli", "--min-ply", "16", "--quiet"])
+    provenance = json.loads((tmp_path / "data" / "cli" / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["quiet"]["roots_kept"] == 20

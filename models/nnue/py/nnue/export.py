@@ -141,11 +141,13 @@ def read(path: Path) -> dict:
 
 
 def integer_eval(
-    path: Path, board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray, chunk: int = 256
+    path: Path | dict, board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray, chunk: int = 256
 ) -> np.ndarray:
     """Raw values from the file bytes alone, with the crate's integer
-    arithmetic (i32 accumulators, i64 sums, ties to even)."""
-    net = read(path)
+    arithmetic (i32 accumulators, i64 sums, ties to even). `path` is the file
+    or an already-read one (`read`), so a caller evaluating position by
+    position reads the file once."""
+    net = path if isinstance(path, dict) else read(path)
     layout, hidden = LAYOUTS[net["version"]], net["hidden"]
     weights = np.concatenate([net["weights"], np.zeros((1, hidden), dtype=np.int64)])  # the padding row
     board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
