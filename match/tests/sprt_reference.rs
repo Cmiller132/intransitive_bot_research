@@ -68,7 +68,7 @@ fn agrees_with_independent_reference_vectors_and_every_stopping_check() {
             pairs += 1;
             let cell = sprt::SCORES.iter().position(|x| *x == score).unwrap();
             state.counts[cell] += 1;
-            state.check(pairs);
+            state.check(pairs, &sprt::Bounds::default());
             if pairs >= sprt::FIRST_CHECK && pairs.is_multiple_of(sprt::BATCH) {
                 trajectory.push((pairs, state.llr.unwrap()));
             }

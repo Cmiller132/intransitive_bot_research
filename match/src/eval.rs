@@ -25,6 +25,8 @@ type Pair = (GameRecord, GameRecord);
 pub struct Sequential {
     pub journal: PathBuf,
     pub resume: bool,
+    /// Upper hypothesis and pair cap of the test; recorded in the protocol.
+    pub bounds: sprt::Bounds,
     /// Model-agnostic artifact identities supplied and hashed by the CLI.
     pub provenance: serde_json::Value,
 }
@@ -198,11 +200,19 @@ pub fn eval(
         config.reference_sims.is_none() || config.reference_move_ms.is_none(),
         "reference-sims conflicts with reference-move-ms"
     );
-    ensure!(
-        config.sequential.is_none()
-            || (config.pairs == sprt::CAP && config.threads <= sprt::BATCH && records.is_none()),
-        "sequential eval requires 3008 pairs, at most 16 workers and its own journal"
-    );
+    let bounds = config
+        .sequential
+        .as_ref()
+        .map_or_else(sprt::Bounds::default, |sequential| sequential.bounds);
+    if config.sequential.is_some() {
+        bounds.validate()?;
+        ensure!(
+            config.pairs == bounds.cap && config.threads <= sprt::BATCH && records.is_none(),
+            "sequential eval requires {} pairs (its cap), at most {} workers and its own journal",
+            bounds.cap,
+            sprt::BATCH
+        );
+    }
     let mut rng = StdRng::seed_from_u64(config.seed);
     let openings: Vec<Opening> = (0..config.pairs)
         .map(|_| Opening::random(&config.rules, config.opening_plies, &mut rng))
@@ -212,13 +222,13 @@ pub fn eval(
     } else {
         config.threads.max(sprt::BATCH)
     };
-    let mut summary = Summary::new(config.sequential.is_some());
+    let mut summary = Summary::new(config.sequential.as_ref().map(|s| s.bounds));
     let protocol = serde_json::json!({
         "schema": 1,
         "test": {"method":"pentanomial_expectation_mle", "scores":sprt::SCORES,
-            "s0":sprt::S0,"s1":sprt::S1,"alpha":0.05,"beta":0.05,
+            "s0":bounds.s0,"s1":bounds.s1,"alpha":0.05,"beta":0.05,
             "lower_bound":-sprt::BOUND,"upper_bound":sprt::BOUND,
-            "zero_cell":0.001,"batch":sprt::BATCH,"first_check":sprt::FIRST_CHECK,"cap":sprt::CAP},
+            "zero_cell":0.001,"batch":sprt::BATCH,"first_check":sprt::FIRST_CHECK,"cap":bounds.cap},
         "settings": {"capture_clock":config.rules.capture_clock,"pairs":config.pairs,
             "sims":config.sims,"move_ms":config.move_ms,"reference_move_ms":config.reference_move_ms,
             "reference_sims":config.reference_sims,"workers":config.threads,
@@ -424,13 +434,15 @@ struct Summary {
     losses: u32,
     forfeits: u32,
     plies: u64,
+    bounds: sprt::Bounds,
     sequential: Option<sprt::State>,
 }
 
 impl Summary {
-    fn new(sequential: bool) -> Self {
+    fn new(bounds: Option<sprt::Bounds>) -> Self {
         Self {
-            sequential: sequential.then(sprt::State::default),
+            bounds: bounds.unwrap_or_default(),
+            sequential: bounds.map(|_| sprt::State::default()),
             ..Self::default()
         }
     }
@@ -485,13 +497,14 @@ impl Summary {
         }
         self.complete += usize::from(valid);
         self.scores.push(cell as f64 / 2. - 1.);
+        let bounds = self.bounds;
         if let Some(state) = &mut self.sequential {
             if valid {
                 state.counts[cell] += 1;
             } else {
                 state.invalidate("forfeit or censored game in opening pair");
             }
-            state.check(self.scores.len());
+            state.check(self.scores.len(), &bounds);
         }
         Ok(())
     }
@@ -556,18 +569,124 @@ mod tests {
         }
     }
 
-    fn sequential_config(path: &Path) -> EvalConfig {
+    fn bounded_config(path: &Path, bounds: sprt::Bounds) -> EvalConfig {
         EvalConfig {
-            pairs: sprt::CAP,
+            pairs: bounds.cap,
             threads: 2,
             opening_plies: 2,
             sequential: Some(Sequential {
                 journal: path.into(),
                 resume: false,
+                bounds,
                 provenance: serde_json::json!({"test":"fixture"}),
             }),
             ..EvalConfig::default()
         }
+    }
+
+    fn sequential_config(path: &Path) -> EvalConfig {
+        bounded_config(path, sprt::Bounds::default())
+    }
+
+    /// The protocol of a default-bounds sequential test, frozen so that making
+    /// the hypotheses and the cap options cannot silently change a journal.
+    const DEFAULT_PROTOCOL_DIGEST: &str =
+        "45d9f3abcaa9e05abc48355d130e593de465595d70ff8b7130044361488ddf20";
+
+    fn budget_factory() -> impl Fn() -> Result<Box<dyn Player>> + Sync {
+        let calls = Arc::new(AtomicUsize::new(0));
+        move || {
+            Ok(Box::new(BudgetPlayer {
+                calls: Arc::clone(&calls),
+                expected: Clock::Sims(32),
+            }) as Box<dyn Player>)
+        }
+    }
+
+    #[test]
+    fn default_bounds_keep_the_protocol_byte_identical() {
+        let path = TempJournal::new();
+        let config = sequential_config(&path.0);
+        let factory = budget_factory();
+        let report = eval(&config, &factory, &factory, None).unwrap();
+        let sequential = report.sequential.unwrap();
+        assert_eq!(sequential.protocol["test"]["s0"], sprt::S0);
+        assert_eq!(sequential.protocol["test"]["s1"], sprt::S1);
+        assert_eq!(sequential.protocol["test"]["cap"], sprt::CAP);
+        assert_eq!(sequential.protocol_digest, DEFAULT_PROTOCOL_DIGEST);
+    }
+
+    #[test]
+    fn other_bounds_are_recorded_and_refuse_a_default_resume() {
+        let path = TempJournal::new();
+        let capped = sprt::Bounds {
+            s1: 0.515,
+            cap: 128,
+            ..sprt::Bounds::default()
+        };
+        let mut config = bounded_config(&path.0, capped);
+        let factory = budget_factory();
+        let report = eval(&config, &factory, &factory, None).unwrap();
+        assert_eq!(report.pairs, capped.cap);
+        let sequential = report.sequential.unwrap();
+        assert_eq!(sequential.protocol["test"]["s1"], 0.515);
+        assert_eq!(sequential.protocol["test"]["cap"], 128);
+        assert_ne!(sequential.protocol_digest, DEFAULT_PROTOCOL_DIGEST);
+        assert_ne!(sequential.state.stop_reason, Stop::Running);
+        let written = std::fs::read(&path.0).unwrap();
+        // The default bounds cannot take over a journal written with these.
+        let mut default_config = sequential_config(&path.0);
+        default_config.sequential.as_mut().unwrap().resume = true;
+        let error = format!(
+            "{:#}",
+            eval(&default_config, &factory, &factory, None).unwrap_err()
+        );
+        assert!(
+            error.contains("resume bounds differ")
+                && error.contains("s1 0.515 cap 128")
+                && error.contains("s1 0.52 cap 3008"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path.0).unwrap(), written);
+        // The recorded bounds return the journal's verdict without playing.
+        config.sequential.as_mut().unwrap().resume = true;
+        let resumed = eval(
+            &config,
+            &|| panic!("already stopped"),
+            &|| panic!("already stopped"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            resumed.sequential.unwrap().state.stop_reason,
+            sequential.state.stop_reason
+        );
+        assert_eq!(std::fs::read(&path.0).unwrap(), written);
+    }
+
+    #[test]
+    fn invalid_bounds_are_rejected_before_constructing_players() {
+        let path = TempJournal::new();
+        for bounds in [
+            sprt::Bounds {
+                cap: 120,
+                ..sprt::Bounds::default()
+            },
+            sprt::Bounds {
+                s1: 0.5,
+                ..sprt::Bounds::default()
+            },
+        ] {
+            let config = bounded_config(&path.0, bounds);
+            assert!(eval(
+                &config,
+                &|| panic!("invalid bounds must be rejected first"),
+                &|| panic!("invalid bounds must be rejected first"),
+                None
+            )
+            .is_err());
+        }
+        assert!(!path.0.exists());
     }
 
     #[test]
