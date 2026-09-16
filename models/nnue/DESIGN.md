@@ -951,3 +951,18 @@ strength-accepted for code; preregistered, running or judged for an experiment.
   before and after the switch read on the same scales; the cost is about half the games per hour, so rounds run
   about twice as slowly. Round 6 (pool loop_16+17+18) also trains the width retest arm, a from-scratch H1024 at
   200 epochs, which held the round for three hours: a candidate for moving out of the round's critical path.
+  Round 6's gain test ran to its 3,008-pair cap: .511 [.501, .521] at 40k against nnue_7, inconclusive under
+  .50/.52, a null round. A net a few Elo stronger sits in that band for the whole cap, so the user decided
+  2026-09-16 11:05: the gain test's upper hypothesis moves to .515 (+10 Elo), its cap to 1,600 pairs (about
+  80 minutes), and at the cap an inconclusive test promotes when the paired bootstrap lower bound is above
+  .50 (round 6's .501 would have promoted). The bounds are options of the coordinator (`--sprt-target`,
+  `--sprt-cap`; the journal's protocol records them and a resume with other bounds is refused), keys of the
+  runner's match (`sprt_target`, `sprt_cap`) and rule (`cap_lower`), and constants of the loop (STC_TARGET,
+  STC_CAP, STC_CAP_LOWER), whose evaluator is now `set evaluator runs/nnue_bins/format8_sprtcap_master.exe`
+  (switched 11:56 under a stop while round 7 trained). Expected pairs at a true .556 about 300, at .53 about
+  650, at .52 about 1,150. Round 7 (the control round: nine pool sets, 14.6 M rows) started 11:27; the 50k
+  label switch follows it.
+  Search track A (runs/nnue_plan/STRENGTH_PLAN_2026-09-16.md, one mechanism per build, A/B'd at 40k against
+  c4_multipv on the same net on CPUs 0-15 under a private lock): continuation history (c5a) rejected, .499
+  [.483, .516] after 992 pairs; correction history (c5b, against c5a) and the tablebase probe (c5t, timed at
+  250 ms with a four-piece ceiling) under test.
