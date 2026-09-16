@@ -119,13 +119,10 @@ def encode(rows: dict[str, np.ndarray], layout: Layout) -> torch.Tensor:
 
 
 def parameter_groups(model: NNUE) -> list[torch.nn.Parameter] | list[dict]:
-    """The optimizer's groups: everything under the run's weight decay, except
-    the per-bucket head residuals, which get none. A sparse bucket contributes
-    a handful of rows to a batch, and decay between its rare updates would pull
-    its residual back toward the shared head for no reason of the data's (the
-    context residuals are dense by comparison: every position visits one). A
-    model without residuals returns the one flat list a format 6 or 8 run has
-    always been given, so its optimizer state and its resume are unchanged."""
+    """The optimizer's groups: everything under the run's weight decay except the per-bucket head residuals
+    (a sparse bucket sees few rows per batch, and decay between its rare updates would pull its residual back
+    toward the shared head for no reason of the data's). A model without residuals keeps the one flat list a
+    format 6 or 8 run has always been given, so its optimizer state and its resume are unchanged."""
     residual = [getattr(model, name) for name in HEAD_RESIDUALS if getattr(model, name, None) is not None]
     if not residual:
         return list(model.parameters())

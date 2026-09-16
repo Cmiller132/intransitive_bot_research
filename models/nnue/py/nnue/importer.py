@@ -21,12 +21,10 @@ gives every played root of a finished game its outcome as the label (kind 0,
 weight 0.25, outcome recorded), merged over contexts like the windows; it is
 the broad coverage of human play that a teacher can relabel later.
 
-`selfplay --quiet` (off by default) keeps only the roots a static evaluator
-can be asked about: Stockfish's smart-fen-skipping and the margins of arXiv
-2412.17948, adapted to these rules (`quiet_reason`). `selfplay
---tablebase-labels` (also off by default) replaces the search label of every
-row the endgame tablebase can answer with its exact value, through the
-external prober whose contract is `nnue.tablebase`.
+`selfplay --quiet` keeps only the roots a static evaluator can be asked
+about (`quiet_reason`); `selfplay --tablebase-labels` gives every row the
+endgame tablebase can answer its exact value (`nnue.tablebase`). Both are
+off by default.
 """
 
 from __future__ import annotations
@@ -37,7 +35,9 @@ import hashlib
 import io
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -384,12 +384,10 @@ def is_capture(board: np.ndarray, action: int) -> bool | None:
 
 def goal_threat(board: np.ndarray) -> bool:
     """Whether the opponent could enter the mover's home corner (square 0) on
-    its next ply, `engine::tactics::goal_threat` in Python (the crate's
-    predicate is not in the `engine` wheel). Cell codes are the dataset's: 0
-    empty, 1-3 the mover's rock/paper/scissors, 4-6 the opponent's. An enemy
-    on a square beside the corner enters it when the corner is empty or holds
-    a piece of the mover's that its own piece beats; `(enemy - own) % 3 == 1`
-    is that prey relation in these codes."""
+    its next ply: `engine::tactics::goal_threat` on the dataset's cell codes
+    (the predicate is not in the `engine` wheel). An enemy beside the corner
+    enters it when the corner is empty or holds a piece of the mover's that
+    its own piece beats, `(enemy - own) % 3 == 1` in these codes."""
     home = int(board[0])
     if home >= 4:  # the opponent already stands there: not a position to move in
         return False
@@ -432,14 +430,12 @@ def quiet_reason(
     static: StaticEval | None = None,
 ) -> str | None:
     """Why `--quiet` drops this position, or None to keep it: Stockfish's
-    smart-fen-skipping (its best move captures, the mover is under a
-    king-threat - here a goal threat - or the score is a mate score) and the
-    static margin of arXiv 2412.17948 (the search disagrees with a static
-    evaluation by more than `margin` score units). A `best_action` that is not
-    a move on this board is `malformed`: the capture rule cannot be decided,
-    so the position goes rather than pass unexamined. A `score` of None skips
-    the mate rule (a line position whose record carries no score of its own),
-    and only a root is given a margin. The first matching reason is the one
+    smart-fen-skipping (the best move captures, the mover faces a goal threat
+    - this game's check - or the score is a mate score) and the static margin
+    of arXiv 2412.17948 (the search and a static evaluation differ by more
+    than `margin`). A `best_action` that is not a move on this board is
+    `malformed` (the capture rule cannot be decided, so the position goes); a
+    `score` of None skips the mate rule. The first matching reason is the one
     reported, so the reasons partition the positions dropped."""
     if best_action is not None:
         capture = is_capture(board, best_action)
@@ -461,6 +457,33 @@ def quiet_reason(
     return None
 
 
+class Row(NamedTuple):
+    """One labelled position of a self-play import, in the dataset's columns."""
+
+    board: np.ndarray
+    since_capture: int
+    ply: int
+    capture_clock: int
+    target: float
+    kind: int
+    game: int
+    outcome: int
+    outcome_ok: bool
+    weight: float
+    source: int
+
+
+def read_records(directory: Path, manifest: dict) -> Iterator[dict]:
+    """The game records of the published shards a records directory's manifest lists."""
+    for shard in manifest.get("shards", []):
+        with gzip.open(directory / shard["file"], "rt", encoding="utf-8") as lines:
+            for line in lines:
+                if line.strip():
+                    record = json.loads(line)
+                    if "moves" in record and "roots" in record:
+                        yield record
+
+
 def import_selfplay(
     records: list[Path],
     out: str,
@@ -475,86 +498,72 @@ def import_selfplay(
     tablebase_cmd: str = tablebase.DEFAULT_COMMAND,
     tablebase_data: Path | None = None,
 ) -> Path:
-    """The searched roots of `bot selfplay` games (the published shards listed
-    in each directory's manifest) as labelled rows: target = tanh(root_score /
-    score_scale) from the mover's view, the score of the last completed
-    iteration (kind TEACHER) or an engine proof (kind PROOF); the outcome from
-    the mover's view where the game's result is real (not censored) and the
-    root lies after the last random deviation; rows from ply >= min_ply;
-    duplicate (board, clock state) rows dropped, the first kept. Game ids are
-    unique across directories (directory index in the high byte).
+    """The searched roots of `bot selfplay` games (the shards each directory's
+    manifest lists) as labelled rows: target = tanh(root_score / score_scale)
+    from the mover's view (kind TEACHER, or PROOF for an engine proof); the
+    outcome from the mover's view where the game's result is real and the root
+    lies after the last random deviation; rows from ply >= min_ply; duplicate
+    (board, clock state) rows dropped, the first kept. Game ids are unique
+    across directories (the directory index in the high byte).
 
-    With `pv_rows` K > 0 the first K positions along a root's recorded
-    principal variation (`pv`, from `bot selfplay --pv-labels`) become rows
-    too: the root's value sign-flipped per ply from the mover's view, kind
-    TEACHER, source SOURCE_SELFPLAY_LINE, weight `pv_weight`, no outcome. A
-    line stops before a terminal position or an illegal action; a line
-    position that is also a searched root keeps the root's label (root rows
-    come first among duplicates). With K = 0 recorded lines are ignored, so
-    two imports of the same games differ only in the line rows.
+    `pv_rows` K > 0 adds the first K positions along a root's recorded line
+    (`bot selfplay --pv-labels`): the root's value sign-flipped per ply, kind
+    TEACHER, source SOURCE_SELFPLAY_LINE, weight `pv_weight`, no outcome; a
+    line stops before a terminal position or an illegal action, and a root row
+    wins over a line row at the same position.
 
-    `quiet` keeps only the positions a static evaluator can be asked about
-    (`quiet_reason`): one whose recorded best move captures or is not a move
-    on the board at all, one where the mover faces a goal threat, one whose
-    score is in the mate band and, with `quiet_margin` M > 0 and a
-    `static_net` .nnue file, one whose score differs from that file's static
-    evaluation by more than M score units. A dropped root contributes no rows
-    at all, its line rows included. Every line position is judged the same
-    way - by its own board, with the line's next action as its best move and
-    the record's `pv_scores` entry, when it carries one, as its score - so a
-    kept root's line cannot bring a noisy position back as a line row; only
-    the margin is root-only, and a dropped line position does not end the
-    line. The default (`quiet` False) imports every eligible root, and the
-    provenance then holds nothing about the filter.
-
-    `tablebase_labels` relabels every row of the finished set that the endgame
-    tablebase can answer (at most five pieces, not terminal) with its exact
-    value: target +1, 0 or -1 from the mover's view, kind PROOF, weight 1. The
-    values come from the external prober `tablebase_cmd` over `tablebase_data`
-    (`nnue.tablebase` holds the JSONL contract); a row answered null keeps its
-    search label. The prober and its data directory are resolved before the
-    first record is read, and the provenance pins both. The default (False)
-    never runs the prober and leaves the provenance without a tablebase
-    block."""
+    `quiet` drops every root `quiet_reason` names, its line rows included, and
+    judges each line position the same way (by its own board, the line's next
+    action and its `pv_scores` entry when the record carries one; a line is
+    never given a margin). `tablebase_labels` gives every finished row the
+    endgame tablebase can answer its exact value through the external prober
+    (`nnue.tablebase`), resolved and pinned before any record is read. Both
+    default off; the default import's bytes and provenance are then those of
+    the importer before the options existed."""
     import engine
 
     if (quiet_margin or static_net) and not quiet:
         raise SystemExit("--quiet-margin and --static-net need --quiet")
-    if quiet_margin and static_net is None:
-        raise SystemExit("--quiet-margin needs --static-net")
-    if static_net is not None and not quiet_margin:
-        raise SystemExit("--static-net is only read for --quiet-margin; give a margin or drop the net")
+    if bool(quiet_margin) != (static_net is not None):
+        raise SystemExit("--quiet-margin and --static-net go together")
     static = StaticEval(static_net) if static_net else None
-    skipped = dict.fromkeys(QUIET_REASONS, 0)
-    skipped_lines = {reason: 0 for reason in QUIET_REASONS if reason != "margin"}  # a line is never given a margin
-    # The prober and its data directory are resolved before a record is read: a missing
-    # binary or directory must fail now, not after the whole import.
     prober = tablebase.resolve(tablebase_cmd, tablebase_data) if tablebase_labels else None
-
-    fields = (
-        "board",
-        "since_capture",
-        "ply",
-        "capture_clock",
-        "target",
-        "kind",
-        "game",
-        "outcome",
-        "outcome_ok",
-        "weight",
-        "source",
-    )
-    root_rows: dict[str, list] = {k: [] for k in fields}
-    line_rows: dict[str, list] = {k: [] for k in fields}
-
-    def add(sink: dict[str, list], *values) -> None:
-        for k, v in zip(fields, values, strict=True):
-            sink[k].append(v)
-
+    skipped = dict.fromkeys(QUIET_REASONS, 0)
+    skipped_lines = {reason: 0 for reason in QUIET_REASONS if reason != "margin"}
     counts = {"games": 0, "censored": 0, "roots": 0, "labelled": 0, "eligible": 0, "mismatched": 0}
     if pv_rows:
         counts.update(line_rows=0, line_duplicates=0, line_terminal=0, line_illegal=0)
     ends: dict[str, int] = {}
+    roots: list[Row] = []
+    lines: list[Row] = []
+
+    def walk_line(root: dict, board: np.ndarray, since: int, ply: int, target: float, clock: int, game: int) -> None:
+        """The root's recorded line as rows, each judged by `quiet_reason` under --quiet."""
+        line, scores = root["pv"], root.get("pv_scores") or []
+        cells = board.tolist()
+        for step, action in enumerate(line[:pv_rows]):
+            action = int(action)
+            legal = engine.legal_mask(cells)
+            if action >= len(legal) or not legal[action]:
+                counts["line_illegal"] += 1
+                return
+            child, since, ply, terminal = engine.apply(cells, since, ply, action, clock)
+            target = -target
+            if terminal != 0:
+                counts["line_terminal"] += 1
+                return
+            cells = list(child)
+            position = np.array(cells, dtype=np.uint8)
+            if quiet:
+                following = int(line[step + 1]) if step + 1 < len(line) else None
+                score = float(scores[step]) if step < len(scores) else None
+                if reason := quiet_reason(position, following, score, since, clock):
+                    skipped_lines[reason] += 1
+                    continue
+            counts["line_rows"] += 1
+            source, kind = data.SOURCE_SELFPLAY_LINE, data.KIND_TEACHER
+            lines.append(Row(position, since, ply, clock, target, kind, game, 0, False, pv_weight, source))
+
     manifests = []
     for index, directory in enumerate(records):
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
@@ -562,138 +571,70 @@ def import_selfplay(
         manifests.append(
             {
                 "directory": str(directory),
-                "settings": manifest.get("settings"),
-                "model_sha256": manifest.get("model_sha256"),
-                "binary_sha256": manifest.get("binary_sha256"),
-                "rules_sha256": manifest.get("rules_sha256"),
+                **{key: manifest.get(key) for key in ("settings", "model_sha256", "binary_sha256", "rules_sha256")},
                 "score_scale": scale,
                 "shards": len(manifest.get("shards", [])),
             }
         )
-        for shard in manifest.get("shards", []):
-            with gzip.open(directory / shard["file"], "rt", encoding="utf-8") as lines:
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    record = json.loads(line)
-                    if "moves" not in record or "roots" not in record:
-                        continue
-                    counts["games"] += 1
-                    end = record.get("end") or "none"
-                    ends[end] = ends.get(end, 0) + 1
-                    censored = bool(record.get("censored")) or record.get("outcome") is None
-                    counts["censored"] += censored
-                    clock = int(record.get("capture_clock", SITE_CLOCK))
-                    roots, _ = replay(record["moves"], clock)
-                    game = (index << 24) | int(record["game_id"])
-                    # None for a game the generator recorded as interrupted (censored: no outcome, 2026-09-15)
-                    after = int(record.get("outcome_after_ply") or 0)
-                    for root in record["roots"]:
-                        counts["roots"] += 1
-                        kind = SELFPLAY_KINDS.get(root.get("score_kind"))
-                        if kind is None or root.get("root_score") is None:
-                            continue
-                        counts["labelled"] += 1
-                        ply = int(root["ply"])
-                        if ply < min_ply:
-                            continue
-                        if ply >= len(roots) or roots[ply][1] != int(root["since_capture"]) or roots[ply][2] != ply:
-                            counts["mismatched"] += 1
-                            continue
-                        counts["eligible"] += 1
-                        board, since, _, _ = roots[ply]
-                        score = float(root["root_score"])
-                        if quiet:
-                            reason = quiet_reason(
-                                board, root.get("searched_best"), score, since, clock, quiet_margin, static
-                            )
-                            if reason:
-                                skipped[reason] += 1
-                                continue
-                        mover = int(root["mover"])
-                        target = float(np.tanh(score / scale))
-                        if censored:
-                            outcome, outcome_ok = 0, False
-                        else:
-                            result = int(record["outcome"])
-                            outcome, outcome_ok = (result if mover == 0 else -result), ply >= after
-                        source = data.SOURCE_SELFPLAY
-                        add(root_rows, board, since, ply, clock, target, kind, game, outcome, outcome_ok, 1.0, source)
-                        if not pv_rows or not root.get("pv"):
-                            continue
-                        line, line_scores = root["pv"], root.get("pv_scores") or []
-                        b, s, p, sign = board.tolist(), since, ply, 1.0
-                        for step, action in enumerate(line[:pv_rows]):
-                            action = int(action)
-                            legal = engine.legal_mask(b)
-                            if action >= len(legal) or not legal[action]:
-                                counts["line_illegal"] += 1
-                                break
-                            child, s, p, terminal = engine.apply(b, s, p, action, clock)
-                            sign = -sign
-                            if terminal != 0:
-                                counts["line_terminal"] += 1
-                                break
-                            b = list(child)
-                            if quiet:
-                                # This position's own best move is the line's next action, and its own
-                                # score the record's when it carries one; the margin stays with the roots.
-                                reason = quiet_reason(
-                                    np.asarray(b, dtype=np.uint8),
-                                    int(line[step + 1]) if step + 1 < len(line) else None,
-                                    float(line_scores[step]) if step < len(line_scores) else None,
-                                    s,
-                                    clock,
-                                )
-                                if reason:
-                                    skipped_lines[reason] += 1
-                                    continue
-                            counts["line_rows"] += 1
-                            add(
-                                line_rows,
-                                np.array(b, dtype=np.uint8),
-                                s,
-                                p,
-                                clock,
-                                target * sign,
-                                data.KIND_TEACHER,
-                                game,
-                                0,
-                                False,
-                                pv_weight,
-                                data.SOURCE_SELFPLAY_LINE,
-                            )
-    if not root_rows["board"]:
+        for record in read_records(directory, manifest):
+            counts["games"] += 1
+            end = record.get("end") or "none"
+            ends[end] = ends.get(end, 0) + 1
+            censored = bool(record.get("censored")) or record.get("outcome") is None
+            counts["censored"] += censored
+            clock = int(record.get("capture_clock", SITE_CLOCK))
+            positions, _ = replay(record["moves"], clock)
+            game = (index << 24) | int(record["game_id"])
+            after = int(record.get("outcome_after_ply") or 0)  # None for a game recorded as interrupted
+            for root in record["roots"]:
+                counts["roots"] += 1
+                kind = SELFPLAY_KINDS.get(root.get("score_kind"))
+                if kind is None or root.get("root_score") is None:
+                    continue
+                counts["labelled"] += 1
+                ply = int(root["ply"])
+                if ply < min_ply:
+                    continue
+                if ply >= len(positions) or positions[ply][1] != int(root["since_capture"]) or positions[ply][2] != ply:
+                    counts["mismatched"] += 1
+                    continue
+                counts["eligible"] += 1
+                board, since, _, _ = positions[ply]
+                score = float(root["root_score"])
+                if quiet and (
+                    reason := quiet_reason(board, root.get("searched_best"), score, since, clock, quiet_margin, static)
+                ):
+                    skipped[reason] += 1
+                    continue
+                if censored:
+                    outcome, outcome_ok = 0, False
+                else:
+                    result = int(record["outcome"])
+                    outcome, outcome_ok = (result if int(root["mover"]) == 0 else -result), ply >= after
+                target = float(np.tanh(score / scale))
+                source = data.SOURCE_SELFPLAY
+                roots.append(Row(board, since, ply, clock, target, kind, game, outcome, outcome_ok, 1.0, source))
+                if pv_rows and root.get("pv"):
+                    walk_line(root, board, since, ply, target, clock, game)
+    if not roots:
         raise SystemExit(
             "--quiet dropped every labelled root at or after the minimum ply"
             if quiet
             else "no labelled roots at or after the minimum ply"
         )
-    merged = {k: root_rows[k] + line_rows[k] for k in fields}  # roots first: they win among duplicates
-    rows = {
-        "board": np.stack(merged["board"]).astype(np.uint8),
-        "since_capture": np.array(merged["since_capture"], dtype=np.uint16),
-        "ply": np.array(merged["ply"], dtype=np.uint16),
-        "capture_clock": np.array(merged["capture_clock"], dtype=np.uint16),
-        "target": np.clip(np.array(merged["target"], dtype=np.float32), -1, 1),
-        "kind": np.array(merged["kind"], dtype=np.uint8),
-        "game": np.array(merged["game"], dtype=np.uint32),
-        "outcome": np.array(merged["outcome"], dtype=np.int8),
-        "outcome_ok": np.array(merged["outcome_ok"], dtype=np.bool_),
-        "weight": np.array(merged["weight"], dtype=np.float32),
-        "source": np.array(merged["source"], dtype=np.uint8),
-    }
+    columns = Row(*zip(*(roots + lines), strict=True))  # roots first: they win among duplicates
+    rows = {name: np.array(getattr(columns, name), dtype=data.FIELDS[name]) for name in Row._fields}
+    rows["target"] = np.clip(rows["target"], -1, 1)
     _, first = np.unique(context_hash(rows["board"], rows["since_capture"], rows["capture_clock"]), return_index=True)
     first.sort()
     if pv_rows:
         line = rows["source"] == data.SOURCE_SELFPLAY_LINE
         counts["line_duplicates"] = int(line.sum()) - int(line[first].sum())
     rows = {k: v[first] for k, v in rows.items()}
-    n = len(first)
     probed = tablebase.relabel(rows, prober) if tablebase_labels else None
     rows["orbit"] = orbit_hash(rows["board"])
     rows["split"] = assign_splits(rows["game"], rows["orbit"], seed)
-    counts["unique"] = n
+    counts["unique"] = len(first)
     sources = {data.SOURCE_SELFPLAY: "searched roots of bot selfplay games"}
     if pv_rows:
         sources[data.SOURCE_SELFPLAY_LINE] = "principal-variation positions, the root's value sign-flipped per ply"
@@ -717,14 +658,8 @@ def import_selfplay(
                         "skipped": skipped,
                         "roots_kept": counts["eligible"] - sum(skipped.values()),
                         **({"lines_skipped": skipped_lines} if pv_rows else {}),
-                        "rule": "a root is dropped when its searched best move captures, when the mover faces a "
-                        f"goal threat, when |root_score| >= {MATE_BAND} (the mate band), with a margin when "
-                        "|root_score - static| exceeds it, and as malformed when its best move is not a move on "
-                        "the board; the first matching reason counts and a dropped root contributes no rows, its "
-                        "line rows included. Every line position is judged the same way, by its own board, the "
-                        "line's next action as its best move and its recorded pv_scores entry if the record "
-                        "carries one; a line is never given a margin and a dropped line position does not end "
-                        "the line",
+                        "rule": "nnue.importer.quiet_reason on every root and every line position; a dropped root "
+                        "contributes no rows, a line is never given a margin",
                     }
                 }
                 if quiet
@@ -737,7 +672,7 @@ def import_selfplay(
             "seed": seed,
         },
     )
-    print(json.dumps({"event": "written", "dataset": str(target), "rows": n, "counts": counts, "ends": ends}))
+    print(json.dumps({"event": "written", "dataset": str(target), "rows": len(first), "counts": counts, "ends": ends}))
     return target
 
 

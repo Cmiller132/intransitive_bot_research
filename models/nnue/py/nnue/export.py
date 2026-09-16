@@ -229,12 +229,6 @@ def load(path: Path) -> NNUE:
     rows = net["weights"] / QA
     piece = rows[: layout.attack_base]
 
-    def share(values: np.ndarray, shape: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
-        """The shared head and its residuals: `values` is (heads, ...)."""
-        mean = np.asarray(values.mean(axis=0))
-        shared = torch.from_numpy(mean).float().reshape(shape)
-        return shared, torch.from_numpy(values - mean).float().reshape(layout.heads, *shape)
-
     with torch.no_grad():
         if model.context is None:
             model.piece.copy_(torch.from_numpy(piece).float())
@@ -248,24 +242,19 @@ def load(path: Path) -> NNUE:
         if model.goal is not None:
             model.goal.copy_(torch.from_numpy(rows[layout.goal_base :]).float())
         model.bias.copy_(torch.from_numpy(net["bias"] / QA).float())
-        if layout.heads == 1:
-            model.dense.weight.copy_(torch.from_numpy(net["dense"] / QB).float())
-            model.dense.bias.copy_(torch.from_numpy(net["dense_bias"] / (QA * QB)).float())
-            model.output.weight.copy_(torch.from_numpy(net["output"] / QB).float().reshape(1, -1))
-            model.output.bias.copy_(torch.from_numpy(net["output_bias"] / QB).float())
-            model.delta.weight.copy_(torch.from_numpy(net["residual"] / QB).float().reshape(1, -1))
-        else:
-            hidden = net["hidden"]
-            for values, scale, shape, layer, residual in (
-                (net["output"], QB, (1, 2 * hidden), model.output.weight, model.output_head),
-                (net["output_bias"], QB, (1,), model.output.bias, model.output_head_bias),
-                (net["dense"], QB, (DENSE, 2 * hidden), model.dense.weight, model.dense_head),
-                (net["dense_bias"], QA * QB, (DENSE,), model.dense.bias, model.dense_head_bias),
-                (net["residual"], QB, (1, DENSE), model.delta.weight, model.delta_head),
-            ):
-                shared, parts = share(values / scale, shape)
-                layer.copy_(shared)
-                residual.copy_(parts)
+        hidden = net["hidden"]
+        for values, scale, shape, layer, residual in (
+            (net["output"], QB, (1, 2 * hidden), model.output.weight, model.output_head),
+            (net["output_bias"], QB, (1,), model.output.bias, model.output_head_bias),
+            (net["dense"], QB, (DENSE, 2 * hidden), model.dense.weight, model.dense_head),
+            (net["dense_bias"], QA * QB, (DENSE,), model.dense.bias, model.dense_head_bias),
+            (net["residual"], QB, (1, DENSE), model.delta.weight, model.delta_head),
+        ):
+            heads = (values / scale).reshape(layout.heads, *shape)  # a one-head file is its own mean
+            mean = heads.mean(axis=0)
+            layer.copy_(torch.from_numpy(mean).float())
+            if residual is not None:
+                residual.copy_(torch.from_numpy(heads - mean).float())
     return model
 
 

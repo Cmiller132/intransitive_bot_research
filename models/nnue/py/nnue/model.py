@@ -113,8 +113,7 @@ class NNUE(nn.Module):
         parts = (self.output.weight, self.output.bias, self.dense.weight, self.dense.bias, self.delta.weight)
         if self.heads == 1:
             return parts
-        residuals = (self.output_head, self.output_head_bias, self.dense_head, self.dense_head_bias, self.delta_head)
-        return tuple(part + residual[index] for part, residual in zip(parts, residuals, strict=True))
+        return tuple(part + getattr(self, name)[index] for part, name in zip(parts, HEAD_RESIDUALS, strict=True))
 
     def value(self, act: torch.Tensor, index: int, qat: bool) -> torch.Tensor:
         """The raw value of already activated accumulators under one head."""
@@ -156,42 +155,35 @@ class NNUE(nn.Module):
         act = acc.clamp(0, 1).square().reshape(n, 2 * self.hidden)
         if self.heads == 1:
             return self.value(act, 0, qat)
-        bucket = self.buckets(ids)
-        index = [torch.zeros(0, dtype=torch.int64, device=ids.device)]
-        value = [act.new_zeros(0)]
+        bucket, value = self.buckets(ids), act.new_zeros(n)
         for head in range(self.heads):
-            rows_of = torch.nonzero(bucket == head, as_tuple=False).squeeze(-1)
-            if len(rows_of):
-                index.append(rows_of)
-                value.append(self.value(act[rows_of], head, qat))
-        return act.new_zeros(n).index_put((torch.cat(index),), torch.cat(value))
+            rows_of = bucket == head
+            if rows_of.any():
+                value[rows_of] = self.value(act[rows_of], head, qat)
+        return value
 
     @torch.no_grad()
     def constrain(self) -> None:
         """Keep every parameter inside its integer range; a context row's or a
-        head's sum is brought back by moving its residual."""
-        for table in (self.piece, self.attack, self.clock, self.goal):
+        head's served sum is brought back by moving its residual."""
+        for table in (self.piece, self.attack, self.clock, self.goal, self.bias):
             if table is not None:
                 table.clamp_(-8, 8)
         if self.context is not None:
             total = self.piece + self.context
             self.context.add_(total.clamp(-8, 8) - total)
-        self.bias.clamp_(-8, 8)
-        self.output.weight.clamp_(-64, 64)
-        self.output.bias.clamp_(-64, 64)
-        self.dense.weight.clamp_(-127 / QB, 127 / QB)
-        self.dense.bias.clamp_(-64, 64)
-        self.delta.weight.clamp_(-64, 64)
-        for shared, residual, low, high in (
-            (self.output.weight, self.output_head, -64, 64),
-            (self.output.bias, self.output_head_bias, -64, 64),
-            (self.dense.weight, self.dense_head, -127 / QB, 127 / QB),
-            (self.dense.bias, self.dense_head_bias, -64, 64),
-            (self.delta.weight, self.delta_head, -64, 64),
+        for shared, name, limit in (
+            (self.output.weight, "output_head", 64),
+            (self.output.bias, "output_head_bias", 64),
+            (self.dense.weight, "dense_head", 127 / QB),
+            (self.dense.bias, "dense_head_bias", 64),
+            (self.delta.weight, "delta_head", 64),
         ):
+            shared.clamp_(-limit, limit)
+            residual = getattr(self, name)
             if residual is not None:
                 total = shared + residual
-                residual.add_(total.clamp(low, high) - total)
+                residual.add_(total.clamp(-limit, limit) - total)
 
     @torch.no_grad()
     def widen_hidden(self, hidden: int, seed: int = 0, outgoing: float = 0.0) -> NNUE:

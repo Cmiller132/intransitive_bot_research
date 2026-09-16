@@ -1,39 +1,26 @@
 """The endgame-tablebase probe contract, shared by `nnue.importer selfplay
---tablebase-labels` and the prober being built on the Rust side. Both sides
-point at this docstring.
+--tablebase-labels` and the Rust prober (both point at this docstring):
 
     bot tb-probe --data <dir> --input <jsonl> --output <jsonl>
 
-`--data` is the tablebase's data directory, `--input` a file of positions and
-`--output` the file of values to write. The prober reads one JSON object per
-line,
-
-    {"board": [81 integers], "since_capture": n}
-
-and writes one JSON object per input line, in the same order,
-
-    {"value": 1 | 0 | -1 | null}
-
-1 the side to move wins with best play, -1 loses, 0 draws, null the position
-lies outside the tablebase or is unknown. Exactly one answer per position: the
-importer refuses a shorter or longer file, and a value that is none of the
-four. Blank lines in either file are skipped.
+The prober reads one `{"board": [81 integers], "since_capture": n}` per line
+of `--input` and writes one `{"value": 1 | 0 | -1 | null}` per input line to
+`--output`, in the same order: 1 the side to move wins with best play, -1
+loses, 0 draws, null unknown or outside the tablebase. Exactly one answer per
+position (the importer refuses a shorter or longer file, and any other
+value); blank lines are skipped on either side.
 
 `board` is the dataset's cell encoding (`nnue.data` FIELDS["board"], the
-mover's frame), 81 cells rank-major with square = 9 * rank + file: square 0 is
-the mover's own home corner, square 80 the goal the mover advances toward (the
-opponent advances toward square 0). 0 is an empty cell, 1, 2 and 3 the mover's
-rock, paper and scissors, 4, 5 and 6 the opponent's rock, paper and scissors.
-Rock beats scissors, scissors beats paper, paper beats rock, so an enemy cell
-`e` beats a mover's cell `o` exactly when `(e - o) % 3 == 1`. `since_capture`
-is the plies since the last capture (the dataset's column of that name); the
-game's capture clock is the dataset's, not the line's, so a prober that needs
-it takes it from the set's provenance.
+mover's frame): 81 cells rank-major with square = 9 * rank + file, square 0
+the mover's home corner and 80 the goal it advances toward; 0 empty, 1-3 the
+mover's rock, paper and scissors, 4-6 the opponent's, so an enemy cell `e`
+beats a mover's cell `o` exactly when `(e - o) % 3 == 1`. `since_capture` is
+the plies since the last capture; the game's capture clock is the dataset's,
+which a prober that needs it takes from the set's provenance.
 
-The importer probes only the rows it may: at most `MAX_PIECES` pieces on the
-board and a position the mover can still move in. A non-null value becomes the
-row's target (+1, 0 or -1) with kind PROOF and weight 1; a null leaves the
-row's search label alone.
+The importer probes only rows of at most `MAX_PIECES` pieces in which the
+mover can still move. A non-null value becomes the row's target (+1, 0 or -1)
+with kind PROOF and weight 1; null leaves the search label alone.
 """
 
 from __future__ import annotations
@@ -60,16 +47,13 @@ VALUES = (-1, 0, 1)
 
 
 def default_data() -> Path | None:
-    """The data directory of the environment, or None: a tablebase lives
-    wherever its owner built it, so this package holds no path of its own."""
+    """The data directory the environment names, or None: this package holds no path of its own."""
     return Path(os.environ[DATA_ENV]) if os.environ.get(DATA_ENV) else None
 
 
 def split_command(command: str) -> list[str]:
-    """A prober command line as argv. Splitting keeps Windows backslashes (a
-    quoted word may hold spaces), and a leading `bot` is the release binary
-    `paths.bot_binary` resolves, so the default command runs this workspace's
-    build and a test can name its own script instead."""
+    """A prober command line as argv: Windows paths keep their backslashes, quotes are stripped, and a
+    leading `bot` is this workspace's release binary (`paths.bot_binary`)."""
     parts = [p for p in shlex.split(command, posix=False) if p]
     parts = [p[1:-1] if len(p) > 1 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
     if not parts:
@@ -80,10 +64,9 @@ def split_command(command: str) -> list[str]:
 
 
 def data_identity(directory: Path) -> dict:
-    """What the values came from: the hash of the directory's index or
-    manifest when it has one, else a hash over its files' relative names and
-    sizes. These rows become exact labels, so the set that produced them is
-    pinned in the provenance the way a teacher's network is."""
+    """What the values came from: the hash of the directory's index or manifest when it has one, else a hash
+    over its files' relative names and sizes. These rows are exact labels, so their source is pinned in the
+    provenance the way a teacher's network is."""
     for name in INDEX_NAMES:
         index = directory / name
         if index.is_file():
@@ -96,14 +79,10 @@ def data_identity(directory: Path) -> dict:
 
 
 def resolve(command: str = DEFAULT_COMMAND, data_dir: Path | None = None) -> dict:
-    """The prober as argv with its binary and its data directory pinned, or a
-    clear error: the caller resolves before it reads a record, so a missing
-    binary or directory costs nothing. The returned block is the provenance's."""
+    """The prober's argv with its binary and its data directory checked and pinned (the provenance block),
+    so a missing binary or directory fails before a record is read."""
     argv = split_command(command)
-    binary = Path(argv[0]) if Path(argv[0]).is_file() else None
-    if binary is None:
-        found = shutil.which(argv[0])
-        binary = Path(found) if found else None
+    binary = argv[0] if Path(argv[0]).is_file() else shutil.which(argv[0])
     if binary is None:
         raise FileNotFoundError(f"the tablebase prober {argv[0]!r} is neither a file nor on PATH")
     if data_dir is None:
@@ -111,6 +90,7 @@ def resolve(command: str = DEFAULT_COMMAND, data_dir: Path | None = None) -> dic
     directory = Path(data_dir)
     if not directory.is_dir():
         raise NotADirectoryError(f"the tablebase data directory {directory} does not exist")
+    binary = Path(binary)
     return {
         "command": command,
         "argv": argv,
@@ -122,9 +102,8 @@ def resolve(command: str = DEFAULT_COMMAND, data_dir: Path | None = None) -> dic
 
 
 def eligible(board: np.ndarray) -> np.ndarray:
-    """Mask of the rows the tablebase can be asked about: at most `MAX_PIECES`
-    pieces and a position the mover can still move in (a terminal position is
-    not a tablebase entry)."""
+    """Mask of the rows the tablebase can be asked about: at most `MAX_PIECES` pieces and a position the
+    mover can still move in (a terminal position is not a tablebase entry)."""
     import engine
 
     board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
@@ -141,9 +120,8 @@ def probe(
     command: str | list[str] = DEFAULT_COMMAND,
     data_dir: Path | None = None,
 ) -> list[int | None]:
-    """The prober's value for every position, in order (the module's contract).
-    Raises when the prober fails, writes no file, answers a different number of
-    positions or answers something other than 1, 0, -1 or null."""
+    """The prober's value for every position, in order (the module's contract). Raises when the prober
+    fails, writes no file, answers a different number of positions or answers anything but 1, 0, -1 or null."""
     argv = split_command(command) if isinstance(command, str) else list(command)
     board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
     since = np.asarray(since_capture).reshape(-1)
@@ -172,12 +150,9 @@ def probe(
 
 
 def relabel(rows: dict[str, np.ndarray], prober: dict) -> dict:
-    """Give every row the tablebase can answer its exact value: the target +1,
-    0 or -1 from the mover's view, kind PROOF and weight 1. A row answered null
-    keeps its search label, and a set without an eligible row never starts the
-    prober. `prober` is a `resolve` block, so the binary and the data directory
-    are known good and pinned. The columns are relabelled in place; the
-    provenance block is returned."""
+    """Give every row the tablebase can answer its exact value in place (target +1, 0 or -1 from the mover's
+    view, kind PROOF, weight 1); a null answer keeps the search label, and a set without an eligible row never
+    starts the prober. `prober` is a `resolve` block; the returned block is the provenance's."""
     index = np.flatnonzero(eligible(rows["board"]))
     stats = {
         **prober,
@@ -185,8 +160,6 @@ def relabel(rows: dict[str, np.ndarray], prober: dict) -> dict:
         "eligible": int(len(index)),
         "relabelled": {"1": 0, "0": 0, "-1": 0},
         "unknown": 0,
-        "contract": "nnue.tablebase: one {board, since_capture} per line in, one {value} per line out; a "
-        "non-null value is the row's target with kind PROOF and weight 1",
     }
     if not len(index):
         return stats
