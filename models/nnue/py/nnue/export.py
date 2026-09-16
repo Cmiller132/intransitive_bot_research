@@ -140,14 +140,24 @@ def read(path: Path) -> dict:
     return out
 
 
+def pad_rows(net: dict) -> np.ndarray:
+    """The file's feature table with the sentinel id's row of zeros appended,
+    the table `integer_eval` gathers from. A caller evaluating position by
+    position keeps it in the net as `weights_padded` and pays for it once."""
+    return np.concatenate([net["weights"], np.zeros((1, net["hidden"]), dtype=np.int64)])
+
+
 def integer_eval(
-    path: Path, board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray, chunk: int = 256
+    path: Path | dict, board: np.ndarray, since_capture: np.ndarray, clock: np.ndarray, chunk: int = 256
 ) -> np.ndarray:
     """Raw values from the file bytes alone, with the crate's integer
-    arithmetic (i32 accumulators, i64 sums, ties to even)."""
-    net = read(path)
+    arithmetic (i32 accumulators, i64 sums, ties to even). `path` is the file
+    or an already-read one (`read`), so a caller evaluating position by
+    position reads the file once; such a net may also carry the padded table
+    (`pad_rows`) as `weights_padded` and skip the padding too."""
+    net = path if isinstance(path, dict) else read(path)
     layout, hidden = LAYOUTS[net["version"]], net["hidden"]
-    weights = np.concatenate([net["weights"], np.zeros((1, hidden), dtype=np.int64)])  # the padding row
+    weights = net["weights_padded"] if "weights_padded" in net else pad_rows(net)
     board = np.asarray(board, dtype=np.uint8).reshape(-1, 81)
     since = np.asarray(since_capture).reshape(-1)
     clock = np.asarray(clock).reshape(-1)
