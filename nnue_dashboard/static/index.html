@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="token" content="__TOKEN__">
+  <title>NNUE runs</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M2 13 8 3l6 10z' fill='%23172fbe'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Runs">
+      <div class="rail-head">
+        <h1>NNUE runs</h1>
+        <p class="rail-path" id="runs-dir"></p>
+      </div>
+      <div id="control" class="control" aria-live="polite"></div>
+      <nav id="tree" class="tree"></nav>
+      <div class="rail-foot">
+        <button id="theme" class="quiet" type="button">Dark theme</button>
+        <button id="notify" class="quiet" type="button" hidden>Notify me</button>
+        <span id="refreshed"></span>
+      </div>
+    </aside>
+
+    <main id="main" class="main">
+      <p class="loading">Reading the runs directory…</p>
+    </main>
+  </div>
+
+  <dialog id="dialog" class="dialog"></dialog>
+  <dialog id="viewer" class="dialog viewer-dialog"></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="tip" class="tip" role="tooltip" hidden></div>
+  <script src="/static/charts.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

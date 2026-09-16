@@ -3,6 +3,7 @@
 node_modules/
 /dist/
 /runs/
+/runs_*
 /weights/*
 !/weights/README.md
 __pycache__/
@@ -11,3 +12,4 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.intransitive_dashboard.html
