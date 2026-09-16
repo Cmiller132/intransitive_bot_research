@@ -25,7 +25,7 @@ fn rows(input: &str) -> Vec<nnue::diagnostic::Position> {
 fn the_oracle_the_kernels_and_the_incremental_path_agree_on_every_fixture_position() {
     let model = Model::from_bytes(NET).unwrap();
     assert_eq!(
-        (model.features, model.hidden, model.heads()),
+        (model.features, model.hidden, model.heads.len()),
         (13648, 32, 8)
     );
     let mut avx2 = model.clone();
@@ -58,7 +58,10 @@ fn the_oracle_the_kernels_and_the_incremental_path_agree_on_every_fixture_positi
 fn the_converted_format8_network_evaluates_every_shared_position_identically() {
     let eight = Model::from_bytes(V8).unwrap();
     let nine = Model::from_bytes(CONVERTED).unwrap();
-    assert_eq!((nine.features, nine.heads(), nine.slots()), (13648, 8, 44));
+    assert_eq!(
+        (nine.features, nine.heads.len(), nine.slots()),
+        (13648, 8, 44)
+    );
     let mut buckets = BTreeSet::new();
     for row in rows(V8_POSITIONS) {
         let state = row.state().unwrap();

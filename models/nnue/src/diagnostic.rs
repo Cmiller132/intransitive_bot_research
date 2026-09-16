@@ -6,7 +6,7 @@ use anyhow::{bail, ensure, Context, Result};
 use engine::{from_codes, Outcome, Rules, State};
 use serde::Deserialize;
 
-use crate::net::Accumulator;
+use crate::net::{Accumulator, FEATURES, V6_FEATURES, V8_FEATURES, V9_FEATURES};
 use crate::search::{Limits, SearchPool};
 use crate::Model;
 
@@ -92,10 +92,10 @@ pub fn run(
             // The oracle numbers its rows in the model's own layout, except for
             // format 6, whose ids are compared in the format 8 numbering.
             let slots = model.slots();
-            let pad = if model.features == 13648 {
-                13648
+            let pad = if model.features == V9_FEATURES {
+                V9_FEATURES
             } else {
-                13640
+                V8_FEATURES
             };
             for side in 0..2 {
                 ensure!(
@@ -120,16 +120,10 @@ pub fn run(
                     .iter()
                     .copied()
                     .filter(|&id| id != model.features)
-                    .map(|id| {
-                        if model.features == 1004 {
-                            if id < 486 {
-                                id + 486 * contexts[side]
-                            } else {
-                                id + 12636
-                            }
-                        } else {
-                            id
-                        }
+                    .map(|id| match (model.features == V6_FEATURES, id < FEATURES) {
+                        (true, true) => id + FEATURES * contexts[side],
+                        (true, false) => id + V8_FEATURES - V6_FEATURES,
+                        (false, _) => id,
                     })
                     .collect();
                 actual.sort_unstable();
@@ -139,7 +133,7 @@ pub fn run(
                 );
             }
         }
-        let expected = if model.features == 1004 {
+        let expected = if model.features == V6_FEATURES {
             request.raw6.or(request.raw)
         } else {
             request.raw

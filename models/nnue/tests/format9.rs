@@ -68,7 +68,12 @@ fn the_reader_enforces_the_version_nine_header_and_exact_size() {
         assert_eq!(bytes.len(), 1604 + 2 * F9 * hidden + 546 * hidden);
         let model = Model::from_bytes(&bytes).unwrap();
         assert_eq!(
-            (model.features, model.hidden, model.heads(), model.slots()),
+            (
+                model.features,
+                model.hidden,
+                model.heads.len(),
+                model.slots()
+            ),
             (F9, hidden, 8, 44)
         );
         for (at, values) in [
@@ -142,10 +147,8 @@ fn the_head_follows_the_piece_count_and_the_file_uses_it() {
     // The same network with head 0 in every bucket: a value that differs from
     // it can only come from the selected head.
     let mut flat = model.clone();
-    flat.output = model.output[..2 * model.hidden].repeat(8);
-    for head in flat.extra_heads.iter_mut() {
-        head.bias = model.output_bias;
-        head.dense = model.dense.clone();
+    for head in flat.heads.iter_mut() {
+        *head = model.heads[0].clone();
     }
     let mut differed = 0;
     for total in 2..=20usize {
@@ -172,8 +175,11 @@ fn the_head_follows_the_piece_count_and_the_file_uses_it() {
     }
     assert_eq!(differed, 19 - 3);
     // One head per bucket, and each of the eight is reachable.
-    assert_eq!(model.output.len(), 8 * 2 * model.hidden);
-    assert_eq!(model.extra_heads.len(), 7);
+    assert_eq!(model.heads.len(), 8);
+    assert!(model
+        .heads
+        .iter()
+        .all(|head| head.output.len() == 2 * model.hidden));
     let reached: std::collections::BTreeSet<_> = (2..=20).map(|t| BUCKETS[t - 2]).collect();
     assert_eq!(reached, (0..8).collect());
 }
