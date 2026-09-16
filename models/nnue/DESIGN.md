@@ -34,7 +34,7 @@ The evaluator uses two canonical perspectives: the side to move and its opponent
 reflects squares across the anti-diagonal and swaps piece colours. Both halves share one feature
 table and bias. Engine owns board codes, legal transitions and attack predicates.
 
-RPSNNUE1 is little endian and accepts versions 6 and 8 only. The 36-byte header contains the
+RPSNNUE1 is little endian and accepts versions 6, 8 and 9 (version 9 below). The 36-byte header contains the
 eight-byte magic, version, feature count F, hidden width H, QA=255, QB=64, f32 evaluation scale 600
 and head count 1. H is a multiple of 32 in 32..1024. Version 6 requires F=1,004; version 8 requires
 F=13,640. The payload is bias H i16, feature-major weights F*H i16, mover/opponent readout 2H i16,
@@ -70,6 +70,21 @@ repeated table region differ. Both files therefore evaluate the same state ident
 represents a contextual row as shared_base[i]+residual[c,i]; conversion initializes the residual to
 zero. Quantisation and range constraints apply to the served sum, which is flattened at export.
 Factorisation does not add a second inference representation or change the file layout.
+
+Version 9 (2026-09-16, models/nnue/FORMAT9.md; no live run uses it yet) keeps everything above and
+adds eight goal rows and eight output heads. Rows F-8..F-5 name the occupant of the perspective's own
+goal square 80 (empty, opponent rock/paper/scissors) and rows F-4..F-1 the occupant of the opponent's
+goal square 0 (empty, own rock/paper/scissors), so F=13,648 and each perspective has 44 slots; a decided
+board (an own piece on 80, an enemy on 0) reads its corner as empty. The head is chosen by the total
+piece count, bucket = min(7, (pieces-2)*8/19), from the accumulator's exact counts; each head is a
+complete readout, readout bias, dense layer and residual readout with the dense width fixed at 32 (no
+width field), eight heads back to back after the feature table, total length 1604 + 2FH + 546H. The
+goal rows update incrementally like the clock rows; the six training symmetries include the diagonal
+reflection, which fixes both corners, so the two row groups are never exchanged. `convert --to 9`
+repeats the head eight times with zero goal rows and evaluates every position identically; the trainer's
+`--version 9` factorises the heads as a shared head plus zero-started per-bucket residuals (no weight
+decay on the residuals), so `--init` from a version 8 file reproduces it exactly. Version 6 and 8
+files, code paths and training streams are unchanged; `nnue.widen_check` still accepts 6 and 8 only.
 
 ## 3. Accumulator and search
 
