@@ -447,19 +447,53 @@ def fixture_games() -> dict[str, list[str]]:
     return json.loads((FIXTURES / "selfplay_games.json").read_text(encoding="utf-8"))
 
 
+def square_after(action: int) -> int:
+    """The square a canonical action moves to (the test's own copy, so the
+    fixtures build without the importer under test)."""
+    from nnue.games import DIRS
+
+    direction, square = divmod(int(action), 81)
+    return (square // 9 + DIRS[direction][0]) * 9 + square % 9 + DIRS[direction][1]
+
+
+def divergent_line(board: np.ndarray, since: int, ply: int, played: int, length: int) -> list[int]:
+    """A legal line of at most `length` actions from a root that leaves the
+    game after its first move: the move the game played, then the
+    highest-numbered capturing action of every position it reaches, or its
+    highest-numbered action when none captures. Its positions are the game's
+    nowhere, so they survive the importer's duplicate check, and most of them
+    are met by a capture - the line positions --quiet has to judge."""
+    line, cells, s, p = [], list(int(c) for c in board), int(since), int(ply)
+    for step in range(length):
+        legal = [action for action, ok in enumerate(engine.legal_mask(cells)) if ok]
+        if not legal:
+            break
+        if step == 0:
+            action = int(played)
+        else:
+            captures = [action for action in legal if cells[square_after(action)] != 0]
+            action = max(captures or legal)
+        line.append(action)
+        child, s, p, outcome = engine.apply(cells, s, p, action, 200)
+        cells = list(child)
+        if outcome != 0:
+            break
+    return line
+
+
 def searched_record(
     game_id: int, moves: list[str], *, search_mate: tuple[int, ...] = (), proof: tuple[int, ...] = (), pv: int = 0
 ) -> dict:
     """A generator record over `moves` whose every root from ply 8 carries the
     move the game played as its `searched_best` and a score from the mover's
     view; the roots at `search_mate` carry a mate-band search score and those
-    at `proof` an engine proof. With `pv` > 0 a root's line is the game's next
-    `pv` moves."""
+    at `proof` an engine proof. With `pv` > 0 a root records a line of that
+    many actions, the game's move first and off the game after it."""
     from nnue.games import replay
 
     roots_replay, _ = replay(moves)
     roots = []
-    for _board, since, ply, action in roots_replay[OPENING_PLIES:]:
+    for board, since, ply, action in roots_replay[OPENING_PLIES:]:
         mover = ply % 2
         kind, score = "search", (300 - 4 * ply if mover == 0 else -(120 + 4 * ply))
         if ply in search_mate:
@@ -480,7 +514,7 @@ def searched_record(
                 "completed_depth": 6,
                 "nodes": 250000,
                 "elapsed_ns": 1,
-                **({"pv": [int(a) for _, _, _, a in roots_replay[ply : ply + pv]]} if pv else {}),
+                **({"pv": divergent_line(board, since, ply, action, pv)} if pv else {}),
             }
         )
     return {
@@ -505,7 +539,7 @@ def searched_record(
     }
 
 
-def quiet_records(directory, pv: int = 0) -> None:
+def quiet_records(directory: Path, pv: int = 0) -> None:
     """The `quiet` fixture game as one record: capturing best moves, goal
     threats from ply 44, a mate-band search score at ply 25, a proof at 27."""
     write_selfplay_records(
@@ -564,16 +598,18 @@ def tablebase_data(directory: Path, answers: dict[str, int | None]) -> Path:
 
 # --- --quiet (nnue.importer selfplay) -------------------------------------------
 
-# Digests of the default import of the fixtures, taken from the importer before --quiet and
-# --tablebase-labels existed: the live pipeline's hourly import must keep writing these bytes.
+# Digests of the default import of the fixtures, taken from the importer of commit 7683803,
+# before --quiet and --tablebase-labels existed: the live pipeline's hourly import must keep
+# writing these bytes. The pv_rows set holds line rows of its own (the fixture's lines leave
+# the game), so the columns digest covers line-row bytes as well as root-row bytes.
 DEFAULT_DIGESTS = {
     "quiet": {
         "provenance": "79e76ccfbd521c7951ed88af5c907bf61c8b988a6c5c4cc9f9ca6178c7b4c6ab",
         "columns": "076b1c768789276c2810014d4c52fb0c2cddb58d41502ba305b333aa0c114a07",
     },
     "quiet_pv3": {
-        "provenance": "badfdbc34bb3fd1dcff92c18f67746522250895b7723158453821d7ef60de267",
-        "columns": "076b1c768789276c2810014d4c52fb0c2cddb58d41502ba305b333aa0c114a07",
+        "provenance": "c9c475131f340ab97dcad338f557efb29894755d221e531a6ce4204c6f510cf3",
+        "columns": "6be4c7864d2eab11a30508fa5427c4c4ea00c288d158ba6fde637b794992a500",
     },
     "endgame": {
         "provenance": "86decb43b475fed7b1b4f4317353d711fb09a11c7704dc354b7acda9a35a5045",
@@ -591,7 +627,7 @@ def test_selfplay_defaults_are_the_bytes_of_the_importer_before_the_options(tmp_
     monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
     for label, build, kwargs in (
         ("quiet", lambda d: quiet_records(d), {}),
-        ("quiet_pv3", lambda d: quiet_records(d, pv=3), {"pv_rows": 3}),
+        ("quiet_pv3", lambda d: quiet_records(d, pv=4), {"pv_rows": 3}),
         ("endgame", endgame_records, {}),
     ):
         records = tmp_path / f"gen_{label}"
@@ -642,27 +678,107 @@ def test_quiet_drops_capturing_goal_threat_and_mate_roots(tmp_path, monkeypatch)
     # The one proof of the fixture is a mate-band score: --quiet leaves no proof row behind.
     assert not (np.load(filtered / "kind.npy") == data.KIND_PROOF).any()
     quiet = json.loads((filtered / "provenance.json").read_text(encoding="utf-8"))["quiet"]
-    assert quiet["skipped"] == {"capture": 6, "goal_threat": 3, "mate": 2, "margin": 0}
+    assert quiet["skipped"] == {"capture": 6, "goal_threat": 3, "mate": 2, "margin": 0, "malformed": 0}
     assert quiet["roots_kept"] == len(kept) == 20 and quiet["margin"] is None and quiet["static_net"] is None
+    assert "lines_skipped" not in quiet  # no line rows were asked for
 
 
-def test_quiet_drops_a_roots_line_rows_with_it(tmp_path, monkeypatch):
-    """A dropped root contributes no rows at all: with --pv-rows 3 the line rows fall from 87
-    to the 60 of the twenty surviving roots (a kept root's line may still pass through a
-    position whose own root was dropped, so those positions come back as line rows)."""
-    from nnue.importer import import_selfplay
+def test_quiet_judges_line_positions_as_well_as_roots(tmp_path, monkeypatch):
+    """A dropped root contributes no rows at all, and every line position of a kept root is
+    judged by its own board and its own next move, so no noisy position comes back as a line
+    row: the default import holds seven positions the mover faces a goal threat in, the quiet
+    one none. The twenty surviving roots reach sixty line positions, counted as kept or
+    dropped per reason."""
+    from nnue.importer import goal_threat, import_selfplay
 
     monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
     records = tmp_path / "gen"
-    quiet_records(records, pv=3)
+    quiet_records(records, pv=4)
     plain = import_selfplay([records], "plain", 16, 3, pv_rows=3)
     filtered = import_selfplay([records], "filtered", 16, 3, pv_rows=3, quiet=True)
-    counts = json.loads((filtered / "provenance.json").read_text(encoding="utf-8"))["counts"]
-    assert json.loads((plain / "provenance.json").read_text(encoding="utf-8"))["counts"]["line_rows"] == 87
-    assert counts["line_rows"] == 60 and counts["line_terminal"] == 0
+    assert sum(goal_threat(board) for board in np.load(plain / "board.npy")) == 7
+    assert not any(goal_threat(board) for board in np.load(filtered / "board.npy"))
+    provenance = json.loads((filtered / "provenance.json").read_text(encoding="utf-8"))
+    counts, quiet = provenance["counts"], provenance["quiet"]
+    assert json.loads((plain / "provenance.json").read_text(encoding="utf-8"))["counts"]["line_rows"] == 90
+    assert quiet["lines_skipped"] == {"capture": 29, "goal_threat": 2, "mate": 0, "malformed": 0}
+    assert counts["line_rows"] == 29 and counts["line_rows"] + sum(quiet["lines_skipped"].values()) == 20 * 3
     source = np.load(filtered / "source.npy")
     roots = np.load(filtered / "ply.npy")[source == data.SOURCE_SELFPLAY]
     assert set(roots.tolist()) == set(range(16, 47)) - (CAPTURE_PLIES | THREAT_PLIES | MATE_PLIES)
+    assert int((source == data.SOURCE_SELFPLAY_LINE).sum()) == 18  # what is left of the 29 after duplicates
+
+
+def test_quiet_reads_a_recorded_line_score_for_the_mate_rule(tmp_path, monkeypatch):
+    """The mate rule reaches a line position only through a score the record carries: with
+    `pv_scores` in the mate band every line position goes, and without them none does for that
+    reason (the rest of the fixture's lines are dropped by their own captures and threats)."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    record = searched_record(0, fixture_games()["quiet"], pv=4)
+    write_selfplay_records(tmp_path / "plain", [record])
+    for root in record["roots"]:
+        root["pv_scores"] = [MATE - 1] * len(root["pv"])
+    write_selfplay_records(tmp_path / "mated", [record])
+    control = import_selfplay([tmp_path / "plain"], "control", 16, 3, pv_rows=3, quiet=True)
+    target = import_selfplay([tmp_path / "mated"], "mated", 16, 3, pv_rows=3, quiet=True)
+    assert json.loads((control / "provenance.json").read_text(encoding="utf-8"))["quiet"]["lines_skipped"]["mate"] == 0
+    provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+    quiet = provenance["quiet"]
+    assert quiet["lines_skipped"]["mate"] == 31  # what the capture and goal-threat rules left of the 66
+    assert sum(quiet["lines_skipped"].values()) == quiet["roots_kept"] * 3
+    assert provenance["counts"]["line_rows"] == 0
+    assert not (np.load(target / "source.npy") == data.SOURCE_SELFPLAY_LINE).any()
+
+
+def test_quiet_counts_a_best_move_that_is_not_a_move(tmp_path, monkeypatch):
+    """A recorded best move that leaves the board cannot be tested for a capture, so its root
+    is dropped as malformed rather than kept unexamined."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    record = searched_record(0, fixture_games()["quiet"])
+    broken = {19, 20}
+    for root in record["roots"]:
+        if root["ply"] in broken:
+            root["searched_best"] = 0  # direction (-1, -1) from square 0: off the board
+    records = tmp_path / "gen"
+    write_selfplay_records(records, [record])
+    target = import_selfplay([records], "broken", 16, 3, quiet=True)
+    quiet = json.loads((target / "provenance.json").read_text(encoding="utf-8"))["quiet"]
+    # This record carries no mate-band score, so the two malformed roots are the only new drops.
+    assert quiet["skipped"] == {"capture": 6, "goal_threat": 3, "mate": 0, "margin": 0, "malformed": 2}
+    assert quiet["roots_kept"] == 20 and not broken & set(np.load(target / "ply.npy").tolist())
+
+
+def test_the_mate_band_is_the_engines(tmp_path):
+    """MATE_SCORE and MAX_SEARCH_PLY are the crate's constants, not a copy free to drift."""
+    import re
+
+    from nnue import importer
+
+    source = (Path(__file__).resolve().parents[2] / "src" / "search.rs").read_text(encoding="utf-8")
+    mate = int(re.search(r"pub const MATE: i32 = ([\d_]+);", source).group(1).replace("_", ""))
+    max_ply = int(re.search(r"pub const MAX_PLY: usize = ([\d_]+);", source).group(1).replace("_", ""))
+    assert (importer.MATE_SCORE, importer.MAX_SEARCH_PLY) == (mate, max_ply)
+    assert importer.MATE_BAND == mate - max_ply
+
+
+def test_static_eval_is_the_crates_evaluate(tmp_path):
+    """StaticEval.score is `Net::evaluate`: the raw value scaled, rounded half to even and
+    clamped to 28,000. It reads the file once and pads its table once."""
+    from nnue.export import integer_eval
+    from nnue.importer import StaticEval
+
+    board = np.array(list(engine.initial_board()), dtype=np.uint8)
+    static = StaticEval(NET)
+    assert "weights_padded" in static.net  # built in __init__, not per position
+    raw = integer_eval(NET, board.reshape(1, 81), [0], [200])[0]
+    assert integer_eval(static.net, board.reshape(1, 81), [0], [200])[0] == raw  # the same bytes either way
+    assert static.score(board, 0, 200) == float(np.clip(np.rint(static.scale * raw), -28_000, 28_000))
+    static.scale = 1e9
+    assert abs(static.score(board, 0, 200)) == StaticEval.CLAMP
 
 
 def test_quiet_margin_measures_the_static_net(tmp_path, monkeypatch):
@@ -731,6 +847,11 @@ def test_tablebase_labels_give_small_positions_their_exact_value(tmp_path, monke
     probed = json.loads((labelled / "provenance.json").read_text(encoding="utf-8"))["tablebase"]
     assert probed["eligible"] == 6 and probed["relabelled"] == {"1": 1, "0": 1, "-1": 1} and probed["unknown"] == 3
     assert probed["max_pieces"] == 5 and probed["data"] == str(tb) and probed["command"] == stub_command()
+    # These rows are exact labels, so the prober and the set behind them are pinned like a teacher's network.
+    from nnue.paths import sha256
+
+    assert probed["binary"] == str(Path(sys.executable)) and probed["binary_sha256"] == sha256(sys.executable)
+    assert probed["data_identity"]["kind"] == "names and sizes" and probed["data_identity"]["files"] == 1
     # The prober saw the contract of nnue.tablebase: one {board, since_capture} per eligible row, in order.
     seen = [json.loads(line) for line in (tb / "seen.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(seen) == 6 and all(sorted(p) == ["board", "since_capture"] for p in seen)
@@ -740,34 +861,82 @@ def test_tablebase_labels_give_small_positions_their_exact_value(tmp_path, monke
 
 def test_tablebase_labels_without_a_small_position_never_run_the_prober(tmp_path, monkeypatch):
     """The fixture game whose roots never fall below twelve pieces: no eligible row, no
-    subprocess (the command below would fail), and the provenance says so."""
+    subprocess (the stub would have left its `seen.jsonl` behind), the default rows."""
     from nnue.importer import import_selfplay
 
     monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
     records = tmp_path / "gen"
     quiet_records(records)
+    tb = tablebase_data(tmp_path / "tb", {})
     target = import_selfplay(
-        [records], "tb", 16, 3, tablebase_labels=True, tablebase_cmd="no-such-prober", tablebase_data=tmp_path
+        [records], "tb", 16, 3, tablebase_labels=True, tablebase_cmd=stub_command(), tablebase_data=tb
     )
     probed = json.loads((target / "provenance.json").read_text(encoding="utf-8"))["tablebase"]
-    assert probed["eligible"] == 0 and probed["argv"] is None and probed["relabelled"] == {"1": 0, "0": 0, "-1": 0}
+    assert probed["eligible"] == 0 and probed["relabelled"] == {"1": 0, "0": 0, "-1": 0}
+    assert not (tb / "seen.jsonl").exists()
     plain = import_selfplay([records], "plain", 16, 3)
     for name in data.FIELDS:
         assert np.array_equal(np.load(target / f"{name}.npy"), np.load(plain / f"{name}.npy")), name
 
 
-def test_tablebase_probe_refuses_a_bad_answer(tmp_path):
-    """The contract is checked: a value that is not 1, 0, -1 or null, and an answer file with
-    the wrong number of lines, are both errors."""
+def test_tablebase_labels_fail_before_the_records_are_read(tmp_path, monkeypatch):
+    """A prober that is not there, a data directory that is not there and no data directory at
+    all are all errors before the first record is opened (the records below do not exist)."""
+    from nnue.importer import import_selfplay
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    missing = [tmp_path / "no-records"]
+    options = dict(tablebase_labels=True, tablebase_cmd=stub_command())
+    with pytest.raises(FileNotFoundError, match="neither a file nor on PATH"):
+        import_selfplay(missing, "a", 16, 3, tablebase_labels=True, tablebase_cmd="no-such-prober")
+    with pytest.raises(NotADirectoryError):
+        import_selfplay(missing, "b", 16, 3, **options, tablebase_data=tmp_path / "no-data")
+    with pytest.raises(FileNotFoundError, match="NNUE_TABLEBASE_DATA"):
+        import_selfplay(missing, "c", 16, 3, **options)
+
+
+def test_tablebase_probe_refuses_a_prober_that_breaks_the_contract(tmp_path):
+    """A value that is not 1, 0, -1 or null, an answer file short of a line, a prober that
+    fails and a prober that writes no file at all are all errors."""
     from nnue import tablebase
 
     board = np.zeros((2, 81), dtype=np.uint8)
     board[:, 40], board[:, 71] = 1, 4
+    empty = tablebase_data(tmp_path / "empty", {})
     bad = tablebase_data(tmp_path / "bad", {tablebase_key(board[0], 0): 7})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not 1, 0, -1 or null"):
         tablebase.probe(board, [0, 0], stub_command(), bad)
+    with pytest.raises(ValueError, match="answered 1 of 2"):
+        tablebase.probe(board, [0, 0], stub_command("--drop-last"), empty)
+    with pytest.raises(RuntimeError, match="exited with 3"):
+        tablebase.probe(board, [0, 0], stub_command("--exit-code 3"), empty)
+    with pytest.raises(RuntimeError, match="wrote no answers"):
+        tablebase.probe(board, [0, 0], stub_command("--no-output"), empty)
     # The command's subcommand form (`bot tb-probe`) runs, and an unanswered position is null.
-    assert tablebase.probe(board, [0, 0], stub_command("probe"), tablebase_data(tmp_path / "empty", {})) == [None] * 2
+    assert tablebase.probe(board, [0, 0], stub_command("probe"), empty) == [None] * 2
+
+
+def test_tablebase_data_identity_prefers_an_index(tmp_path):
+    """A data directory with an index is pinned by the index's hash, one without by its files'
+    names and sizes."""
+    from nnue import tablebase
+    from nnue.paths import sha256
+
+    indexed = tmp_path / "indexed"
+    (indexed / "pieces").mkdir(parents=True)
+    (indexed / "manifest.json").write_text(json.dumps({"pieces": 5}), encoding="utf-8")
+    (indexed / "pieces" / "rrs.tb").write_bytes(b"\x00\x01")
+    assert tablebase.data_identity(indexed) == {
+        "kind": "manifest.json",
+        "sha256": sha256(indexed / "manifest.json"),
+    }
+    plain = tmp_path / "plain"
+    (plain / "pieces").mkdir(parents=True)
+    (plain / "pieces" / "rrs.tb").write_bytes(b"\x00\x01")
+    identity = tablebase.data_identity(plain)
+    assert identity["kind"] == "names and sizes" and identity["files"] == 1
+    (plain / "pieces" / "rrs.tb").write_bytes(b"\x00\x01\x02")  # a different size is a different set
+    assert tablebase.data_identity(plain)["sha256"] != identity["sha256"]
 
 
 def test_tablebase_labels_reach_the_command_line(tmp_path, monkeypatch):
@@ -795,6 +964,26 @@ def test_tablebase_labels_reach_the_command_line(tmp_path, monkeypatch):
     )
     provenance = json.loads((tmp_path / "data" / "cli" / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["tablebase"]["eligible"] == 6 and provenance["tablebase"]["unknown"] == 6
+
+
+def test_tablebase_labels_need_a_data_directory_at_the_command_line(tmp_path, monkeypatch):
+    """--tablebase-labels without --tablebase-data is an argument error, unless the
+    environment names the directory."""
+    from nnue import importer
+
+    monkeypatch.setattr("nnue.importer.data_dir", lambda name: tmp_path / "data" / name)
+    monkeypatch.delenv("NNUE_TABLEBASE_DATA", raising=False)
+    records = tmp_path / "gen"
+    endgame_records(records)
+    command = ["selfplay", "--records", str(records), "--out", "cli", "--min-ply", "16", "--tablebase-labels"]
+    command += ["--tablebase-cmd", stub_command()]
+    with pytest.raises(SystemExit) as argument_error:
+        importer.main(command)
+    assert argument_error.value.code == 2
+    monkeypatch.setenv("NNUE_TABLEBASE_DATA", str(tablebase_data(tmp_path / "tb", {})))
+    importer.main(command)
+    provenance = json.loads((tmp_path / "data" / "cli" / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["tablebase"]["data"] == str(tmp_path / "tb")
 
 
 def test_quiet_reaches_the_command_line(tmp_path, monkeypatch):

@@ -38,8 +38,11 @@ row's search label alone.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -47,12 +50,19 @@ from pathlib import Path
 import numpy as np
 
 from .data import KIND_PROOF
-from .paths import bot_binary
+from .paths import bot_binary, sha256
 
 MAX_PIECES = 5  # the tablebase holds positions of at most this many pieces
 DEFAULT_COMMAND = "bot tb-probe"
-DEFAULT_DATA = Path("D:/Research/intransitive-tablebase/data")
+DATA_ENV = "NNUE_TABLEBASE_DATA"  # the data directory when no --tablebase-data is given
+INDEX_NAMES = ("manifest.json", "index.json", "index")  # what a tablebase build may name its index
 VALUES = (-1, 0, 1)
+
+
+def default_data() -> Path | None:
+    """The data directory of the environment, or None: a tablebase lives
+    wherever its owner built it, so this package holds no path of its own."""
+    return Path(os.environ[DATA_ENV]) if os.environ.get(DATA_ENV) else None
 
 
 def split_command(command: str) -> list[str]:
@@ -67,6 +77,48 @@ def split_command(command: str) -> list[str]:
     if parts[0].lower() in ("bot", "bot.exe"):
         parts[0] = str(bot_binary())
     return parts
+
+
+def data_identity(directory: Path) -> dict:
+    """What the values came from: the hash of the directory's index or
+    manifest when it has one, else a hash over its files' relative names and
+    sizes. These rows become exact labels, so the set that produced them is
+    pinned in the provenance the way a teacher's network is."""
+    for name in INDEX_NAMES:
+        index = directory / name
+        if index.is_file():
+            return {"kind": name, "sha256": sha256(index)}
+    digest = hashlib.sha256()
+    files = sorted(path for path in directory.rglob("*") if path.is_file())
+    for path in files:
+        digest.update(f"{path.relative_to(directory).as_posix()}\0{path.stat().st_size}\n".encode())
+    return {"kind": "names and sizes", "files": len(files), "sha256": digest.hexdigest()}
+
+
+def resolve(command: str = DEFAULT_COMMAND, data_dir: Path | None = None) -> dict:
+    """The prober as argv with its binary and its data directory pinned, or a
+    clear error: the caller resolves before it reads a record, so a missing
+    binary or directory costs nothing. The returned block is the provenance's."""
+    argv = split_command(command)
+    binary = Path(argv[0]) if Path(argv[0]).is_file() else None
+    if binary is None:
+        found = shutil.which(argv[0])
+        binary = Path(found) if found else None
+    if binary is None:
+        raise FileNotFoundError(f"the tablebase prober {argv[0]!r} is neither a file nor on PATH")
+    if data_dir is None:
+        raise FileNotFoundError(f"the tablebase needs a data directory (--tablebase-data or {DATA_ENV})")
+    directory = Path(data_dir)
+    if not directory.is_dir():
+        raise NotADirectoryError(f"the tablebase data directory {directory} does not exist")
+    return {
+        "command": command,
+        "argv": argv,
+        "binary": str(binary),
+        "binary_sha256": sha256(binary),
+        "data": str(directory),
+        "data_identity": data_identity(directory),
+    }
 
 
 def eligible(board: np.ndarray) -> np.ndarray:
@@ -87,7 +139,7 @@ def probe(
     board: np.ndarray,
     since_capture: np.ndarray,
     command: str | list[str] = DEFAULT_COMMAND,
-    data_dir: Path = DEFAULT_DATA,
+    data_dir: Path | None = None,
 ) -> list[int | None]:
     """The prober's value for every position, in order (the module's contract).
     Raises when the prober fails, writes no file, answers a different number of
@@ -119,17 +171,16 @@ def probe(
     return values
 
 
-def relabel(rows: dict[str, np.ndarray], command: str = DEFAULT_COMMAND, data_dir: Path = DEFAULT_DATA) -> dict:
+def relabel(rows: dict[str, np.ndarray], prober: dict) -> dict:
     """Give every row the tablebase can answer its exact value: the target +1,
     0 or -1 from the mover's view, kind PROOF and weight 1. A row answered null
-    keeps its search label, and a set without an eligible row never runs the
-    prober. The columns are relabelled in place; the provenance block is
-    returned."""
+    keeps its search label, and a set without an eligible row never starts the
+    prober. `prober` is a `resolve` block, so the binary and the data directory
+    are known good and pinned. The columns are relabelled in place; the
+    provenance block is returned."""
     index = np.flatnonzero(eligible(rows["board"]))
     stats = {
-        "command": command,
-        "argv": None,
-        "data": str(data_dir),
+        **prober,
         "max_pieces": MAX_PIECES,
         "eligible": int(len(index)),
         "relabelled": {"1": 0, "0": 0, "-1": 0},
@@ -139,11 +190,8 @@ def relabel(rows: dict[str, np.ndarray], command: str = DEFAULT_COMMAND, data_di
     }
     if not len(index):
         return stats
-    argv = split_command(command)
-    stats["argv"] = argv
-    for row, value in zip(
-        index.tolist(), probe(rows["board"][index], rows["since_capture"][index], argv, data_dir), strict=True
-    ):
+    values = probe(rows["board"][index], rows["since_capture"][index], prober["argv"], prober["data"])
+    for row, value in zip(index.tolist(), values, strict=True):
         if value is None:
             stats["unknown"] += 1
             continue

@@ -56,7 +56,7 @@ MATE_SCORE, MAX_SEARCH_PLY = 30_000, 120
 MATE_BAND = MATE_SCORE - MAX_SEARCH_PLY
 # The squares beside the mover's own goal corner (engine::tactics HOME_NEIGHBOURS).
 HOME_NEIGHBOURS = (1, 9, 10)
-QUIET_REASONS = ("capture", "goal_threat", "mate", "margin")
+QUIET_REASONS = ("capture", "goal_threat", "mate", "margin", "malformed")
 
 
 def sha256_bytes(raw: bytes) -> str:
@@ -374,11 +374,12 @@ def destination(action: int) -> int | None:
     return rank * 9 + file if 0 <= rank < 9 and 0 <= file < 9 else None
 
 
-def is_capture(board: np.ndarray, action: int) -> bool:
-    """Whether the mover's action lands on an occupied square. Only an enemy
-    piece it beats may stand there, so an occupied destination is a capture."""
+def is_capture(board: np.ndarray, action: int) -> bool | None:
+    """Whether the mover's action lands on an occupied square; None when the
+    action is not a move on this board. Only an enemy piece it beats may stand
+    on the destination, so an occupied destination is a capture."""
     to = destination(action)
-    return to is not None and int(board[to]) != 0
+    return None if to is None else int(board[to]) != 0
 
 
 def goal_threat(board: np.ndarray) -> bool:
@@ -397,14 +398,20 @@ def goal_threat(board: np.ndarray) -> bool:
 
 class StaticEval:
     """Static scores of an exported .nnue file in the search's score units (the
-    units of a record's `root_score`): the file is read once and every position
-    evaluated with the exporter's integer arithmetic over its bytes."""
+    units of a record's `root_score`): the file is read once, its padded
+    feature table built once, and every position evaluated with the exporter's
+    integer arithmetic over its bytes. `score` is the crate's `Net::evaluate`:
+    the raw value scaled, rounded half to even and clamped to the band the
+    search keeps for evaluations (models/nnue/src/net.rs)."""
+
+    CLAMP = 28_000  # Net::evaluate clamps there, below the mate band
 
     def __init__(self, path: Path):
-        from .export import read
+        from .export import pad_rows, read
 
         self.path = Path(path)
         self.net = read(self.path)
+        self.net["weights_padded"] = pad_rows(self.net)
         self.scale = float(self.net["eval_scale"])
         self.sha256 = sha256(self.path)
 
@@ -412,31 +419,44 @@ class StaticEval:
         from .export import integer_eval
 
         raw = integer_eval(self.net, np.asarray(board).reshape(1, 81), [int(since_capture)], [int(clock)])
-        return self.scale * float(raw[0])
+        return float(np.clip(np.rint(self.scale * raw[0]), -self.CLAMP, self.CLAMP))
 
 
 def quiet_reason(
     board: np.ndarray,
     best_action: int | None,
-    root_score: float,
+    score: float | None,
     since_capture: int,
     clock: int,
     margin: float = 0.0,
     static: StaticEval | None = None,
 ) -> str | None:
-    """Why `--quiet` drops this root, or None to keep it: Stockfish's
+    """Why `--quiet` drops this position, or None to keep it: Stockfish's
     smart-fen-skipping (its best move captures, the mover is under a
     king-threat - here a goal threat - or the score is a mate score) and the
     static margin of arXiv 2412.17948 (the search disagrees with a static
-    evaluation by more than `margin` score units). The first matching reason
-    is the one reported, so the reasons partition the roots dropped."""
-    if best_action is not None and is_capture(board, best_action):
-        return "capture"
+    evaluation by more than `margin` score units). A `best_action` that is not
+    a move on this board is `malformed`: the capture rule cannot be decided,
+    so the position goes rather than pass unexamined. A `score` of None skips
+    the mate rule (a line position whose record carries no score of its own),
+    and only a root is given a margin. The first matching reason is the one
+    reported, so the reasons partition the positions dropped."""
+    if best_action is not None:
+        capture = is_capture(board, best_action)
+        if capture is None:
+            return "malformed"
+        if capture:
+            return "capture"
     if goal_threat(board):
         return "goal_threat"
-    if abs(root_score) >= MATE_BAND:
+    if score is not None and abs(score) >= MATE_BAND:
         return "mate"
-    if margin > 0 and static is not None and abs(root_score - static.score(board, since_capture, clock)) > margin:
+    if (
+        margin > 0
+        and static is not None
+        and score is not None
+        and abs(score - static.score(board, since_capture, clock)) > margin
+    ):
         return "margin"
     return None
 
@@ -453,7 +473,7 @@ def import_selfplay(
     static_net: Path | None = None,
     tablebase_labels: bool = False,
     tablebase_cmd: str = tablebase.DEFAULT_COMMAND,
-    tablebase_data: Path = tablebase.DEFAULT_DATA,
+    tablebase_data: Path | None = None,
 ) -> Path:
     """The searched roots of `bot selfplay` games (the published shards listed
     in each directory's manifest) as labelled rows: target = tanh(root_score /
@@ -473,14 +493,18 @@ def import_selfplay(
     come first among duplicates). With K = 0 recorded lines are ignored, so
     two imports of the same games differ only in the line rows.
 
-    `quiet` keeps only the roots a static evaluator can be asked about
-    (`quiet_reason`): a root whose recorded best move captures, one where the
-    mover faces a goal threat, one whose score is in the mate band and, with
-    `quiet_margin` M > 0 and a `static_net` .nnue file, one whose score
-    differs from that file's static evaluation by more than M score units. A
-    dropped root contributes no rows at all, its line rows included; a kept
-    root's line may still pass through a position whose own root was dropped.
-    The default (`quiet` False) imports every eligible root, and the
+    `quiet` keeps only the positions a static evaluator can be asked about
+    (`quiet_reason`): one whose recorded best move captures or is not a move
+    on the board at all, one where the mover faces a goal threat, one whose
+    score is in the mate band and, with `quiet_margin` M > 0 and a
+    `static_net` .nnue file, one whose score differs from that file's static
+    evaluation by more than M score units. A dropped root contributes no rows
+    at all, its line rows included. Every line position is judged the same
+    way - by its own board, with the line's next action as its best move and
+    the record's `pv_scores` entry, when it carries one, as its score - so a
+    kept root's line cannot bring a noisy position back as a line row; only
+    the margin is root-only, and a dropped line position does not end the
+    line. The default (`quiet` False) imports every eligible root, and the
     provenance then holds nothing about the filter.
 
     `tablebase_labels` relabels every row of the finished set that the endgame
@@ -488,16 +512,24 @@ def import_selfplay(
     value: target +1, 0 or -1 from the mover's view, kind PROOF, weight 1. The
     values come from the external prober `tablebase_cmd` over `tablebase_data`
     (`nnue.tablebase` holds the JSONL contract); a row answered null keeps its
-    search label. The default (False) never runs the prober and leaves the
-    provenance without a tablebase block."""
+    search label. The prober and its data directory are resolved before the
+    first record is read, and the provenance pins both. The default (False)
+    never runs the prober and leaves the provenance without a tablebase
+    block."""
     import engine
 
     if (quiet_margin or static_net) and not quiet:
         raise SystemExit("--quiet-margin and --static-net need --quiet")
     if quiet_margin and static_net is None:
         raise SystemExit("--quiet-margin needs --static-net")
+    if static_net is not None and not quiet_margin:
+        raise SystemExit("--static-net is only read for --quiet-margin; give a margin or drop the net")
     static = StaticEval(static_net) if static_net else None
     skipped = dict.fromkeys(QUIET_REASONS, 0)
+    skipped_lines = {reason: 0 for reason in QUIET_REASONS if reason != "margin"}  # a line is never given a margin
+    # The prober and its data directory are resolved before a record is read: a missing
+    # binary or directory must fail now, not after the whole import.
+    prober = tablebase.resolve(tablebase_cmd, tablebase_data) if tablebase_labels else None
 
     fields = (
         "board",
@@ -589,8 +621,9 @@ def import_selfplay(
                         add(root_rows, board, since, ply, clock, target, kind, game, outcome, outcome_ok, 1.0, source)
                         if not pv_rows or not root.get("pv"):
                             continue
+                        line, line_scores = root["pv"], root.get("pv_scores") or []
                         b, s, p, sign = board.tolist(), since, ply, 1.0
-                        for action in root["pv"][:pv_rows]:
+                        for step, action in enumerate(line[:pv_rows]):
                             action = int(action)
                             legal = engine.legal_mask(b)
                             if action >= len(legal) or not legal[action]:
@@ -602,6 +635,19 @@ def import_selfplay(
                                 counts["line_terminal"] += 1
                                 break
                             b = list(child)
+                            if quiet:
+                                # This position's own best move is the line's next action, and its own
+                                # score the record's when it carries one; the margin stays with the roots.
+                                reason = quiet_reason(
+                                    np.asarray(b, dtype=np.uint8),
+                                    int(line[step + 1]) if step + 1 < len(line) else None,
+                                    float(line_scores[step]) if step < len(line_scores) else None,
+                                    s,
+                                    clock,
+                                )
+                                if reason:
+                                    skipped_lines[reason] += 1
+                                    continue
                             counts["line_rows"] += 1
                             add(
                                 line_rows,
@@ -644,7 +690,7 @@ def import_selfplay(
         counts["line_duplicates"] = int(line.sum()) - int(line[first].sum())
     rows = {k: v[first] for k, v in rows.items()}
     n = len(first)
-    probed = tablebase.relabel(rows, tablebase_cmd, tablebase_data) if tablebase_labels else None
+    probed = tablebase.relabel(rows, prober) if tablebase_labels else None
     rows["orbit"] = orbit_hash(rows["board"])
     rows["split"] = assign_splits(rows["game"], rows["orbit"], seed)
     counts["unique"] = n
@@ -670,10 +716,15 @@ def import_selfplay(
                         "static_net": {"path": str(static.path), "sha256": static.sha256} if static else None,
                         "skipped": skipped,
                         "roots_kept": counts["eligible"] - sum(skipped.values()),
+                        **({"lines_skipped": skipped_lines} if pv_rows else {}),
                         "rule": "a root is dropped when its searched best move captures, when the mover faces a "
-                        f"goal threat, when |root_score| >= {MATE_BAND} (the mate band) or, with a margin, when "
-                        "|root_score - static| exceeds it; the first matching reason counts and a dropped root "
-                        "contributes no rows, its line rows included",
+                        f"goal threat, when |root_score| >= {MATE_BAND} (the mate band), with a margin when "
+                        "|root_score - static| exceeds it, and as malformed when its best move is not a move on "
+                        "the board; the first matching reason counts and a dropped root contributes no rows, its "
+                        "line rows included. Every line position is judged the same way, by its own board, the "
+                        "line's next action as its best move and its recorded pv_scores entry if the record "
+                        "carries one; a line is never given a margin and a dropped line position does not end "
+                        "the line",
                     }
                 }
                 if quiet
@@ -737,10 +788,12 @@ def main(argv: list[str] | None = None) -> None:
     selfplay.add_argument(
         "--tablebase-data",
         type=Path,
-        default=tablebase.DEFAULT_DATA,
-        help=f"the prober's data directory (default {tablebase.DEFAULT_DATA})",
+        default=tablebase.default_data(),
+        help=f"the prober's data directory; required by --tablebase-labels, or set {tablebase.DATA_ENV}",
     )
     args = parser.parse_args(argv)
+    if getattr(args, "tablebase_labels", False) and args.tablebase_data is None:
+        selfplay.error(f"--tablebase-labels needs --tablebase-data (or the environment variable {tablebase.DATA_ENV})")
     if args.command == "conv":
         span = tuple(int(x) for x in args.iterations.split("-")) if args.iterations else None
         import_conv(args.run, args.out, span, args.children, args.seed)
