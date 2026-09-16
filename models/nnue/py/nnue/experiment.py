@@ -104,7 +104,7 @@ from . import export, paths
 from .model import NNUE
 from .paths import data_dir, run_dir, sha256
 
-LOCK = "runs/nnue_plan/compute_lock"
+LOCK = os.environ.get("NNUE_COMPUTE_LOCK", "runs/nnue_plan/compute_lock")  # a private lock for A/Bs run beside the loop
 TERMINAL = ("accept", "reject", "inconclusive", "invalid")  # the stop reasons of `bot eval --sprt`
 FIXED_RULES = ("lower_bound_above", "score_at_least")
 SEQUENTIAL_RULES = ("sprt_accept", "sprt_reject")
