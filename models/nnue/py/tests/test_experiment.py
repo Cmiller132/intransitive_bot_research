@@ -508,6 +508,67 @@ def test_sprt_reject_is_the_swapped_seat_non_regression_gate(workspace, monkeypa
         experiment.validate({**spec, "matches": [{**spec["matches"][0], "sprt": False, "pairs": 2}]})
 
 
+def test_sprt_bounds_reach_the_coordinator_and_the_cap_rule_promotes_a_noticeable_gain(workspace, monkeypatch):
+    """A sequential match's sprt_target and sprt_cap become --sprt-target/--sprt-cap (on the run and on C1's
+    replay alike) and are recorded; an sprt_accept rule with cap_lower is met by the test's own accept or by an
+    inconclusive stop at the cap whose paired lower bound is above cap_lower, never by a low one."""
+    root = workspace
+    cases = (  # the scripted coordinator reports the paired lower bound .475 whatever the counts
+        ("accept", 0.50, True),
+        ("inconclusive", 0.45, True),  # .475 is above cap_lower
+        ("inconclusive", 0.50, False),  # and below this one
+        ("reject", 0.45, False),
+    )
+    counts = [20, 40, 60, 30, 10]
+    for i, (stop, cap_lower, met) in enumerate(cases):
+        directory = root / "runs" / "nnue_gauntlets" / f"gain_{i}"
+        directory.mkdir(parents=True)
+        spec = manifest(root)
+        spec["name"] = f"gain_{i}"
+        spec["arms"] = []
+        spec["matches"] = [
+            {
+                "tag": "gain",
+                "candidate": "patch.exe",
+                "reference": "base.exe",
+                "sims": 16,
+                "sprt": True,
+                "sprt_target": 0.515,
+                "sprt_cap": 1600,
+                "seed": 7,
+            }
+        ]
+        spec["rules"] = [{"name": "gain", "type": "sprt_accept", "matches": ["gain"], "cap_lower": cap_lower}]
+        spec["identities"] = experiment.identities(spec)
+        file = directory / "experiment.json"
+        file.write_text(json.dumps(spec), encoding="utf-8")
+        calls: list = []
+        monkeypatch.setattr(experiment, "launch", scripted_launch(calls, {"gain": (counts, stop)}))
+        monkeypatch.setattr(experiment, "nice", lambda mask: None)
+        assert experiment.main(["run", str(file)]) == 0
+        for call in calls:  # the run and C1's replay
+            assert call[call.index("--sprt-target") + 1] == "0.515" and call[call.index("--sprt-cap") + 1] == "1600"
+        verdict = json.loads((directory / "verdict.json").read_text(encoding="utf-8"))
+        gain = verdict["matches"][0]
+        assert gain["valid"] and gain["stop_reason"] == stop
+        assert gain["sprt_target"] == 0.515 and gain["sprt_cap"] == 1600
+        assert gain["interval"][0] == 0.475
+        rule = verdict["rules"][0]
+        assert rule["complete"] and rule["met"] is met, (stop, cap_lower, rule)
+    plain = {**spec["matches"][0]}
+    del plain["sprt_target"], plain["sprt_cap"]
+    for bad in (
+        {"matches": [{**plain, "sprt": False, "pairs": 2, "sprt_target": 0.515}]},
+        {"matches": [{**plain, "sprt_target": 0.5}]},
+        {"matches": [{**plain, "sprt_cap": 100}]},
+        {"rules": [{"name": "gain", "type": "sprt_reject", "matches": ["gain"], "cap_lower": 0.5}]},
+        {"rules": [{"name": "gain", "type": "sprt_accept", "matches": ["gain"], "cap_lower": 1.0}]},
+    ):
+        with pytest.raises(ValueError):
+            experiment.validate({**spec, **bad})
+    experiment.validate({**spec, "rules": [{"name": "gain", "type": "sprt_accept", "matches": ["gain"]}]})
+
+
 def test_a_cuda_arm_is_given_the_gpu_and_a_cpu_run_is_not():
     cpu = {"arms": [{"run": "a", "train": {"config": {"device": "cpu"}}}, {"run": "b"}]}
     assert experiment.visible_devices(cpu) == "-1" and experiment.visible_devices({}) == "-1"

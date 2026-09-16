@@ -51,7 +51,8 @@ build and a network against another pair; pinned like every input). A match's
 budget is a wall clock (`move_ms`) or a fixed simulation count (`sims`; an NNUE
 player searches 2,500 nodes per simulation, so 80 is the arena seat's 200k
 nodes). A match with
-`"sprt": true` is the sequential test of `bot eval --sprt` (journal
+`"sprt": true` is the sequential test of `bot eval --sprt` (`sprt_target` and
+`sprt_cap` pass its upper hypothesis and pair cap; defaults .52 and 3,008; journal
 `<tag>.jsonl`, resumed when it exists, stopped by its own rule, streamed so
 that `<tag>.timing.json` records each invocation's pairs, wall time and the
 batch-barrier idle share); every other match plays `pairs` openings and
@@ -63,7 +64,8 @@ sidecar carries the arm's config, the epoch its source names and the file's
 hash. Rule types: `lower_bound_above` and
 `score_at_least` (fixed-count matches only: the paired bootstrap lower
 bound above, or the score at least, the threshold in every named match) and
-`sprt_accept` (sequential matches only: every named test accepted) and
+`sprt_accept` (sequential matches only: every named test accepted, or, with
+`cap_lower`, inconclusive at the cap with the lower bound above it) and
 `sprt_reject` (every named test rejected: with the incumbent in the candidate
 seat this reads "the newcomer is not two points worse", the non-regression
 gate; inconclusive is neither). The
@@ -422,6 +424,10 @@ def command_of(experiment: dict, directory: Path, match: dict) -> list[str]:
     if match.get("sprt"):
         journal = directory / f"{match['tag']}.jsonl"
         command += ["--sprt", str(journal), *(["--resume"] if journal.is_file() else []), "--stream"]
+        if "sprt_target" in match:
+            command += ["--sprt-target", str(match["sprt_target"])]
+        if "sprt_cap" in match:
+            command += ["--sprt-cap", str(match["sprt_cap"])]
     else:
         command += ["--pairs", str(match["pairs"]), "--records", str(directory / f"{match['tag']}.games.jsonl")]
     return command
@@ -1077,6 +1083,7 @@ def summarise(match: dict, report: dict | None, directory: Path, experiment: dic
             protocol=sequential.get("protocol"),
             error=sequential.get("error"),
             interval_descriptive_only=sequential.get("intervals_descriptive_only", True),
+            **{k: match[k] for k in ("sprt_target", "sprt_cap") if k in match},
         )
     return out
 
@@ -1092,6 +1099,12 @@ def validate(experiment: dict) -> None:
     for tag, match in matches.items():
         if bool(match.get("sprt")) == ("pairs" in match):
             raise ValueError(f"{tag}: a sequential match has no pair count, a fixed-count match needs one")
+        if ("sprt_target" in match or "sprt_cap" in match) and not match.get("sprt"):
+            raise ValueError(f"{tag}: sprt_target and sprt_cap belong to a sequential match")
+        if "sprt_target" in match and not 0.5 < float(match["sprt_target"]) < 1:
+            raise ValueError(f"{tag}: sprt_target must lie in (0.5, 1)")
+        if "sprt_cap" in match and (int(match["sprt_cap"]) < 128 or int(match["sprt_cap"]) % 16):
+            raise ValueError(f"{tag}: sprt_cap must be a multiple of 16 pairs, at least 128")
         if ("move_ms" in match) == ("sims" in match):
             raise ValueError(f"{tag}: a match has a clock (move_ms) or a simulation count (sims), one of the two")
         for role in ("candidate", "reference"):
@@ -1101,6 +1114,8 @@ def validate(experiment: dict) -> None:
         sequential = rule["type"] in SEQUENTIAL_RULES
         if not sequential and rule["type"] not in FIXED_RULES:
             raise ValueError(f"unknown rule type {rule['type']!r}")
+        if "cap_lower" in rule and (rule["type"] != "sprt_accept" or not 0 <= float(rule["cap_lower"]) < 1):
+            raise ValueError(f"rule {rule['name']}: cap_lower belongs to sprt_accept and lies in [0, 1)")
         for tag in rule["matches"]:
             if tag not in matches:
                 raise ValueError(f"rule {rule['name']} names no match {tag!r}")
@@ -1163,7 +1178,18 @@ def verdict(experiment: dict, directory: Path, replays: bool = True) -> dict:
         elif rule["type"] == "score_at_least":
             outcome = all(m["score"] >= rule["threshold"] for m in named)
         elif rule["type"] == "sprt_accept":
-            outcome = all(m.get("stop_reason") == "accept" for m in named)
+            # accepted by the test itself, or, when the rule names a cap_lower, inconclusive at the cap with the
+            # paired bootstrap lower bound above it (2026-09-16: the loop promotes a net that is noticeably
+            # stronger once the cap has been paid for)
+            outcome = all(
+                m.get("stop_reason") == "accept"
+                or (
+                    "cap_lower" in rule
+                    and m.get("stop_reason") == "inconclusive"
+                    and m["interval"][0] > rule["cap_lower"]
+                )
+                for m in named
+            )
         else:  # sprt_reject: the test rejected the candidate's gain (a non-regression reading with the seats swapped)
             outcome = all(m.get("stop_reason") == "reject" for m in named)
         rules.append({**rule, "complete": complete, "met": outcome})
