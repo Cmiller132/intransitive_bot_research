@@ -93,6 +93,13 @@ pub struct DenseHead {
     pub output: Vec<i16>,
 }
 
+/// An output head beyond the first; version 9 carries seven of them.
+#[derive(Clone, Debug)]
+pub struct Head {
+    pub bias: i32,
+    pub dense: DenseHead,
+}
+
 #[derive(Clone, Debug)]
 pub struct Model {
     pub features: usize,
@@ -104,8 +111,11 @@ pub struct Model {
     pub weights: Vec<i16>,
     /// One readout of 2H per head, head-major.
     pub output: Vec<i16>,
-    pub output_bias: Vec<i32>,
-    pub dense: Vec<DenseHead>,
+    /// The first head's readout bias and dense layer stay inline, so a one-head
+    /// network reads them exactly as before; version 9's other seven follow.
+    pub output_bias: i32,
+    pub dense: DenseHead,
+    pub extra_heads: Box<[Head]>,
     avx2: bool,
     vnni: bool,
 }
@@ -221,8 +231,7 @@ impl Model {
                 .collect::<Vec<_>>()
         };
         let mut output = Vec::with_capacity(buckets * 2 * hidden);
-        let mut output_bias = Vec::with_capacity(buckets);
-        let mut dense = Vec::with_capacity(buckets);
+        let mut heads = Vec::with_capacity(buckets);
         for bucket in 0..buckets {
             let at = features_start + 2 * features * hidden + bucket * head;
             let bias_start = at + 4 * hidden;
@@ -233,16 +242,20 @@ impl Model {
                 return Err("unsupported dense width".into());
             }
             output.extend(i16s(at, 2 * hidden));
-            output_bias.push(i32s(bias_start, 1)[0]);
-            dense.push(DenseHead {
-                weights: bytes[dense_start..dense_bias_start]
-                    .iter()
-                    .map(|&b| b as i8)
-                    .collect(),
-                bias: i32s(dense_bias_start, 32),
-                output: i16s(residual_start, 32),
+            heads.push(Head {
+                bias: i32s(bias_start, 1)[0],
+                dense: DenseHead {
+                    weights: bytes[dense_start..dense_bias_start]
+                        .iter()
+                        .map(|&b| b as i8)
+                        .collect(),
+                    bias: i32s(dense_bias_start, 32),
+                    output: i16s(residual_start, 32),
+                },
             });
         }
+        let mut heads = heads.into_iter();
+        let first = heads.next().expect("every version has at least one head");
         Ok(Self {
             features,
             hidden,
@@ -252,8 +265,9 @@ impl Model {
             bias: i16s(36, hidden),
             weights: i16s(features_start, features * hidden),
             output,
-            output_bias,
-            dense,
+            output_bias: first.bias,
+            dense: first.dense,
+            extra_heads: heads.collect(),
             avx2: has_avx2(),
             vnni: has_vnni(),
         })
@@ -261,13 +275,13 @@ impl Model {
 
     /// Heads in the file: one before version 9, eight from it on.
     pub fn heads(&self) -> usize {
-        self.output_bias.len()
+        1 + self.extra_heads.len()
     }
 
     /// The output bucket of an accumulator: the head is chosen by the pieces on
     /// the board, `min(7, (total - 2) * 8 / 19)` over the totals 2..=20.
     pub fn bucket(&self, acc: &Accumulator) -> usize {
-        if self.heads() == 1 {
+        if self.extra_heads.is_empty() {
             return 0;
         }
         let total: usize = acc
@@ -278,6 +292,24 @@ impl Model {
             .map(|&count| count as usize)
             .sum();
         (total.saturating_sub(2) * HEADS / 19).min(HEADS - 1)
+    }
+
+    /// The bucket's readout bias and dense head; bucket 0 is held inline.
+    #[inline]
+    fn head_bias(&self, bucket: usize) -> i32 {
+        if bucket == 0 {
+            self.output_bias
+        } else {
+            self.extra_heads[bucket - 1].bias
+        }
+    }
+    #[inline]
+    fn head_dense(&self, bucket: usize) -> &DenseHead {
+        if bucket == 0 {
+            &self.dense
+        } else {
+            &self.extra_heads[bucket - 1].dense
+        }
     }
 
     pub fn backend(&self) -> &'static str {
@@ -595,7 +627,11 @@ impl Model {
     }
 
     pub fn sum_scalar(&self, acc: &Accumulator) -> i64 {
-        let start = self.bucket(acc) * 2 * self.hidden;
+        self.sum_scalar_at(acc, self.bucket(acc))
+    }
+
+    fn sum_scalar_at(&self, acc: &Accumulator, bucket: usize) -> i64 {
+        let start = bucket * 2 * self.hidden;
         let mut sum = 0i64;
         for (perspective, values) in [&acc.own, &acc.opponent].iter().enumerate() {
             for (j, &value) in values.iter().enumerate() {
@@ -607,11 +643,16 @@ impl Model {
     }
 
     pub fn sum(&self, acc: &Accumulator) -> i64 {
+        self.sum_at(acc, self.bucket(acc))
+    }
+
+    fn sum_at(&self, acc: &Accumulator, bucket: usize) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Readout);
         #[cfg(target_arch = "x86_64")]
+        let start = bucket * 2 * self.hidden;
+        #[cfg(target_arch = "x86_64")]
         if self.vnni {
-            let start = self.bucket(acc) * 2 * self.hidden;
             let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx512(&acc.own, &output[..self.hidden], self.qa)
@@ -620,32 +661,33 @@ impl Model {
         }
         #[cfg(target_arch = "x86_64")]
         if self.avx2 {
-            let start = self.bucket(acc) * 2 * self.hidden;
             let output = &self.output[start..start + 2 * self.hidden];
             unsafe {
                 return sum_avx2(&acc.own, &output[..self.hidden], self.qa)
                     + sum_avx2(&acc.opponent, &output[self.hidden..], self.qa);
             }
         }
-        self.sum_scalar(acc)
+        self.sum_scalar_at(acc, bucket)
     }
 
     pub fn raw(&self, acc: &Accumulator) -> f64 {
-        self.sum(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
-            + self.output_bias[self.bucket(acc)] as f64 / self.qb as f64
-            + self.dense_sum(acc, self.avx2) as f64 / (self.qa as f64 * self.qb as f64)
+        let bucket = self.bucket(acc);
+        self.sum_at(acc, bucket) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
+            + self.head_bias(bucket) as f64 / self.qb as f64
+            + self.dense_sum(acc, bucket, self.avx2) as f64 / (self.qa as f64 * self.qb as f64)
     }
 
     pub fn raw_scalar(&self, acc: &Accumulator) -> f64 {
-        self.sum_scalar(acc) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
-            + self.output_bias[self.bucket(acc)] as f64 / self.qb as f64
-            + self.dense_sum(acc, false) as f64 / (self.qa as f64 * self.qb as f64)
+        let bucket = self.bucket(acc);
+        self.sum_scalar_at(acc, bucket) as f64 / (self.qa as f64 * self.qa as f64 * self.qb as f64)
+            + self.head_bias(bucket) as f64 / self.qb as f64
+            + self.dense_sum(acc, bucket, false) as f64 / (self.qa as f64 * self.qb as f64)
     }
 
-    fn dense_sum(&self, acc: &Accumulator, avx2: bool) -> i64 {
+    fn dense_sum(&self, acc: &Accumulator, bucket: usize, avx2: bool) -> i64 {
         #[cfg(feature = "profile")]
         let _probe = crate::profile::Probe::new(crate::profile::Zone::Dense);
-        let head = &self.dense[self.bucket(acc)];
+        let head = self.head_dense(bucket);
         let output = &head.output;
         if output.iter().all(|&w| w == 0) {
             return 0;

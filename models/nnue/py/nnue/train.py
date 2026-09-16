@@ -40,7 +40,7 @@ from torch.nn import functional as F  # noqa: E402
 from . import export as export_module  # noqa: E402
 from .data import KIND_RETURN, TRAIN, VALIDATION, Dataset, Mixture  # noqa: E402
 from .features import LAYOUTS, Layout, feature_ids, goal_ids, symmetry_table  # noqa: E402
-from .model import NNUE  # noqa: E402
+from .model import HEAD_RESIDUALS, NNUE  # noqa: E402
 from .paths import data_dir, run_dir, sha256  # noqa: E402
 
 
@@ -118,11 +118,28 @@ def encode(rows: dict[str, np.ndarray], layout: Layout) -> torch.Tensor:
     return torch.from_numpy(ids)
 
 
+def parameter_groups(model: NNUE) -> list[torch.nn.Parameter] | list[dict]:
+    """The optimizer's groups: everything under the run's weight decay, except
+    the per-bucket head residuals, which get none. A sparse bucket contributes
+    a handful of rows to a batch, and decay between its rare updates would pull
+    its residual back toward the shared head for no reason of the data's (the
+    context residuals are dense by comparison: every position visits one). A
+    model without residuals returns the one flat list a format 6 or 8 run has
+    always been given, so its optimizer state and its resume are unchanged."""
+    residual = [getattr(model, name) for name in HEAD_RESIDUALS if getattr(model, name, None) is not None]
+    if not residual:
+        return list(model.parameters())
+    held = {id(parameter) for parameter in residual}
+    shared = [parameter for parameter in model.parameters() if id(parameter) not in held]
+    return [{"params": shared}, {"params": residual, "weight_decay": 0.0}]
+
+
 def step_loss(
     model: NNUE, rows: dict[str, np.ndarray], table: torch.Tensor, config: Config, qat: bool, rng: torch.Generator
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """The batch under two different random symmetries: the mean of both
-    value losses and the paired consistency term."""
+    value losses and the paired consistency term. A bucketed model also
+    reports how many rows of the batch each output head saw."""
     device = table.device
     ids = encode(rows, model.layout).to(device)
     n = len(ids)
@@ -136,7 +153,11 @@ def step_loss(
     value = ((value_loss(a, target, config) + value_loss(b, target, config)) * 0.5 * weight).sum() / norm
     consistency = (a.tanh() - b.tanh()).square().mean()
     loss = value + config.symmetry_weight * consistency
-    return loss, {"value": float(value.detach()), "consistency": float(consistency.detach())}
+    parts = {"value": float(value.detach()), "consistency": float(consistency.detach())}
+    if model.heads > 1:
+        occupancy = torch.bincount(model.buckets(ids), minlength=model.heads)
+        parts.update({f"bucket{head}": float(count) for head, count in enumerate(occupancy.tolist())})
+    return loss, parts
 
 
 @torch.no_grad()
@@ -256,7 +277,7 @@ def train(run: str, parts: list[tuple[str, float]], config: Config) -> Path:
     rng = torch.Generator().manual_seed(config.seed + 1)
     model = initial_model(config).to(device)
     table = torch.from_numpy(symmetry_table(model.layout)).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    optimizer = torch.optim.AdamW(parameter_groups(model), lr=config.lr, weight_decay=config.weight_decay)
     total_steps = config.epochs * config.steps_per_epoch
     step, first_epoch, best, stale = 0, 0, float("inf"), 0
     average: NNUE | None = None  # the weight average (config.ema > 0), the model of record once it has begun

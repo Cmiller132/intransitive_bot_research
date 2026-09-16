@@ -20,6 +20,8 @@ QB = 64  # scale of the readout, dense and residual weights
 EVAL_SCALE = 600.0  # search score per unit of raw value
 DENSE = 32
 ROW_STD = 0.04  # initial scale of a feature row
+# The per-bucket head residuals, in the order the served head sums them.
+HEAD_RESIDUALS = ("output_head", "output_head_bias", "dense_head", "dense_head_bias", "delta_head")
 
 
 def fake_quant(t: torch.Tensor, scale: int) -> torch.Tensor:
@@ -280,6 +282,6 @@ class NNUE(nn.Module):
         wide.goal.zero_()
         wide.output.load_state_dict(self.output.state_dict())
         wide.delta.load_state_dict(self.delta.state_dict())
-        for name in ("output_head", "output_head_bias", "dense_head", "dense_head_bias", "delta_head"):
+        for name in HEAD_RESIDUALS:
             getattr(wide, name).zero_()
         return wide

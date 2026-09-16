@@ -121,6 +121,30 @@ def test_fixture_network_and_positions_match_the_python_side():
         assert line["board"][0] in (0, 1, 2, 3) and line["board"][80] in (0, 4, 5, 6)
 
 
+def test_a_decided_board_reads_its_corner_as_empty():
+    """The rule the Rust evaluator also follows (tests/format9.rs): a board
+    where somebody has already reached a goal is never evaluated, but the
+    encoder stays total, and that corner contributes the empty row so that a
+    refresh and an incremental update cannot disagree on it."""
+    net = FIXTURES / "format9_h32.nnue"
+    decided = np.zeros((6, 81), dtype=np.uint8)
+    for n, (square, code) in enumerate([(80, 1), (80, 2), (80, 3), (0, 4), (0, 5), (0, 6)]):
+        decided[n, 40] = 5 if square else 2  # a second piece, so both sides have one
+        decided[n, square] = code
+    empty = decided.copy()
+    for n, (square, _) in enumerate([(80, 1), (80, 2), (80, 3), (0, 4), (0, 5), (0, 6)]):
+        empty[n, square] = 0
+    since, clock = np.full(len(decided), 7), np.full(len(decided), 120)
+    goal = feature_ids9(decided, since, clock)[..., 42:]
+    assert np.array_equal(goal, feature_ids9(empty, since, clock)[..., 42:])
+    assert np.all(goal[..., 0] == FORMAT9.goal_base) and np.all(goal[..., 1] == FORMAT9.goal_base + 4)
+    # Only the goal rows read the corner as empty: the piece is still on the
+    # board, with its piece-square row and its share of the material context,
+    # so the two boards do not evaluate alike.
+    values = integer_eval(net, decided, since, clock)
+    assert np.all(np.isfinite(values)) and not np.array_equal(values, integer_eval(net, empty, since, clock))
+
+
 def test_the_converted_format8_fixture_evaluates_every_position_identically(tmp_path):
     eight, nine = FIXTURES / "format8_h32.nnue", FIXTURES / "format9_convert_h32.nnue"
     info = convert(eight, tmp_path / "again.nnue", to=9)

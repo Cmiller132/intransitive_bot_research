@@ -143,8 +143,10 @@ fn the_head_follows_the_piece_count_and_the_file_uses_it() {
     // it can only come from the selected head.
     let mut flat = model.clone();
     flat.output = model.output[..2 * model.hidden].repeat(8);
-    flat.output_bias = vec![model.output_bias[0]; 8];
-    flat.dense = vec![model.dense[0].clone(); 8];
+    for head in flat.extra_heads.iter_mut() {
+        head.bias = model.output_bias;
+        head.dense = model.dense.clone();
+    }
     let mut differed = 0;
     for total in 2..=20usize {
         let own = total / 2;
@@ -171,7 +173,7 @@ fn the_head_follows_the_piece_count_and_the_file_uses_it() {
     assert_eq!(differed, 19 - 3);
     // One head per bucket, and each of the eight is reachable.
     assert_eq!(model.output.len(), 8 * 2 * model.hidden);
-    assert_eq!(model.dense.len(), 8);
+    assert_eq!(model.extra_heads.len(), 7);
     let reached: std::collections::BTreeSet<_> = (2..=20).map(|t| BUCKETS[t - 2]).collect();
     assert_eq!(reached, (0..8).collect());
 }

@@ -9,9 +9,9 @@ import pytest
 import torch
 
 from nnue import data, export, paths
-from nnue.features import FORMAT8, FORMAT9, feature_ids, feature_ids9, orbit_hash
+from nnue.features import FORMAT8, FORMAT9, HEADS, feature_ids, feature_ids9, orbit_hash
 from nnue.model import NNUE
-from nnue.train import Config, initial_model, train
+from nnue.train import Config, initial_model, parameter_groups, train
 
 from .test_features import random_boards
 
@@ -134,6 +134,21 @@ def test_format9_starts_from_the_format8_evaluation_and_trains_its_new_parameter
     assert np.max(np.abs(export.integer_eval(nine / "best.nnue", *args) - expected)) < 2e-6
     with pytest.raises(ValueError):
         initial_model(tiny(init=str(nine / "best.nnue"), version=8))
+    # Every head's occupancy is logged, and only a bucketed run logs it.
+    with (nine / "log.csv").open() as f:
+        row = next(csv.DictReader(f))
+    assert [k for k in row if k.startswith("bucket")] == [f"bucket{head}" for head in range(HEADS)]
+    assert sum(float(row[f"bucket{head}"]) for head in range(HEADS)) == 64  # the rows of a batch
+    with (eight / "log.csv").open() as f:
+        assert not [k for k in next(csv.DictReader(f)) if k.startswith("bucket")]
+    # The bucket residuals train without weight decay; a one-head run keeps the
+    # single flat parameter list its optimizer state was written with.
+    groups = torch.optim.AdamW(parameter_groups(NNUE(32, 9)), lr=1e-3, weight_decay=1e-5).param_groups
+    assert [g["weight_decay"] for g in groups] == [1e-5, 0.0]
+    assert len(groups[1]["params"]) == 5 and len(groups[0]["params"]) + 5 == len(list(NNUE(32, 9).parameters()))
+    flat = parameter_groups(NNUE(32))
+    assert len(flat) == len(list(NNUE(32).parameters()))
+    assert all(isinstance(parameter, torch.nn.Parameter) for parameter in flat)
 
 
 def test_id_cache_reproduces_the_encoder(sets, tmp_path):

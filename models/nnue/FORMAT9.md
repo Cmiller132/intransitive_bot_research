@@ -44,7 +44,11 @@ The feature rows are version 8's, with eight more after the clock rows:
 Within a goal group the offset is 0 for an empty corner and 1, 2, 3 for rock,
 paper, scissors. Exactly one row of each group is active per perspective, so a
 perspective has 44 feature slots: 20 pieces, 20 attacked pieces, two clock rows
-and two goal rows.
+and two goal rows. `Model::feature_ids` therefore returns `[[usize; 44]; 2]`
+where it returned `[[usize; 42]; 2]`, and `Model::slots()` says how many of them
+a version uses; versions 6 and 8 leave the last two at the sentinel, which is
+skipped like any unused slot, and the diagnostic prints only `slots()` of them,
+so their JSON is unchanged.
 
 ## The goal rows
 
@@ -62,6 +66,12 @@ The opponent's perspective is computed in its own frame. The anti-diagonal
 reflection maps square 0 to 80 and 80 to 0, so the opponent's half reads the
 two corners exchanged and colour-swapped; the Python encoder gets this for free
 from the reflected frame, and the Rust evaluator spells it out.
+
+The board symmetries are a different matter, and the two groups are never
+exchanged by one: the reflection among them is the *diagonal* one, which fixes
+squares 0 and 80. A symmetry therefore only renames a corner's occupant inside
+its own group, exactly as it renames the piece types elsewhere, and
+`symmetry_table` maps the eight rows accordingly.
 
 Incremental updates compare the two rows of the side being materialised before
 and after the move and exchange them when they differ, exactly as the clock
@@ -88,6 +98,12 @@ scalar, AVX2 and AVX-512/VNNI paths stay bit-identical by construction. The
 trainer reads the same count from the ids (one piece slot per occupied square)
 and the NumPy oracle from the board.
 
+The crate keeps the first head's readout bias and dense layer inline in `Model`
+and the other seven in a boxed slice, and an evaluation computes its bucket once
+and passes it down: a one-head network reads the same fields from the same
+offsets it always did, and pays only an early return and a perfectly predicted
+branch for a feature it does not use.
+
 ## Model and trainer
 
 `NNUE(hidden, 9)` adds the `goal` table (8 x H, clamped like the other tables)
@@ -103,6 +119,16 @@ has to be re-encoded and the encoder signature is the one the caches carry) and
 the goal rows are read from the corners. `--init` walks the conversions in
 order, 6 to 8 to 9, so an incumbent of either format starts at its own
 evaluation.
+
+The five head residuals sit in their own AdamW group with no weight decay. A
+sparse bucket contributes a handful of rows to a batch, and decay between its
+rare updates would pull its residual back toward the shared head for no reason
+of the data's; the context residuals are dense by comparison, since every
+position visits exactly one context per perspective, and they keep the run's
+decay. A model without residuals is handed the same flat parameter list it
+always was, so a format 6 or 8 optimizer state and its resume are unchanged.
+Each epoch logs `bucket0` .. `bucket7`, the mean rows per batch that reached
+each head, so a bucket that is starving is visible in log.csv.
 
 ## Conversion, the migration path
 
@@ -136,6 +162,12 @@ the model-side conversion and exports the same bytes, as `widen_contexts` and
   around both corners (moves onto, off and capturing on them, including the
   terminal ones), and a thousand capture-biased random moves that walk through
   every bucket with every update equal to a refresh.
+- `py/tests/test_features.py` runs the format 9 symmetry table over boards
+  carrying every combination of corner occupants: for all six symmetries the
+  table maps the goal columns of `feature_ids9` onto those of the transformed
+  board, each group's row stays in its own group, and the piece count (so the
+  head) is symmetry-invariant. `py/tests/test_fixtures9.py` adds the decided
+  boards, where a corner reads as empty in the encoder and the oracle.
 - `py/tests/test_export.py` checks a trained version 9 network: the file length
   and header, the oracle against the fake-quantised PyTorch forward within
   2e-6, the load/export round trip byte for byte, damaged files refused, and
@@ -149,7 +181,9 @@ the model-side conversion and exports the same bytes, as `widen_contexts` and
   network with the id caches in place: the converted start evaluates the
   validation rows exactly as its source, and after the epoch the eight heads
   have separated and the goal rows have left zero while the export still
-  reproduces the fake-quantised forward within 2e-6.
+  reproduces the fake-quantised forward within 2e-6. It also checks the two
+  optimizer groups and their decay, that a one-head run still gets one flat
+  list, and that only a bucketed run logs the occupancy columns.
 
 Formats 6 and 8 are proven unchanged by their own tests and fixtures, which
 were not modified: `tests/format8.rs`, `tests/migration.rs`,
