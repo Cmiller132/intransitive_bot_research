@@ -23,22 +23,10 @@ import time
 from pathlib import Path
 
 DIRS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-SETUP = {
-    1: (28, 20, 12),
-    2: (37, 29, 21, 13),
-    3: (38, 30, 22),
-}  # rock, paper, scissors of the side at a1
+SETUP = {1: (28, 20, 12), 2: (37, 29, 21, 13), 3: (38, 30, 22)}  # rock, paper, scissors of the side at a1
 SCORE_SCALE = 600.0
 DECIDED = 0.9
-ENDS = [
-    "Goal",
-    "Elimination",
-    "Stalemate",
-    "CaptureClock",
-    "PlyCap",
-    "Forfeit",
-    "Interrupted",
-]
+ENDS = ["Goal", "Elimination", "Stalemate", "CaptureClock", "PlyCap", "Forfeit", "Interrupted"]
 
 
 def mirror_anti(square: int) -> int:
@@ -113,9 +101,7 @@ def summarise(record: dict) -> dict:
                 last_unsure = root["ply"]
         later = [r["ply"] for r in roots if r["ply"] > last_unsure]
         decided = later[0] if later else None
-    depths = [
-        r.get("completed_depth") for r in roots if r.get("completed_depth") is not None
-    ]
+    depths = [r.get("completed_depth") for r in roots if r.get("completed_depth") is not None]
     return {
         "id": record.get("game_id"),
         "plies": record.get("plies") or len(moves),
@@ -126,11 +112,7 @@ def summarise(record: dict) -> dict:
         "blue_left": sum(1 for c in board if 1 <= c <= 3),
         "red_left": sum(1 for c in board if c >= 4),
         "random": len(record.get("random_plies") or []),
-        "alternatives": sum(
-            1
-            for r in roots
-            if r.get("alternative") and r.get("played_action") != r.get("searched_best")
-        ),
+        "alternatives": sum(1 for r in roots if r.get("alternative") and r.get("played_action") != r.get("searched_best")),
         "decided": decided,
         "depth": round(sum(depths) / len(depths), 2) if depths else None,
     }
@@ -145,46 +127,21 @@ def detail(record: dict, live: bool = False) -> dict:
     plies = []
     for ply, move in enumerate(played):
         root = by_ply.get(ply)
-        entry = {
-            **move,
-            "token": f"{name_of(move['from'])}-{name_of(move['to'])}",
-            "random": ply in randoms or ply < record.get("opening_plies", 0),
-        }
+        entry = {**move, "token": f"{name_of(move['from'])}-{name_of(move['to'])}", "random": ply in randoms or ply < record.get("opening_plies", 0)}
         if root:
-            entry.update(
-                value=root_value(root),
-                depth=root.get("completed_depth"),
-                nodes=root.get("nodes"),
-                since=root.get("since_capture"),
-                kind=root.get("score_kind"),
-            )
+            entry.update(value=root_value(root), depth=root.get("completed_depth"), nodes=root.get("nodes"),
+                         since=root.get("since_capture"), kind=root.get("score_kind"))
             best = root.get("searched_best")
-            if (
-                best is not None
-                and root.get("played_action") is not None
-                and best != root["played_action"]
-            ):
+            if best is not None and root.get("played_action") is not None and best != root["played_action"]:
                 origin, target = canonical_move(best, ply)
-                entry["best"] = {
-                    "from": origin,
-                    "to": target,
-                    "token": f"{name_of(origin)}-{name_of(target)}",
-                }
+                entry["best"] = {"from": origin, "to": target, "token": f"{name_of(origin)}-{name_of(target)}"}
             if root.get("alternative"):
                 entry["alternative"] = True
         plies.append(entry)
-    return {
-        "id": record.get("game_id"),
-        "initial": initial_board(),
-        "plies": plies,
-        "end": record.get("end"),
-        "winner": record.get("winner"),
-        "censored": record.get("censored"),
-        "live": live,
-        "capture_clock": record.get("capture_clock"),
-        "opening_plies": record.get("opening_plies", 0),
-        "summary": summarise(record) if not live else None,
-    }
+    return {"id": record.get("game_id"), "initial": initial_board(), "plies": plies, "end": record.get("end"),
+            "winner": record.get("winner"), "censored": record.get("censored"), "live": live,
+            "capture_clock": record.get("capture_clock"), "opening_plies": record.get("opening_plies", 0),
+            "summary": summarise(record) if not live else None}
 
 
 def journal_record(path: Path) -> dict | None:
@@ -217,14 +174,7 @@ def journal_record(path: Path) -> dict | None:
             randoms.append(ply)
         if event.get("root"):
             roots.append(event["root"])
-    record.update(
-        moves=moves,
-        roots=roots,
-        random_plies=randoms,
-        plies=len(moves),
-        end=None,
-        winner=None,
-    )
+    record.update(moves=moves, roots=roots, random_plies=randoms, plies=len(moves), end=None, winner=None)
     return record
 
 
@@ -237,9 +187,7 @@ def aggregate(games: list[dict]) -> dict:
     for g in games:
         ends[g["end"]] = ends.get(g["end"], 0) + 1
     real = [g for g in games if not g["censored"]]
-    blue = sum(
-        1.0 if g["winner"] == 0 else 0.5 if g["winner"] is None else 0.0 for g in real
-    )
+    blue = sum(1.0 if g["winner"] == 0 else 0.5 if g["winner"] is None else 0.0 for g in real)
     decided = sorted(g["decided"] for g in games if g["decided"] is not None)
     top = max(lengths)
     width = 25 if top <= 600 else 50
@@ -250,17 +198,12 @@ def aggregate(games: list[dict]) -> dict:
     depths = [g["depth"] for g in games if g["depth"] is not None]
     return {
         "games": n,
-        "length_mean": sum(lengths) / n,
-        "length_median": statistics.median(lengths),
-        "length_p10": q(0.1),
-        "length_p90": q(0.9),
-        "length_max": top,
+        "length_mean": sum(lengths) / n, "length_median": statistics.median(lengths),
+        "length_p10": q(0.1), "length_p90": q(0.9), "length_max": top,
         "histogram": {"width": width, "counts": bins},
         "ends": ends,
         "blue_score": blue / len(real) if real else None,
-        "draw_share": sum(1 for g in real if g["winner"] is None) / len(real)
-        if real
-        else None,
+        "draw_share": sum(1 for g in real if g["winner"] is None) / len(real) if real else None,
         "censored_share": (n - len(real)) / n,
         "captures_mean": sum(g["captures"] for g in games) / n,
         "decided_median": statistics.median(decided) if decided else None,
@@ -282,24 +225,18 @@ class GameIndex:
         self.memory: dict[tuple[str, str], list[dict]] = {}
         self.wanted: list[str] = []
         self.busy: dict[str, tuple[int, int]] = {}
-        self.failed: dict[
-            tuple[str, str], float
-        ] = {}  # unreadable shards, retried after a minute
+        self.failed: dict[tuple[str, str], float] = {}  # unreadable shards, retried after a minute
         self.wake = threading.Event()
         threading.Thread(target=self.work, name="games", daemon=True).start()
 
     def manifest(self, name: str) -> dict | None:
         try:
-            return json.loads(
-                (self.runs / "nnue_selfplay" / name / "manifest.json").read_text()
-            )
+            return json.loads((self.runs / "nnue_selfplay" / name / "manifest.json").read_text())
         except (OSError, ValueError):
             return None
 
     def cache_file(self, name: str, shard: dict) -> Path:
-        return (
-            self.cache / name / f"{shard['file']}.{shard.get('sha256', 'x')[:12]}.json"
-        )
+        return self.cache / name / f"{shard['file']}.{shard.get('sha256', 'x')[:12]}.json"
 
     def shard_summaries(self, name: str, shard: dict) -> list[dict] | None:
         key = (name, shard["file"] + shard.get("sha256", ""))
@@ -317,9 +254,7 @@ class GameIndex:
 
     def read_shard(self, name: str, shard: dict) -> list[dict]:
         games = []
-        with gzip.open(
-            self.runs / "nnue_selfplay" / name / shard["file"], "rt", encoding="utf-8"
-        ) as lines:
+        with gzip.open(self.runs / "nnue_selfplay" / name / shard["file"], "rt", encoding="utf-8") as lines:
             for line in lines:
                 if line.strip():
                     record = json.loads(line)
@@ -355,12 +290,8 @@ class GameIndex:
                         continue
                     shards = [s for s in manifest.get("shards", []) if s.get("file")]
                     now = time.time()
-                    missing = [
-                        s
-                        for s in shards
-                        if self.shard_summaries(name, s) is None
-                        and now - self.failed.get((name, s["file"]), 0) > 60
-                    ]
+                    missing = [s for s in shards if self.shard_summaries(name, s) is None
+                               and now - self.failed.get((name, s["file"]), 0) > 60]
                     with self.lock:
                         self.busy[name] = (len(shards) - len(missing), len(shards))
                     if missing:
@@ -371,9 +302,7 @@ class GameIndex:
                 try:
                     self.read_shard(*todo)
                 except (OSError, ValueError, EOFError):
-                    with (
-                        self.lock
-                    ):  # a shard being replaced, missing or torn: try again later
+                    with self.lock:  # a shard being replaced, missing or torn: try again later
                         self.failed[(todo[0], todo[1]["file"])] = time.time()
                 time.sleep(0.01)
 
@@ -388,47 +317,21 @@ class GameIndex:
                 ready += 1
         if ready < len(shards):
             self.request([name])
-        return out, {
-            "shards_ready": ready,
-            "shards": len(shards),
-            "complete_batch": bool(manifest.get("complete")),
-        }
+        return out, {"shards_ready": ready, "shards": len(shards), "complete_batch": bool(manifest.get("complete"))}
 
     def stats(self, name: str) -> dict:
         games, progress = self.games(name)
         return {"run": name, **progress, **aggregate(games)}
 
-    def listing(
-        self,
-        name: str,
-        end: str = "",
-        sort: str = "id",
-        offset: int = 0,
-        limit: int = 50,
-    ) -> dict:
+    def listing(self, name: str, end: str = "", sort: str = "id", offset: int = 0, limit: int = 50) -> dict:
         games, progress = self.games(name)
         if end:
-            games = [
-                g
-                for g in games
-                if g["end"] == end
-                or (end == "blue" and g["winner"] == 0)
-                or (end == "red" and g["winner"] == 1)
-                or (end == "draw" and g["winner"] is None and not g["censored"])
-            ]
-        keys = {
-            "id": lambda g: g["id"],
-            "longest": lambda g: -g["plies"],
-            "shortest": lambda g: g["plies"],
-            "captures": lambda g: -g["captures"],
-            "earliest_decided": lambda g: (g["decided"] is None, g["decided"] or 0),
-        }
+            games = [g for g in games if g["end"] == end or (end == "blue" and g["winner"] == 0)
+                     or (end == "red" and g["winner"] == 1) or (end == "draw" and g["winner"] is None and not g["censored"])]
+        keys = {"id": lambda g: g["id"], "longest": lambda g: -g["plies"], "shortest": lambda g: g["plies"],
+                "captures": lambda g: -g["captures"], "earliest_decided": lambda g: (g["decided"] is None, g["decided"] or 0)}
         games = sorted(games, key=keys.get(sort, keys["id"]))
-        return {
-            "total": len(games),
-            "games": games[offset : offset + limit],
-            **progress,
-        }
+        return {"total": len(games), "games": games[offset: offset + limit], **progress}
 
     def live(self, name: str) -> list[dict]:
         folder = self.runs / "nnue_selfplay" / name / "active"
@@ -438,20 +341,9 @@ class GameIndex:
             if not record:
                 continue
             played, board = replay([parse_token(t) for t in record["moves"]])
-            values = [
-                root_value(r)
-                for r in record["roots"]
-                if r.get("root_score") is not None
-            ]
-            out.append(
-                {
-                    "id": record.get("game_id"),
-                    "plies": len(played),
-                    "board": board,
-                    "last": played[-1] if played else None,
-                    "value": values[-1] if values else None,
-                }
-            )
+            values = [root_value(r) for r in record["roots"] if r.get("root_score") is not None]
+            out.append({"id": record.get("game_id"), "plies": len(played), "board": board,
+                        "last": played[-1] if played else None, "value": values[-1] if values else None})
         return out
 
     def game(self, name: str, game_id: int) -> dict | None:
@@ -466,24 +358,14 @@ class GameIndex:
                 return detail(json.loads(pending.read_text()))
             except (OSError, ValueError):
                 pass
-        shards = [
-            s for s in (self.manifest(name) or {}).get("shards", []) if s.get("file")
-        ]
+        shards = [s for s in (self.manifest(name) or {}).get("shards", []) if s.get("file")]
         # the shard whose id range holds the game first, then the rest in case ids are not contiguous
-        likely = [
-            s
-            for s in shards
-            if s.get("first_game", 0)
-            <= game_id
-            < s.get("first_game", 0) + (s.get("counts") or {}).get("games", 0)
-        ]
+        likely = [s for s in shards if s.get("first_game", 0) <= game_id < s.get("first_game", 0) + (s.get("counts") or {}).get("games", 0)]
         for shard in likely + [s for s in shards if s not in likely]:
             try:
                 with gzip.open(folder / shard["file"], "rt", encoding="utf-8") as lines:
                     for line in lines:
-                        if line.strip() and f'"game_id":{game_id},' in line.replace(
-                            " ", ""
-                        ):
+                        if line.strip() and f'"game_id":{game_id},' in line.replace(" ", ""):
                             record = json.loads(line)
                             if record.get("game_id") == game_id:
                                 return detail(record)

@@ -164,7 +164,7 @@ section > h3, .section-head h3 { font-size: 1.3rem; margin-bottom: 4px; }
 
 .ladder { border-left: 1px solid var(--line); padding: 22px 24px 18px; }
 .ladder h4 { margin: 0 0 12px; font: 600 0.9rem/1.3 var(--text); color: var(--ink-2); }
-.rung { display: grid; grid-template-columns: 58px minmax(0, 1fr) 62px; align-items: center; gap: 10px;
+.rung { display: grid; grid-template-columns: 58px minmax(0, 1fr) 62px 36px; align-items: center; gap: 10px;
   padding: 5px 0; color: var(--ink-3); font-size: 0.84rem; }
 .rung-gen { white-space: nowrap; }
 .rung-track { display: flex; height: 10px; }
@@ -172,6 +172,8 @@ section > h3, .section-head h3 { font-size: 1.3rem; margin-bottom: 4px; }
 .rung-grow { display: block; height: 100%; background: repeating-linear-gradient(135deg, var(--tone) 0 3px, transparent 3px 6px);
   border-radius: 0 2px 2px 0; opacity: 0.8; }
 .rung-games { text-align: right; font-variant-numeric: tabular-nums; }
+.rung-target { text-align: right; color: var(--ink-3); font-size: 0.78rem; }
+.rung.on .rung-target { color: var(--ink); }
 .rung.on { color: var(--ink); font-weight: 600; }
 .rung.on .rung-bar { background: var(--tone); }
 .ladder-note { margin: 10px 0 0; font-size: 0.82rem; color: var(--ink-2); }
@@ -450,6 +452,22 @@ input[type="number"], input:not([type]), input[type="text"] { border: 1px solid 
 .viewer-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 14px 0 6px; }
 .viewer-controls input[type="range"] { flex: 1 1 200px; accent-color: var(--blue); }
 #viewer-graph svg { width: 100%; display: block; }
+
+
+.job-progress.sequential .job-note { margin-top: 6px; }
+.job-sprt { margin-top: 10px; max-width: 720px; }
+.job-sprt svg { width: 100%; display: block; overflow: visible; }
+
+.evals-table { margin: -4px 0 20px; }
+.evals-table td { white-space: nowrap; }
+.evals-table th[scope="row"] { white-space: normal; min-width: 14ch; }
+.evals-table tbody tr { cursor: pointer; }
+.evals-table tbody tr:hover th, .evals-table tbody tr:hover td { background: var(--surface); }
+.evals-table tbody tr.on th, .evals-table tbody tr.on td { background: var(--surface); font-weight: 600; }
+.evals-table tbody tr.on th { box-shadow: inset 3px 0 0 var(--blue); padding-left: 8px; }
+.evals-table tr.stale td, .evals-table tr.stale th { color: var(--ink-3); }
+details.earlier { margin: 4px 0 18px; }
+details.earlier table { margin-top: 6px; }
 
 /* ------------------------------------------------------------------ narrow */
 @media (max-width: 1000px) {

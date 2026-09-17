@@ -2,7 +2,7 @@
   const state = { data: null, raw: "", control: null, rawControl: "", run: null, metric: "run:objective", sets: null,
     compare: "", evalFile: null, open: new Set(["log-failed"]) };
   const SET_COLORS = ["var(--blue)", "var(--red)", "var(--teal)", "var(--ochre)", "var(--plum)", "var(--grey)", "#6f8f2f", "#3d7fb8"];
-  const TONE = { better: "var(--teal)", better_small: "var(--teal)", worse: "var(--red)", null: "var(--ochre)",
+  const TONE = { better: "var(--teal)", better_small: "var(--teal)", retest: "var(--ochre)", worse: "var(--red)", null: "var(--ochre)",
     running: "var(--grey)", invalid: "var(--grey)" };
   const RUN_METRICS = ["objective", "loss", "value", "consistency", "best", "lr", "seconds"];
   const SET_METRICS = ["mse", "mae", "bias", "symmetry_range_mean", "symmetry_range_p95"];
@@ -86,12 +86,18 @@
       $("#refreshed").textContent = "Read " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       if (body === state.raw && !force) return;
       state.raw = body;
-      state.data = JSON.parse(body);
+      const data = JSON.parse(body);
+      // progress numbers change every few seconds while a job runs; only the rail shows them, so a change in them
+      // alone redraws the rail and leaves the page (open lists, charts, scroll) as it is
+      const signature = JSON.stringify(data, (k, v) => (VOLATILE.has(k) ? undefined : v));
+      const changed = force || signature !== state.signature;
+      state.signature = signature;
+      state.data = data;
       $("#runs-dir").textContent = state.data.runs_dir;
       const names = state.data.runs.map((r) => r.name);
       const wanted = decodeURIComponent(location.hash.slice(1));
       if (!names.includes(state.run) && !pendingJob(state.run)) state.run = names.includes(wanted) ? wanted : pickDefault(state.data.runs);
-      render();
+      if (changed) renderWhenIdle(); else renderTree();
     } catch (err) {
       $("#main").innerHTML = `<div class="empty"><h2>The runs could not be read</h2><p>${esc(err.message)}</p>
         <p>Start the dashboard from the repository root, or pass <code>--repo</code>.</p></div>`;
@@ -108,6 +114,9 @@
       renderControl();
       renderJobPanel();
       syncNotify();
+      // parts of the page depend on which runs have a live job (the retrain and next-step buttons)
+      const live = state.control.jobs.filter((j) => ["running", "queued", "paused"].includes(j.state)).map((j) => `${j.run}:${j.state}`).join(",");
+      if (state.data && live !== state.liveJobs) { state.liveJobs = live; renderWhenIdle(); }
       if (state.data && before !== undefined && before !== state.control.version) loadRuns();
     } catch (err) { /* the runs view reports a dead server */ }
   }
@@ -126,6 +135,20 @@
       || jobs[jobs.length - 1];
   };
   const pendingJob = (name) => name && !byName(name) && jobFor(name);
+  const VOLATILE = new Set(["now", "fraction", "eta_seconds", "detail", "touched", "games_done", "in_flight", "games_per_hour",
+    "games_per_core_hour", "mtime", "started"]);
+
+  // A redraw replaces the page's elements; while a list is open or a field has the focus it waits until you leave it.
+  function busyInMain() {
+    const el = document.activeElement;
+    return el && $("#main").contains(el) && ["SELECT", "INPUT", "TEXTAREA"].includes(el.tagName);
+  }
+  function renderWhenIdle() {
+    if (busyInMain()) { state.renderPending = true; renderTree(); return; }
+    state.renderPending = false;
+    render();
+  }
+  document.addEventListener("focusout", () => setTimeout(() => { if (state.renderPending && !busyInMain()) renderWhenIdle(); }, 0));
   const current = () => byName(state.run);
 
   function select(name) {
@@ -217,6 +240,8 @@
     const name = state.run;
     const job = name && jobFor(name);
     slot.innerHTML = job ? jobPanel(job) : "";
+    const q = job?.progress?.sequential;
+    if (q && $("#job-sprt")) Charts.sprtTrack($("#job-sprt"), { llr: q.llr, bound: q.bound, pairs: q.pairs, cap: q.cap });
     bindJobPanel(slot, job);
     restoreOpen(slot);
   }
@@ -230,7 +255,26 @@
     }).join("")}</ol>`;
     const p = job.progress;
     let bar = "";
-    if (p && (job.state === "running" || job.state === "paused")) {
+    if (p?.sequential && (job.state === "running" || job.state === "paused")) {
+      const q = p.sequential;
+      const lean = q.llr === null || Math.abs(q.llr) < 0.3 ? "no lean yet" : `leaning ${q.lean}`;
+      const bound = q.llr === null ? "" : q.llr >= 0 ? `accepts at +${q.bound.toFixed(2)}` : `rejects at −${q.bound.toFixed(2)}`;
+      const crossed = q.llr !== null && Math.abs(q.llr) >= q.bound;
+      const f = q.forecast;
+      const perPair = q.pairs_per_second ? 1 / q.pairs_per_second : null;
+      const pace = crossed ? ` It has crossed the ${q.llr > 0 ? "accept" : "reject"} bound and stops at the next check.`
+        : !f ? ""
+        : ` Likely stops within about ${f.median_pairs.toLocaleString()} more pairs${perPair ? ` (${duration(f.median_pairs * perPair)})` : ""},
+            9 in 10 within ${f.p90_pairs.toLocaleString()}${perPair ? ` (${duration(f.p90_pairs * perPair)})` : ""}; it accepts in ${Math.round(f.accept_chance * 100)} % of the forecasts${f.cap_chance >= 0.05 ? ` and reaches the cap in ${Math.round(f.cap_chance * 100)} %` : ""}.`;
+      bar = `<div class="job-progress sequential">
+        <div class="progress-top"><b>Sequential test, .50 against ${String(+q.s1.toFixed(3)).replace(/^0/, "")}</b><span>${q.pairs.toLocaleString()} of at most ${q.cap.toLocaleString()} pairs, score ${score(q.score)}</span></div>
+        <div class="progress-bar${job.state === "paused" ? " paused" : ""}" title="how close the test is to stopping: a bound or the cap, whichever is nearer"><span style="width:${q.closeness * 100}%"></span></div>
+        <div id="job-sprt" class="job-sprt"></div>
+        <p class="job-note">${q.pairs < 128 ? `The first decision comes at 128 pairs; the value below is provisional.` : `${lean[0].toUpperCase() + lean.slice(1)}: LLR ${q.llr >= 0 ? "+" : "−"}${Math.abs(q.llr).toFixed(2)}, ${bound}; next check at ${q.next_check.toLocaleString()} pairs.`}${q.pairs >= 32 ? pace : ""}
+        ${q.invalid ? `<br><b>Invalid:</b> ${esc(q.invalid)}; the test cannot decide.` : ""}</p>
+        ${q.pairs >= q.decide_from ? `<p class="small-note">Taking too long? <b>Stop and decide now</b> reads the ${q.pairs.toLocaleString()} pairs like a test that reached its cap: adopted if the lower bound is above .50, otherwise more data.</p>` : ""}
+      </div>`;
+    } else if (p && (job.state === "running" || job.state === "paused")) {
       const frac = p.total ? Math.min(1, p.done / p.total) : null;
       const count = p.total ? `${(p.done ?? 0).toLocaleString()} of ${p.total.toLocaleString()} ${p.unit}` : p.done ? `${p.done.toLocaleString()} ${p.unit}` : "";
       const extra = p.in_flight && job.state === "running" ? `, ${p.in_flight} in flight` : "";
@@ -264,7 +308,10 @@
     const b = (action, label, cls = "") => `<button class="button ${cls}" type="button" data-job-action="${action}">${label}</button>`;
     const training = job.step === "train";
     const out = [];
+    const q = job.progress?.sequential;
+    const decide = q && q.pairs >= q.decide_from && ["running", "paused"].includes(job.state) ? b("decide_now", "Stop and decide now") : "";
     if (job.state === "running") {
+      if (decide) out.push(decide);
       if (training) out.push(job.pause_after_epoch ? `<span class="job-wait">Pauses when this epoch ends.</span>` : b("pause_after_epoch", "Pause after this epoch", "primary"));
       out.push(b("pause", training ? "Pause now" : "Pause"), b("cancel", "Cancel", "quiet-button"));
     } else if (job.state === "queued") {
@@ -276,13 +323,15 @@
           b("restart", "Restart training with other settings…"));
       } else {
         out.push(b("continue", "Continue", "primary"));
+        if (decide) out.push(decide);
+        if (job.step === "evaluate" && byName(job.run)?.config) out.push(b("restart", "Retrain with other settings…"));
       }
       out.push(b("cancel", "Cancel", "quiet-button"));
     } else if (job.state === "failed") {
       out.push(b("continue", "Try again", "primary"));
-      if (training || /other settings/.test(job.error || "")) out.push(b("restart", "Restart training with other settings…"));
+      if (training || /other settings/.test(job.error || "") || byName(job.run)?.config) out.push(b("restart", training ? "Restart training with other settings…" : "Retrain with other settings…"));
       out.push(b("remove", "Dismiss", "quiet-button"));
-    } else if (job.kind === "pipeline") {
+    } else if (job.run && byName(job.run)?.config) {
       out.push(b("restart", "Retrain with other settings…"));
     }
     return out.join("");
@@ -295,7 +344,8 @@
       if (action === "evaluate_now") return evalDialog(job.run, { mode: "fixed", sims: 8, pairs: 100 }, "Evaluate the best network so far");
       if (action === "restart") return restartDialog(job);
       if (action === "cancel" && !confirm("Cancel this job? Its files stay; a batch or training can be continued later by starting it again.")) return;
-      const words = { pause_after_epoch: "Pausing when this epoch ends", pause: "Pausing", next_epoch: "Training one more epoch",
+      if (action === "decide_now" && !confirm("Stop the test and decide from the pairs played so far?")) return;
+      const words = { decide_now: "Deciding from the pairs so far", pause_after_epoch: "Pausing when this epoch ends", pause: "Pausing", next_epoch: "Training one more epoch",
         run_to_end: "Training to the end", end_training: "Evaluating the best network so far", continue: "Continuing", cancel: "Cancelled", remove: "Dismissed" };
       btn.disabled = true;
       act(`/api/jobs/${job.id}/${action}`, {}, words[action]).catch(() => (btn.disabled = false));
@@ -339,7 +389,11 @@
       }
     });
     form.querySelectorAll("[data-toggle]").forEach((el) => {
-      const sync = () => form.querySelectorAll(`[data-when="${el.name}"]`).forEach((t) => (t.hidden = !t.dataset.value.split(",").includes(el.value)));
+      // a hidden field is disabled too, so it neither blocks the form's validation nor gets sent
+      const sync = () => form.querySelectorAll(`[data-when="${el.name}"]`).forEach((t) => {
+        t.hidden = !t.dataset.value.split(",").includes(el.value);
+        t.querySelectorAll("input, select").forEach((i) => (i.disabled = t.hidden));
+      });
       el.addEventListener("change", sync);
       sync();
     });
@@ -356,14 +410,19 @@
   function trainingFields(s) {
     const emaMode = s.ema === "auto" || s.ema === "off" ? s.ema : "custom";
     return `<fieldset><legend>Training</legend><div class="grid">
-      ${field("Epochs", numberInput("epochs", s.epochs, 'min="1" max="200"'))}
+      ${field("Epochs", choice("epochs_mode", s.epochs === "auto" ? "auto" : "custom", [["auto", "Auto (from the data)"], ["custom", "A fixed number"]], "data-toggle"),
+        "how often it validates and saves; the amount of training is the passes")}
+      <label class="form-field" data-when="epochs_mode" data-value="custom"><span>Number of epochs</span>${numberInput("epochs_value", s.epochs === "auto" ? 20 : s.epochs, 'min="1" max="200"')}</label>
       ${field("Passes over the rows", numberInput("passes", s.passes, 'min="0.5" max="20" step="0.5"'), "3 to 5 does not memorise a batch")}
-      ${field("Batch", choice("batch", s.batch, [[1024, "1,024"], [2048, "2,048"], [4096, "4,096"], [8192, "8,192"], [16384, "16,384"]]))}
+      ${field("Batch", choice("batch", s.batch, [[1024, "1,024"], [2048, "2,048"], [4096, "4,096"], [8192, "8,192 (the recipe)"], [16384, "16,384"], ["auto", "Auto (experimental)"]]),
+        "auto halves it on small data; it played weaker in a direct match here")}
       ${field("Learning rate", numberInput("lr", s.lr, 'min="0.000001" max="0.01" step="any"'), "1e-4 continues a network; 3e-4 from scratch")}
       ${field("Weight averaging", choice("ema_mode", emaMode, [["auto", "About one epoch (auto)"], ["off", "Off"], ["custom", "Custom decay"]], "data-toggle"))}
       <label class="form-field" data-when="ema_mode" data-value="custom"><span>Decay</span>${numberInput("ema_value", typeof s.ema === "number" ? s.ema : 0.999, 'min="0.5" max="0.99999" step="any"')}</label>
       ${field("Device", choice("device", s.device, [["cpu", "CPU"], ["mps", "Apple GPU (mps)"], ["cuda", "NVIDIA GPU (cuda)"]]))}
       ${field("Format", choice("version", s.version, [["auto", "Keep the start's format"], ["9", "Format 9 (unmeasured)"]]))}
+      ${field("Stop early", choice("patience", s.patience || "", [["", "Never"], [3, "After 3 epochs without improving"], [5, "After 5 epochs without improving"], [8, "After 8 epochs without improving"]]),
+        "saves time on a run that memorises; best.nnue is the best epoch either way")}
     </div>
     <label class="check"><input type="checkbox" name="pause_every_epoch" ${s.pause_every_epoch ? "checked" : ""}> Pause after every epoch</label></fieldset>`;
   }
@@ -372,12 +431,12 @@
       ${field("Kind", choice("eval_mode", e.mode, [["sprt", "Sequential test"], ["fixed", "Fixed openings"]], "data-toggle"))}
       ${field("Budget", choice("eval_sims", e.sims, budgets))}
       <label class="form-field" data-when="eval_mode" data-value="fixed"><span>Opening pairs</span>${numberInput("eval_pairs", e.pairs || 100, 'min="2" max="5000"')}<small>100 is a reading, 400 a decision</small></label>
-      <label class="form-field" data-when="eval_mode" data-value="sprt"><span>Most pairs</span>${numberInput("eval_cap", e.cap || 3008, 'min="128" step="16"')}<small>stops earlier when it is clear</small></label>
-      <label class="form-field" data-when="eval_mode" data-value="sprt"><span>Gain looked for</span>${choice("eval_target", e.target || 0.52, [[0.51, ".51 (about +7 Elo, slow)"], [0.515, ".515"], [0.52, ".52 (about +14 Elo)"], [0.53, ".53 (about +21 Elo, fast)"]])}</label>
+      <label class="form-field" data-when="eval_mode" data-value="sprt"><span>Most pairs</span>${numberInput("eval_cap", e.cap || 3008, 'min="128" step="16"')}<small>usually stops long before; about a third of the batch's search</small></label>
+      <label class="form-field" data-when="eval_mode" data-value="sprt"><span>Gain looked for</span>${choice("eval_target", e.target || 0.52, [[0.51, ".51, +7 Elo (slow)"], [0.515, ".515, +10 Elo"], [0.52, ".52, +14 Elo (the base)"], [0.53, ".53, +21 Elo"], [0.54, ".54, +28 Elo"], [0.55, ".55, +35 Elo (generation 0)"], [0.56, ".56, +42 Elo (fast)"]])}<small>higher settles sooner and rejects smaller real gains</small></label>
     </div></fieldset>`;
   }
   const readTraining = (f) => ({
-    epochs: +f.get("epochs"), passes: +f.get("passes"), batch: +f.get("batch"), lr: +f.get("lr"), device: f.get("device"),
+    epochs: f.get("epochs_mode") === "custom" ? +f.get("epochs_value") : "auto", patience: f.get("patience") ? +f.get("patience") : null, passes: +f.get("passes"), batch: f.get("batch") === "auto" ? "auto" : +f.get("batch"), lr: +f.get("lr"), device: f.get("device"),
     version: f.get("version"), pause_every_epoch: f.get("pause_every_epoch") === "on",
     ema: f.get("ema_mode") === "custom" ? +f.get("ema_value") : f.get("ema_mode"),
   });
@@ -408,18 +467,31 @@
       ${trainingFields(s)}
       ${evalFields(s.eval)}`;
     openDialog(html, async (f) => {
+      const m = /^runs\/([^/]+)\/best\.nnue$/.exec(f.get("start").trim());
+      const parent = m && byName(m[1]);
+      const evalSettings = readEval(f);
+      const capFor = (games) => Math.min(3008, Math.max(128, Math.round((games * (+f.get("nodes") || 50000) / (evalSettings.sims * 2500) / 2 / 3) / 16) * 16));
+      if (evalSettings.mode === "sprt" && +f.get("games") !== s.games && evalSettings.cap === (s.eval.cap || 3008)) evalSettings.cap = capFor(+f.get("games"));
+      if (parent && s.start !== f.get("start").trim() && evalSettings.mode === "sprt" && Math.abs(evalSettings.target - targetFor(0)) < 1e-9) {
+        evalSettings.target = targetFor(parent.depth + 1);  // the start changed to a later generation: its target
+      }
       const settings = { ...s, start: f.get("start").trim(), name: f.get("name").trim(), games: +f.get("games"), nodes: +f.get("nodes"),
         threads: +f.get("threads"), multipv: f.get("multipv") === "on" ? 2 : 1, quiet: f.get("quiet") === "on",
-        extra: f.getAll("extra").map((n) => ({ set: n, share: chosen.get(n) ?? 1 })), ...readTraining(f), eval: readEval(f) };
+        extra: f.getAll("extra").map((n) => ({ set: n, share: chosen.get(n) ?? 1 })), ...readTraining(f), eval: evalSettings };
       await act("/api/jobs/pipeline", settings, `Started ${settings.name}`);
       select(settings.name);
     });
   }
 
+  const targetFor = (depth) => {
+    const l = state.data?.ladder || [];
+    return l.length ? l[Math.min(Math.max(depth || 0, 0), l.length - 1)].target : 0.52;
+  };
   function evalDialog(run, e, title = "Evaluate again") {
     dialog().dataset.submit = "Run the evaluation";
-    const d = state.control.defaults.eval;
     const r = byName(run);
+    const rung = (state.data?.ladder || [])[Math.min(r?.depth || 0, Math.max(0, (state.data?.ladder || []).length - 1))];
+    const d = { ...state.control.defaults.eval, target: targetFor(r?.depth), cap: rung?.cap || 3008 };
     const others = [...new Set([...(state.data?.networks || []), byName(r?.chain?.[0]?.name)?.init].filter((n) => n && n !== r?.init && n !== `runs/${run}/best.nnue`))];
     openDialog(`<h2>${esc(title)}</h2><p class="dialog-lede">runs/${esc(run)}/best.nnue. Against its start the result can decide;
       against any other network it measures the distance to that network and is kept apart. It waits for the running job if there is one.</p>
@@ -430,12 +502,41 @@
   }
 
   function restartDialog(job) {
-    dialog().dataset.submit = job.state === "done" ? "Retrain" : "Restart training";
-    openDialog(`<h2>${job.state === "done" ? "Retrain" : "Restart training"} with other settings</h2>
-      <p class="dialog-lede">A checkpoint only resumes with the settings it began with, so changing them trains again from
-      ${esc(job.settings.start)}. The games stay; the current run moves to <code>runs/${esc(job.run)}.replaced_…</code>.</p>
-      ${trainingFields(job.settings)}${evalFields(job.settings.eval)}`, async (f) => {
-      await act(`/api/jobs/${job.id}/restart_training`, { ...readTraining(f), eval: readEval(f) }, "Training restarts");
+    // paused inside training: restart in place; anything else retrains from the run's saved configuration
+    if (job.kind === "pipeline" && job.step === "train" && ["paused", "failed"].includes(job.state)) {
+      dialog().dataset.submit = "Restart training";
+      openDialog(`<h2>Restart training with other settings</h2>
+        <p class="dialog-lede">A checkpoint only resumes with the settings it began with, so changing them trains again from
+        ${esc(job.settings.start)}. The games stay; the current run moves to <code>runs/${esc(job.run)}.replaced_…</code>.</p>
+        ${trainingFields(job.settings)}${evalFields(job.settings.eval)}`, async (f) => {
+        await act(`/api/jobs/${job.id}/restart_training`, { ...readTraining(f), eval: readEval(f) }, "Training restarts");
+      });
+      return;
+    }
+    retrainDialog(job.run);
+  }
+
+  function retrainDialog(name) {
+    const run = byName(name);
+    const cfg = run?.config || {};
+    if (!run || !run.config) return toast(`${name} has not been trained yet`, true);
+    const waiting = (state.control?.jobs || []).filter((j) => j.run === name && ["queued", "paused"].includes(j.state));
+    const rows = Object.values(run.datasets || {}).reduce((a, d) => a + (d?.rows || 0), 0);
+    const used = rows && cfg.steps_per_epoch ? (cfg.steps_per_epoch * cfg.epochs * cfg.batch) / rows : null;
+    // a tiny batch padded to the 10-step minimum reports hundreds of passes; offer the recipe's 4 then
+    const passes = used && used >= 1 && used <= 10 ? Math.round(used * 2) / 2 : 4;
+    const settings = { epochs: "auto", passes, batch: cfg.batch || 8192, lr: cfg.lr || 0.0001, ema: cfg.ema ? "auto" : "off",
+      device: cfg.device || "cpu", version: cfg.version === 9 ? "9" : "auto", patience: null, pause_every_epoch: false };
+    dialog().dataset.submit = "Retrain";
+    openDialog(`<h2>Retrain ${esc(name)}</h2>
+      <p class="dialog-lede">Trains again from ${esc(cfg.init || "its start")} on exactly the ${run.mixture.length} batch${run.mixture.length === 1 ? "" : "es"}
+      it was trained on (${rows ? `${millions(rows)} rows` : "the same rows"}); no games are played. The current run moves to
+      <code>runs/${esc(name)}.replaced_…</code> when training starts, with its evaluations.
+      ${waiting.length ? `<b>Its ${waiting.length === 1 ? "waiting job is" : `${waiting.length} waiting jobs are`} cancelled.</b>` : ""}
+      Last time: ${cfg.epochs} epochs of ${cfg.steps_per_epoch} steps, batch ${cfg.batch}, learning rate ${cfg.lr}${used ? `, about ${used >= 20 ? Math.round(used) : used.toFixed(1)} passes${used > 10 ? " (the batch is too small for the 10-step minimum)" : ""}` : ""}.</p>
+      ${trainingFields(settings)}${evalFields({ ...state.control.defaults.eval, target: targetFor(run.depth),
+        cap: (state.data.ladder[Math.min(run.depth, state.data.ladder.length - 1)] || {}).cap || 3008 })}`, async (f) => {
+      await act("/api/jobs/retrain", { run: name, settings: { ...readTraining(f), eval: readEval(f) } }, `Retraining ${name}`);
     });
   }
 
@@ -588,7 +689,7 @@
   function aims() {
     const p = state.data.plan;
     return `<p class="aims">Aiming for labels at <b>${(p.nodes / 1000).toFixed(0)}k nodes</b>, decisions by the sequential test at
-      <b>${(p.decision_sims * 2500 / 1000).toFixed(0)}k nodes</b> (a gain of .52, about +14 Elo), and batches growing from
+      <b>${(p.decision_sims * 2500 / 1000).toFixed(0)}k nodes</b> (a gain of ${score(p.sprt_targets[0])} in generation 0, easing to ${score(p.sprt_targets[p.sprt_targets.length - 1])}, about +14 Elo), and batches growing from
       <b>${p.ladder[0].toLocaleString()}</b> to <b>${p.ladder[p.ladder.length - 1].toLocaleString()}</b> games as the line gets stronger.</p>`;
   }
 
@@ -632,13 +733,14 @@
         <span class="rung-gen">${label}</span>
         <span class="rung-track"><span class="rung-bar" style="width:${width(r.games)}%"></span>${grown}</span>
         <span class="rung-games">${(on ? batch.games : r.games).toLocaleString()}</span>
+        <span class="rung-target" title="the sequential test's target at this generation">${String(+r.target.toFixed(3)).replace(/^0/, "")}</span>
       </div>`;
     }).join("");
     const note = batch.current
       ? `<p class="ladder-note">This run's batch, ${batch.games.toLocaleString()} games at generation ${batch.generation}${batch.games < batch.base ? `, under the ${batch.base.toLocaleString()} planned` : ""}. The next batch is proposed once it has a result.</p>`
       : `<p class="ladder-note">The proposed batch: about ${millions(batch.rows)} fresh rows${batch.games > batch.base ? `, ${batch.games / batch.base}× the plan after ${batch.nulls} batch${batch.nulls === 1 ? "" : "es"} without a gain` : ""}.</p>`;
     return `<div class="ladder" aria-label="Batch size by generation">
-      <h4>Games per batch by generation</h4>${rows}${note}</div>`;
+      <h4>Games and test target by generation</h4>${rows}${note}</div>`;
   }
 
   function decision(run) {
@@ -681,7 +783,7 @@
       const rule = { adopt: "It cleared the line: the next generation starts from it.",
         more_data: "Neither a gain nor a loss yet: more data from the same start decides it.",
         abort: "Weaker than its start: the network goes, its games stay.",
-        reeval: "A reading is not a decision: the sequential test settles it.",
+        reeval: / again at /.test(d.title) ? "" : "A reading is not a decision: the sequential test settles it.",
         evaluate: "The decision needs an evaluation.", running: "", stopped: "", incomplete: "" }[d.verdict];
       return `<div class="decision tone-${d.verdict}">
         <div class="verdict">
@@ -740,31 +842,52 @@
   }
 
   // ------------------------------------------------------------------ evaluation
-  const activeEval = (run) => run.evals.find((e) => e.file === state.evalFile) || run.eval;
+  const activeEval = (run) => (run.all_evals || run.evals).find((e) => e.file === state.evalFile) || run.eval || (run.all_evals || [])[0];
 
   function evaluation(run) {
+    const all = run.all_evals || run.evals;
     const ev = activeEval(run);
+    const again = controlOn() && run.has_net ? `<button class="button" type="button" data-eval-again>Evaluate${all.length ? " again" : ""}…</button>` : "";
     if (!ev) {
-      return `<section><div class="section-head"><h3>Evaluation</h3>${controlOn() && run.has_net ? `<button class="button" type="button" data-eval-again>Evaluate…</button>` : ""}</div>
-        <p class="missing">No current evaluation of this run's best.nnue${run.evals.length ? " (older ones describe an earlier network)" : ""}.</p></section>`;
+      return `<section><div class="section-head"><h3>Evaluation</h3>${again}</div>
+        <p class="missing">No evaluation of this run's best.nnue yet.</p></section>`;
     }
-    const total = ev.games || 1;
-    const files = run.evals.length > 1
-      ? `<label class="eval-files">Result <select id="eval-file">${run.evals.map((e) =>
-          `<option value="${esc(e.file)}" ${e.file === ev.file ? "selected" : ""}>${esc(e.file)}, ${e.pairs} pairs at ${(e.sims * 2500 / 1000).toFixed(0)}k</option>`).join("")}</select></label>`
-      : "";
+    const versus = ev.against_start ? "its start" : ev.opponent;
+    const table = all.length > 1 || !ev.against_start ? `<div class="table-scroll"><table class="kv evals-table">
+      <thead><tr><th>Against</th><th>Test</th><th>Pairs</th><th>Score</th><th>Elo</th><th>Result</th><th>When</th></tr></thead><tbody>
+      ${all.map((e) => {
+        const result = e.against_start
+          ? ({ better: "stronger", better_small: "stronger (small)", retest: "retest", worse: "weaker", null: "undecided", running: "running", invalid: "invalid" }[e.verdict] || e.verdict)
+          : e.score_interval[0] > 0.5 ? "stronger" : e.score_interval[1] < 0.5 ? "weaker"
+            : e.los < 0.1 ? `leans weaker (${Math.round(e.los * 100)} % stronger)` : e.los > 0.9 ? `leans stronger (${Math.round(e.los * 100)} %)` : "no clear difference";
+        const test = e.kind === "sequential" ? `sequential ${String(+(e.sprt_target || 0.52).toFixed(3)).replace(/^0/, "")}${e.stop ? `, ${e.stop}` : ""}` : "fixed";
+        return `<tr data-eval="${esc(e.file)}" tabindex="0" class="${e.file === ev.file ? "on" : ""}${e.stale ? " stale" : ""}">
+          <th scope="row">${esc(e.opponent)}${e.against_start ? "" : ' <small class="muted">measurement</small>'}</th>
+          <td>${esc(test)}, ${(e.sims * 2500 / 1000).toFixed(0)}k</td><td>${e.pairs.toLocaleString()}</td>
+          <td>${score(e.score)} <small class="muted">${score(e.score_interval[0])} to ${score(e.score_interval[1])}</small></td>
+          <td>${elo(e.elo)}</td><td>${esc(result)}${e.stale ? ' <small class="muted">older network</small>' : ""}</td>
+          <td>${new Date(e.mtime * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td></tr>`;
+      }).join("")}</tbody></table></div>` : "";
     const sequential = ev.kind === "sequential"
       ? `<div class="sprt"><div id="sprt-track"></div>
           <p class="small-note">${ev.pairs.toLocaleString()} of at most ${ev.sprt_cap.toLocaleString()} pairs, testing .50 against ${ev.sprt_target}.
-          ${ev.stop === "inconclusive" ? "Stopped at the cap." : ""}</p></div>`
+          ${ev.stop === "inconclusive" ? "Stopped at the cap." : ev.stop === "stopped" ? "Stopped by hand." : ""}</p></div>`
       : "";
-    const verdictWord = { better: "stronger", better_small: "stronger by a small margin", worse: "weaker", null: "not decided", running: "still running", invalid: "invalid" }[ev.verdict];
-    return `<section>
-      <div class="section-head"><h3>Evaluation</h3><div class="section-tools">${files}${controlOn() && run.has_net ? `<button class="button" type="button" data-eval-again>Evaluate again…</button>` : ""}</div></div>
-      <p class="lede">${ev.kind === "sequential"
+    const verdictWord = ev.against_start
+      ? { better: "stronger", better_small: "stronger by a small margin", retest: "below the raised target but likely better", worse: "weaker", null: "not decided", running: "still running", invalid: "invalid" }[ev.verdict]
+      : ev.score_interval[0] > 0.5 ? `stronger than ${ev.opponent}` : ev.score_interval[1] < 0.5 ? `weaker than ${ev.opponent}`
+        : ev.los < 0.1 ? `probably weaker than ${ev.opponent} (${Math.round(ev.los * 100)} % chance it is stronger)`
+        : ev.los > 0.9 ? `probably stronger than ${ev.opponent} (${Math.round(ev.los * 100)} %)` : `no clear difference from ${ev.opponent}`;
+    const lede = !ev.against_start
+      ? `A direct match against <b>${esc(ev.opponent)}</b>, ${ev.pairs} pairs at ${(ev.sims * 2500).toLocaleString()} nodes: <b>${esc(verdictWord)}</b>. A measurement, never the decision.`
+      : ev.kind === "sequential"
         ? `A sequential test at ${(ev.sims * 2500).toLocaleString()} nodes: <b>${verdictWord}</b>. Its interval is descriptive; the stop decides.`
-        : `${ev.pairs} opening pairs at ${(ev.sims * 2500).toLocaleString()} nodes, ${ev.grade === "decision" ? "a decision" : "a reading"}: <b>${verdictWord}</b>.`}
-        Bars are 95 % intervals for the score against the start; faded ones are other results and other batches from the same start.</p>
+        : `${ev.pairs} opening pairs at ${(ev.sims * 2500).toLocaleString()} nodes, ${ev.grade === "decision" ? "a decision" : "a reading"}: <b>${verdictWord}</b>.`;
+    const total = ev.games || 1;
+    return `<section>
+      <div class="section-head"><h3>Evaluation</h3><div class="section-tools">${again}</div></div>
+      <p class="lede">${lede} ${ev.stale ? "<b>This result is older than the current best.nnue.</b> " : ""}Bars are 95 % intervals for the score against ${esc(versus)}; faded ones are other results against the same opponent${ev.against_start ? " and other batches from the same start" : ""}.${table ? " Pick a row to show it." : ""}</p>
+      ${table}
       <div class="eval-grid">
         <div>
           <div class="ruler" id="ruler"></div>
@@ -789,7 +912,7 @@
             ${ev.pairs_needed && ev.pairs_needed > ev.pairs ? `<dt>To show this gain</dt><dd>${ev.pairs_needed.toLocaleString()} <small>pairs</small></dd>` : ""}
             <dt>Game length</dt><dd>${num(ev.mean_plies, 3)} <small>plies</small></dd>
           </dl>
-          <p class="elo-note">${esc(state.data.depth_note)}</p>
+          ${ev.against_start ? `<p class="elo-note">${esc(state.data.depth_note)}</p>` : ""}
         </div>
       </div>
     </section>`;
@@ -797,17 +920,19 @@
 
   function rulerRows(run) {
     const rows = [];
-    const detail = (r, e) => `<b>${esc(r.name)}</b> <span>${esc(e.file)}</span>
+    const detail = (r, e) => `<b>${esc(r.name)}</b> <span>against ${esc(e.opponent || "its start")}</span>
         <div class="row"><span>score</span><b>${score(e.score)} (${score(e.score_interval[0])} to ${score(e.score_interval[1])})</b></div>
         <div class="row"><span>Elo</span><b>${elo(e.elo)} (${elo(e.elo_interval[0])} to ${elo(e.elo_interval[1])})</b></div>
         <div class="row"><span>pairs, nodes</span><b>${e.pairs}, ${(e.sims * 2500).toLocaleString()}</b></div>`;
     const add = (r, e, ghost, label) => rows.push({ label, lo: e.score_interval[0], hi: e.score_interval[1], point: e.score,
-      tone: TONE[e.verdict], ghost, detail: detail(r, e) });
+      tone: e.against_start === false ? (e.score_interval[0] > 0.5 ? "var(--teal)" : e.score_interval[1] < 0.5 ? "var(--red)" : "var(--ochre)") : TONE[e.verdict],
+      ghost, detail: detail(r, e) });
     const shown = activeEval(run);
     const tag = (e) => `${e.pairs}p ${(e.sims * 2500 / 1000).toFixed(0)}k`;
-    add(run, shown, false, run.evals.length > 1 ? `${run.name}, ${tag(shown)}` : run.name);
-    run.evals.filter((e) => e.file !== shown.file).forEach((e) => add(run, e, true, tag(e)));
-    run.siblings.map(byName).filter((s) => s && s.eval).forEach((s) => add(s, s.eval, true, s.name));
+    const same = (run.all_evals || run.evals).filter((e) => e.file !== shown.file && (shown.against_start ? e.against_start : e.reference_path === shown.reference_path));
+    add(run, shown, false, same.length ? `${run.name}, ${tag(shown)}` : run.name);
+    same.forEach((e) => add(run, e, true, tag(e)));
+    if (shown.against_start) run.siblings.map(byName).filter((s) => s && s.eval).forEach((s) => add(s, s.eval, true, s.name));
     return rows;
   }
 
@@ -832,11 +957,11 @@
   async function refreshGames(run, full) {
     const body = $("#games-body");
     if (!body || !run.generation) return;
-    const g = state.games[run.name] || (state.games[run.name] = { end: "", sort: "id", offset: 0 });
+    const g = state.games[run.name] || (state.games[run.name] = { end: "", sort: "id", offset: 0, limit: 10 });
     try {
       const [summary, list] = await Promise.all([
         fetch(`/api/games?run=${encodeURIComponent(run.name)}`).then((r) => r.json()),
-        fetch(`/api/games/list?run=${encodeURIComponent(run.name)}&end=${g.end}&sort=${g.sort}&offset=${g.offset}&limit=25`).then((r) => r.json()),
+        fetch(`/api/games/list?run=${encodeURIComponent(run.name)}&end=${g.end}&sort=${g.sort}&offset=${g.offset}&limit=${g.limit}`).then((r) => r.json()),
       ]);
       if (state.run !== run.name || !$("#games-body")) return;
       g.summary = summary;
@@ -860,6 +985,11 @@
 
   function drawGames(run) {
     const g = state.games[run.name];
+    const el = document.activeElement;
+    if (el && $("#games-body")?.contains(el) && el.tagName === "SELECT") {
+      el.addEventListener("blur", () => current()?.name === run.name && drawGames(run), { once: true });
+      return;
+    }
     const st = g.summary.stats, live = g.summary.live || [], list = g.list;
     const body = $("#games-body");
     if (!body) return;
@@ -900,14 +1030,15 @@
           ...Object.keys(st.ends || {}).map((e) => [e, `Ended by ${END_WORDS[e] || e}`])], g.end)}</select></label>
         <label class="field">Order <select id="games-sort">${opts([["id", "As played"], ["longest", "Longest first"], ["shortest", "Shortest first"],
           ["captures", "Most captures"], ["earliest_decided", "Decided earliest"]], g.sort)}</select></label>
+        <label class="field">Per page <select id="games-limit">${opts([["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]], String(g.limit))}</select></label>
       </div>
       <div class="table-scroll"><table class="kv games-table"><thead><tr><th>Game</th><th>Result</th><th>How</th><th>Plies</th><th>Captures</th><th>Decided by</th><th>Pieces left</th></tr></thead><tbody>
       ${list.games.map((x) => `<tr data-game="${x.id}" tabindex="0"><th scope="row">${x.id}</th><td>${resultWord(x)}</td><td>${esc(END_WORDS[x.end] || x.end)}</td>
         <td>${x.plies}</td><td>${x.captures}</td><td>${x.decided ?? "–"}</td><td>${x.blue_left} : ${x.red_left}</td></tr>`).join("")}
       </tbody></table></div>
       <div class="pager"><button class="button" type="button" data-page="-1" ${g.offset ? "" : "disabled"}>Previous</button>
-        <span>${list.total ? `${g.offset + 1} to ${Math.min(list.total, g.offset + 25)} of ${list.total.toLocaleString()}` : "no games"}</span>
-        <button class="button" type="button" data-page="1" ${g.offset + 25 < list.total ? "" : "disabled"}>Next</button></div>` : "";
+        <span>${list.total ? `${g.offset + 1} to ${Math.min(list.total, g.offset + g.limit)} of ${list.total.toLocaleString()}` : "no games"}</span>
+        <button class="button" type="button" data-page="1" ${g.offset + g.limit < list.total ? "" : "disabled"}>Next</button></div>` : "";
     body.innerHTML = `${facts}<div class="games-charts">${st.games ? `<div><h4 class="sub">Game length</h4><div id="length-hist"></div></div>
       <div><h4 class="sub">How games end</h4>${endBar}</div>` : ""}</div>${trendTable}${liveCards}${browser}`;
     if (st.games) {
@@ -925,7 +1056,8 @@
     });
     $("#games-end")?.addEventListener("change", (e) => { g.end = e.target.value; g.offset = 0; refreshGames(run); });
     $("#games-sort")?.addEventListener("change", (e) => { g.sort = e.target.value; g.offset = 0; refreshGames(run); });
-    body.querySelectorAll("[data-page]").forEach((b) => b.addEventListener("click", () => { g.offset = Math.max(0, g.offset + 25 * +b.dataset.page); refreshGames(run); }));
+    body.querySelectorAll("[data-page]").forEach((b) => b.addEventListener("click", () => { g.offset = Math.max(0, g.offset + g.limit * +b.dataset.page); refreshGames(run); }));
+    $("#games-limit")?.addEventListener("change", (e) => { g.limit = +e.target.value; g.offset = 0; refreshGames(run); });
   }
 
   // the viewer: one game move by move
@@ -1092,8 +1224,12 @@
     const planned = (run.config || {}).epochs || rowsDone;
     const bi = bestIndexOf(run.log);
     const others = state.data.runs.filter((r) => r !== run && r.log && r.log.rows.length);
+    const running = (state.control?.jobs || []).some((j) => j.run === run.name && j.state === "running");
+    const retrain = controlOn() && run.config && !running
+      ? `<button class="button" type="button" data-retrain>Retrain with other settings…</button>` : "";
     return `<section>
-      <h3>Training</h3>
+      <div class="section-head"><h3>Training</h3>${retrain}</div>
+      ${earlierTrainings(run, running)}
       <p class="lede">Epoch ${rowsDone} of ${planned}${rowsDone < planned ? ", still running" : ""}.
         ${bi >= 0 ? `The best is epoch ${run.log.rows[bi].epoch}, objective ${num(run.log.rows[bi].objective, 5)}.` : ""}
         Compare epochs within one run; objective levels differ between runs on different data.</p>
@@ -1113,6 +1249,24 @@
         <div class="small"><h4>Bias by batch</h4><p>Signed error. The shaded band is ±0.005.</p><div id="small-bias"></div><div class="legend" id="legend-bias"></div></div>
       </div>
     </section>`;
+  }
+
+  function earlierTrainings(run, running) {
+    const list = run.earlier || [];
+    if (!list.length) return "";
+    const live = (state.control?.jobs || []).some((j) => j.run === run.name && ["running", "queued", "paused"].includes(j.state));
+    return `<details class="earlier" data-key="earlier-${esc(run.name)}" ${list.some((e) => e.direct) ? "open" : ""}>
+      <summary>${list.length} earlier training${list.length === 1 ? "" : "s"} of this run</summary>
+      <div class="table-scroll"><table class="kv"><thead><tr><th>Trained</th><th>Batch, epochs</th><th>Best objective</th><th>Own test</th><th>Current against it</th><th></th></tr></thead><tbody>
+      ${list.map((e) => `<tr><th scope="row">${esc(e.label.split("(").pop().replace(")", ""))}</th>
+        <td>${e.batch ? e.batch.toLocaleString() : "–"}, ${e.epochs ?? "–"} <small class="muted">x ${e.steps_per_epoch ?? "?"} steps</small></td>
+        <td>${num(e.objective, 5)}${e.best_epoch !== undefined && e.best_epoch !== null ? ` <small class="muted">epoch ${e.best_epoch}</small>` : ""}</td>
+        <td>${e.test ? `${score(e.test.score)}, ${elo(e.test.elo)} Elo` : "–"}</td>
+        <td>${e.direct ? `<b>${score(e.direct.score)}</b> <small class="muted">${score(e.direct.score_interval[0])} to ${score(e.direct.score_interval[1])}, ${e.direct.pairs} pairs</small>` : "–"}</td>
+        <td>${controlOn() && e.has_net && !live ? `<button class="small-button" type="button" data-restore="${esc(e.dir)}" data-label="${esc(e.label)}">Restore</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>
+      <p class="small-note">"Current against it" is the current network's score in a direct match: below .50 means the earlier training played better.</p>
+    </details>`;
   }
 
   function seriesFor(run, metric, sets, opts = {}) {
@@ -1136,7 +1290,7 @@
     const ev = activeEval(run);
     if (ev) {
       const clear = ev.kind === "sequential" ? ev.sprt_target : ev.sd_pair ? 0.5 + (1.96 * ev.sd_pair) / Math.sqrt(state.data.plan.decision_pairs) : null;
-      Charts.ruler($("#ruler"), { rows: rulerRows(run), clear,
+      Charts.ruler($("#ruler"), { rows: rulerRows(run), clear: ev.against_start === false ? null : clear, versus: ev.against_start === false ? ev.opponent : "its start",
         clearLabel: ev.kind === "sequential" ? "the test's target" : `clears at ${state.data.plan.decision_pairs} pairs` });
       if ($("#sprt-track")) Charts.sprtTrack($("#sprt-track"), { llr: ev.llr, bound: ev.llr_bound, pairs: ev.pairs, cap: ev.sprt_cap });
     }
@@ -1216,7 +1370,7 @@
       <p class="lede">Only the evaluation decides. The training and data checks explain a result and say what to fix before the next batch.
         ${flagged.length ? "" : "Nothing needs attention."}</p>
       ${flagged.length ? table(flagged) : ""}
-      ${rest.length ? `<details class="passing"><summary>${rest.length} more check${rest.length === 1 ? "" : "s"} that ${flagged.length ? "pass or are notes" : "pass"}</summary>${table(rest)}</details>` : ""}
+      ${rest.length ? `<details class="passing" data-key="passing-${esc(run.name)}"><summary>${rest.length} more check${rest.length === 1 ? "" : "s"} that ${flagged.length ? "pass or are notes" : "pass"}</summary>${table(rest)}</details>` : ""}
     </section>`;
   }
 
@@ -1294,13 +1448,26 @@
       threads: state.control.defaults.threads, eval: { ...state.control.defaults.eval, ...next.settings.eval } },
       run.decision.verdict === "adopt" ? "Next generation" : "Another batch", "Start"));
     $("#main [data-auto-from]")?.addEventListener("click", () => autoDialog(run.name));
+    $("#main [data-retrain]")?.addEventListener("click", () => retrainDialog(run.name));
     $("#main [data-measure]")?.addEventListener("click", (e) => evalDialog(run.name,
       { mode: "fixed", sims: 16, pairs: 200, reference: e.currentTarget.dataset.measure }, "Measure against the first network"));
     $("#main [data-eval-again]")?.addEventListener("click", () => evalDialog(run.name, activeEval(run)
       ? { mode: activeEval(run).kind === "sequential" ? "sprt" : "fixed", sims: activeEval(run).sims, pairs: activeEval(run).pairs } : {}));
     $("#metric")?.addEventListener("change", (e) => { state.metric = e.target.value; drawCharts(run); });
     $("#compare")?.addEventListener("change", (e) => { state.compare = e.target.value; drawCharts(run); });
-    $("#eval-file")?.addEventListener("change", (e) => { state.evalFile = e.target.value; render(); });
+    document.querySelectorAll("#main tr[data-eval]").forEach((tr) => {
+      const pick = () => { state.evalFile = tr.dataset.eval; render(); };
+      tr.addEventListener("click", pick);
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") pick(); });
+    });
+    document.querySelectorAll("#main [data-restore]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm(`Put ${b.dataset.label} back as ${run.name}? The current training moves aside and can be restored the same way.`)) return;
+      b.disabled = true;
+      try {
+        const r = await act("/api/runs/restore", { run: run.name, earlier: b.dataset.restore }, `Restored ${b.dataset.label}`);
+        state.evalFile = null;
+      } catch { b.disabled = false; }
+    }));
     document.querySelectorAll("#set-field input").forEach((box) => box.addEventListener("change", () => {
       state.sets = [...document.querySelectorAll("#set-field input:checked")].map((i) => i.value);
       drawCharts(run);

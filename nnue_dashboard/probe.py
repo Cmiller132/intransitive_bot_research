@@ -21,11 +21,7 @@ def net(path: str) -> dict:
     from nnue.paths import sha256
 
     info = export.read(Path(path))
-    return {
-        "hidden": info["hidden"],
-        "version": info["version"],
-        "sha256": sha256(Path(path)),
-    }
+    return {"hidden": info["hidden"], "version": info["version"], "sha256": sha256(Path(path))}
 
 
 def sets(names: list[str]) -> dict:
@@ -41,16 +37,10 @@ def sets(names: list[str]) -> dict:
             out[name] = {"exists": False, "rows": 0, "cache_ok": False}
             continue
         try:
-            cache_ok = (directory / IDS_FILE).is_file() and json.loads(
-                (directory / IDS_META).read_text()
-            ) == cache_identity(directory)
+            cache_ok = (directory / IDS_FILE).is_file() and json.loads((directory / IDS_META).read_text()) == cache_identity(directory)
         except (OSError, ValueError):
             cache_ok = False
-        out[name] = {
-            "exists": True,
-            "rows": int(prov.get("rows") or 0),
-            "cache_ok": cache_ok,
-        }
+        out[name] = {"exists": True, "rows": int(prov.get("rows") or 0), "cache_ok": cache_ok}
     return out
 
 
@@ -59,11 +49,9 @@ def caps() -> dict:
 
     from nnue import features, importer, train
 
-    return {
-        "ema": "ema" in train.Config.__dataclass_fields__,
-        "quiet": "quiet" in inspect.signature(importer.import_selfplay).parameters,
-        "version9": 9 in features.LAYOUTS,
-    }
+    return {"ema": "ema" in train.Config.__dataclass_fields__,
+            "quiet": "quiet" in inspect.signature(importer.import_selfplay).parameters,
+            "version9": 9 in features.LAYOUTS}
 
 
 def train_state(argv: list[str]) -> dict:
@@ -85,44 +73,27 @@ def train_state(argv: list[str]) -> dict:
     except OSError:
         pass
     if not (out / "latest.pt").is_file():
-        return {
-            "state": "mismatch",
-            "epochs_done": epochs_done,
-            "why": "no checkpoint to resume from",
-        }
+        return {"state": "mismatch", "epochs_done": epochs_done, "why": "no checkpoint to resume from"}
     saved = json.loads((out / "config.json").read_text())
     defaults = {f.name: f.default for f in fields(Config)}
     volatile = {"resume": "", "stop_epoch": 0}
     inputs = {
         "data": [list(part) for part in parts],
-        "datasets": {
-            name: sha256(data_dir(name) / "provenance.json") for name, _ in parts
-        },
+        "datasets": {name: sha256(data_dir(name) / "provenance.json") for name, _ in parts},
         "init_sha256": sha256(Path(config.init)) if config.init else None,
     }
-    mine, theirs = (
-        {**asdict(config), **volatile},
-        {**defaults, **saved["config"], **volatile},
-    )
+    mine, theirs = {**asdict(config), **volatile}, {**defaults, **saved["config"], **volatile}
     changed = sorted(k for k in mine if mine.get(k) != theirs.get(k))
     changed += [k for k, v in inputs.items() if saved.get(k) != v]
     if changed:
-        return {
-            "state": "mismatch",
-            "epochs_done": epochs_done,
-            "why": "changed: " + ", ".join(changed),
-        }
+        return {"state": "mismatch", "epochs_done": epochs_done, "why": "changed: " + ", ".join(changed)}
     return {"state": "resume", "epochs_done": epochs_done}
 
 
 def main() -> None:
     command, args = sys.argv[1], sys.argv[2:]
-    result = {
-        "net": lambda: net(args[0]),
-        "sets": lambda: sets(args),
-        "caps": caps,
-        "train-state": lambda: train_state(args),
-    }[command]()
+    result = {"net": lambda: net(args[0]), "sets": lambda: sets(args), "caps": caps,
+              "train-state": lambda: train_state(args)}[command]()
     print(json.dumps(result))
 
 

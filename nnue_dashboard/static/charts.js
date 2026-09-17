@@ -143,8 +143,10 @@
     el("rect", { x: left, y: y0 - 6, width: X(0.5) - left, height: y1 - y0 + 12, fill: "var(--red-soft)", opacity: 0.45 }, svg);
     el("rect", { x: X(0.5), y: y0 - 6, width: right - X(0.5), height: y1 - y0 + 12, fill: "var(--teal-soft)", opacity: 0.45 }, svg);
     const short = iw < 420;
-    text(svg, left + 6, 16, short ? "weaker" : "weaker than its start", { class: "strong-label" }).style.fill = "var(--red)";
-    text(svg, right - 6, 16, short ? "stronger" : "stronger than its start", { "text-anchor": "end", class: "strong-label" }).style.fill = "var(--teal)";
+    const versus = opts.versus || "its start";
+    const fits = !short && versus.length < 24;
+    text(svg, left + 6, 16, fits ? `weaker than ${versus}` : "weaker", { class: "strong-label" }).style.fill = "var(--red)";
+    text(svg, right - 6, 16, fits ? `stronger than ${versus}` : "stronger", { "text-anchor": "end", class: "strong-label" }).style.fill = "var(--teal)";
 
     for (const t of niceTicks(0.5 - half, 0.5 + half, Math.max(4, Math.round(iw / 80)))) {
       el("line", { x1: X(t), x2: X(t), y1: y1 + 6, y2: y1 + 11, class: "axis" }, svg);
